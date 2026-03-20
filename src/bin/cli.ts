@@ -55,7 +55,12 @@ program
       log.ai(`Processing (Graph): "${instruction}"`);
 
       // 🎓 INITIAL INVOCATION
-      let response = await agent.invoke(
+      if (!agent || typeof (agent as any).invoke !== "function") {
+        log.error(`Compiled Agent is missing .invoke(). Type: ${typeof agent}`);
+        console.log("Agent keys:", Object.keys(agent || {}));
+        process.exit(1);
+      }
+      let response = await (agent as any).invoke(
         { messages: [new HumanMessage(instruction)] },
         config,
       );
