@@ -50,7 +50,7 @@ program
 
       const threadId = "cli-user-graph";
       const config = { configurable: { thread_id: threadId }, recursionLimit: 50 };
-      const agent = await GraphAgentFactory.create(threadId);
+      const agent = await GraphAgentFactory.create({ threadId });
 
       log.ai(`Processing (Graph): "${instruction}"`);
 

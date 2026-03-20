@@ -13,39 +13,30 @@ export class LLMProvider {
 
   private constructor() {}
 
+  // Allow dynamic models for Multi-Agent supervisor pattern
+  public static createModel(config?: { modelName?: string, temperature?: number }): ChatVertexAI {
+    this.ensureCredentials();
+    return new ChatVertexAI({
+      model: config?.modelName || process.env.GOOGLE_CLOUD_MODEL_NAME || 'gemini-2.0-flash-lite-001',
+      temperature: config?.temperature ?? 0,
+    });
+  }
+
+  private static ensureCredentials() {
+    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (!credentialsPath) throw new Error('❌ GOOGLE_APPLICATION_CREDENTIALS no está definido en el .env');
+    const absoluteCredentialsPath = path.resolve(rootDir, credentialsPath);
+    if (!fs.existsSync(absoluteCredentialsPath)) throw new Error(`❌ No se encuentra el archivo de credenciales en: ${absoluteCredentialsPath}`);
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredentialsPath;
+  }
+
   public static getModel(): ChatVertexAI {
     if (!this.instance) {
-      // 2. Validación de variables críticas
-      const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-
-      if (!credentialsPath) {
-        throw new Error(
-          '❌ GOOGLE_APPLICATION_CREDENTIALS no está definido en el .env',
-        );
-      }
-
-      // 3. Convertir ruta relativa a ABSOLUTA (Truco para Windows)
-      // Si dice "./credentials.json", lo convierte a "C:\Users\...\credentials.json"
-      const absoluteCredentialsPath = path.resolve(rootDir, credentialsPath);
-
-      // Verificamos que el archivo JSON realmente exista antes de intentar conectar
-      if (!fs.existsSync(absoluteCredentialsPath)) {
-        throw new Error(
-          `❌ No se encuentra el archivo de credenciales en: ${absoluteCredentialsPath}`,
-        );
-      }
-
-      // Sobrescribimos la variable de entorno con la ruta absoluta para que la librería de Google la lea bien
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredentialsPath;
-
-      console.log(`📄 Usando credenciales: ${absoluteCredentialsPath}`);
-
+      this.ensureCredentials();
+      console.log(`📄 Usando credenciales: ${process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
       this.instance = new ChatVertexAI({
-        // Usamos tus variables específicas
-        model:
-          process.env.GOOGLE_CLOUD_MODEL_NAME || 'gemini-2.0-flash-lite-001',
+        model: process.env.GOOGLE_CLOUD_MODEL_NAME || 'gemini-2.0-flash-lite-001',
         temperature: 0,
-        // maxOutputTokens: 8192,
       });
     }
     return this.instance;

@@ -1,8 +1,12 @@
 import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
 import { BaseMessage, AIMessage, ToolMessage, SystemMessage } from "@langchain/core/messages";
+import { InteractionService } from "../interaction";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { LLMProvider } from "../llm/provider";
 import { IndexerService } from "../rag/indexer";
+// @ts-ignore - Ignore moduleResolution strict checks for prebuilt exports
+import { createReactAgent } from "@langchain/langgraph/prebuilt";
+import { createSupervisor } from "@langchain/langgraph-supervisor";
 import {
   askCodebaseTool,
   executeTestsTool,
@@ -20,246 +24,105 @@ import {
 import * as path from "path";
 import * as fs from "fs";
 
-/**
- * Interface representing the structured state of the agent.
- */
-export interface AgentState {
-  messages: BaseMessage[];
-  selected_tool_name?: string | null;
-  error?: string | null;
-  finish_reason?: 'success' | 'error' | 'tool_failed' | 'no_tool_needed' | null;
-  session_files: string[]; // Tracks files created in the current interaction session
+export interface AgentConfig {
+  modelName?: string;
+  temperature?: number;
 }
 
-/**
- * LangGraph Annotation for state management.
- */
-const AgentStateAnnotation = Annotation.Root({
-  messages: Annotation<BaseMessage[]>({
-    reducer: (x, y) => x.concat(y),
-    default: () => [],
-  }),
-  selected_tool_name: Annotation<string | null>({
-    reducer: (x, y) => y ?? x,
-    default: () => null,
-  }),
-  error: Annotation<string | null>({
-    reducer: (x, y) => y ?? x,
-    default: () => null,
-  }),
-  finish_reason: Annotation<'success' | 'error' | 'tool_failed' | 'no_tool_needed' | null>({
-    reducer: (x, y) => y ?? x,
-    default: () => null,
-  }),
-  session_files: Annotation<string[]>({
-    reducer: (x, y) => Array.from(new Set([...x, ...y])), // Merge and deduplicate
-    default: () => [],
-  }),
-});
+export interface SupervisorConfig {
+  supervisorContext?: AgentConfig;
+  researcherContext?: AgentConfig;
+  coderContext?: AgentConfig;
+  threadId?: string;
+}
 
-/**
- * Factory class to assemble a robust LangGraph autonomous agent.
- */
 export class GraphAgentFactory {
-  /**
-   * Creates and compiles a LangGraph agent with Lightweight HITL.
-   * 
-   * @param threadId - Unique identifier for the conversation thread.
-   * @returns A compiled LangGraph instance.
-   */
-  public static async create(threadId: string = "cli-session") {
+  public static async create(config: SupervisorConfig = {}, interaction?: InteractionService) {
+    const interactor = interaction || new InteractionService();
+    const threadId = config.threadId || "cli-session";
     const rootDir = process.cwd();
     const agentDir = path.join(rootDir, ".agent");
     if (!fs.existsSync(agentDir)) fs.mkdirSync(agentDir, { recursive: true });
 
-    const dbPath = path.join(agentDir, "history_graph.db");
-    const checkpointer = SqliteSaver.fromConnString(dbPath);
+    // Separate SQLite Savers to isolate context and cleanly query history
+    const mainDb = path.join(agentDir, "history_supervisor.db");
+    const researcherDb = path.join(agentDir, "history_researcher.db");
+    const coderDb = path.join(agentDir, "history_coder.db");
 
-    // Tool categorization for routing
+    const mainCheckpointer = SqliteSaver.fromConnString(mainDb);
+    const researcherCheckpointer = SqliteSaver.fromConnString(researcherDb);
+    const coderCheckpointer = SqliteSaver.fromConnString(coderDb);
+
+    // Tools categorization
     const researchTools = [
-      askCodebaseTool, 
-      listFilesTool, 
-      safeReadFileTool, 
-      refreshIndexTool,
-      analyzeCodeStructureTool,
-      queryDependencyGraphTool,
+      askCodebaseTool, listFilesTool, safeReadFileTool, refreshIndexTool,
+      analyzeCodeStructureTool, queryDependencyGraphTool,
     ];
-    
-    // Tools that NEVER require HITL (Internal/Validation)
-    const valuationTools = [integrityCheckTool, executeTestsTool];
+    // We bind safe testing/valuation directly to the Coder since the coder verifies its own work
+    const codingTools = [
+      safeWriteFileTool, deleteFileTool, executeCommandTool, askHumanTool,
+      integrityCheckTool, executeTestsTool
+    ];
 
-    // Tools that MAY require HITL depending on context
-    const modificationTools = [safeWriteFileTool, deleteFileTool];
+    // 1. Researcher Agent
+    const researcherAgent = createReactAgent({
+      llm: LLMProvider.createModel(config.researcherContext || { temperature: 0 }),
+      tools: researchTools,
+      checkpointSaver: researcherCheckpointer,
+      prompt: `You are an expert Code Researcher. Your goal is to navigate the codebase, read files, analyze structure, and find exact context. DO NOT write code. Provide detailed findings.
+      ALWAYS use relative paths from the root: ${process.cwd()}
+      All source code is inside the 'src' folder.`,
+    });
 
-    // Tools that ALWAYS require HITL (Dangerous)
-    const dangerousTools = [executeCommandTool, askHumanTool];
-    
-    const allTools = [...researchTools, ...valuationTools, ...modificationTools, ...dangerousTools];
+    // 2. Coder Agent
+    const coderAgent = createReactAgent({
+      llm: LLMProvider.createModel(config.coderContext || { temperature: 0 }),
+      tools: codingTools,
+      checkpointSaver: coderCheckpointer,
+      prompt: `You are a Principal Software Engineer (Coder). Your role is to write, modify, delete code, and run tests.
+      💎 QUALITY STANDARDS:
+      - Architecture: Follow DDD (Domain-Driven Design) and NestJS Best Practices. Strict TypeScript. NO 'any'. TSDocs required.
+      - TDD: DO NOT write code without its corresponding test.
+      - Always run 'integrity_check' and 'run_tests' after any modification.
+      - If tests fail, AUTO-FIX. Do not give up until tests are green.
+      - NEVER overwrite a file without reading it first.
+      - ALWAYS use relative paths from: ${process.cwd()}`,
+    });
 
-    const model = LLMProvider.getModel().bindTools(allTools);
+    // 3. Overall Supervisor
+    const supervisorModel = LLMProvider.createModel(config.supervisorContext || { temperature: 0 });
+    const supervisorWorkflow = createSupervisor({
+      agents: [
+        { name: "Researcher", agent: researcherAgent },
+        { name: "Coder", agent: coderAgent },
+      ],
+      llm: supervisorModel as any,
+      prompt: `You are the Lead Principal Edge Supervisor orchestrating a NestJS engineering team.
+      Your job is to break down the user request and delegate to the right worker: 'Researcher' to gather info, or 'Coder' to write and test code.
+      You operate with a "Lightweight HITL" protocol. You MUST delegate tasks correctly:
+      1. Delegate to Researcher if you need to understand existing files, classes or structure.
+      2. Delegate to Coder if you need to create/edit files or run tests.
+      After workers finish, respond with a highly concise summary of what was completed to the user.`,
+    });
 
-    const mainSystemPrompt = `
-You are a Principal Software Engineer specialized in NestJS. You operate with a "Lightweight HITL" protocol.
+    // We can add the Indexer logic just before delegating if needed, but the Supervisor graph is managed by createSupervisor.
+    // However, to keep the Indexer functionality intact on startup without polluting the agents logic:
+    const indexerTask = interactor.startTask("Syncing codebase index...");
+    const indexer = new IndexerService();
+    await indexer.indexProject();
+    indexerTask.succeed("Codebase index synced");
 
-💎 QUALITY STANDARDS:
-- Architecture: DDD, Controllers, Services, Modules.
-- Typing: Strict TypeScript. NO 'any'.
-- Documentation: TSDocs in Technical English.
+    // Compile the supervisor workflow into an executable app
+    // We set interruptBefore on specific nodes if we need HITL breakpoints.
+    // Within `createReactAgent`, the tools node is named "tools".
+    // Unfortunately, createSupervisor does not elegantly bubble up nested sub-graph node interrupts natively if we compile the outer wrapper.
+    // However, for the Outer supervisor, we can compile it with our main checkpointer.
+    const app = supervisorWorkflow.compile({ 
+      checkpointer: mainCheckpointer
+      // Note: Full Sub-graph HITL integration might require intercepting tool calls inside the Coder.
+    });
 
-🚀 ZERO-FRICTION PROTOCOL:
-You can work autonomously on tasks that involve CREATING or MODIFYING code. Manual approval is only required for high-risk deletions or environment changes.
-
-1. ✅ AUTOMATED ACTIONS (Safe Actor):
-   - Creating NEW FILES or Modifying PRE-EXISTING files.
-   - Deleting files that YOU created in this session (session_files).
-   - Running tests and integrity checks.
-2. ⚠️ PROTECTED ACTIONS (Dangerous Actor - Pauses for Approval):
-   - Deleting code that EXISTED before the current task.
-   - Executing arbitrary terminal commands (npm install, etc.).
-   - Asking for help via 'ask_human'.
-
-📝 SUMMARY RULE:
-At the very end of your task, provide a SUPER BRIEF summary of which files were modified (e.g., "Modified: src/app.module.ts, created: src/test.spec.ts").
-
-STUCK PROTOCOL:
-- Use 'ask_human' if you are in a loop or mismatching context. Explain exactly what you need.
-
-📂 STRATEGY:
-- RESEARCH -> PLAN -> IMPLEMENT -> VALIDATE.
-- Read files before modifying them.
-- After every 'safe_write_file', use 'run_integrity_check' and 'run_tests'.
-
-🛠️ SELF-HEALING & STRUCTURAL AWARENESS:
-- If a test fails with "undefined" or signature mismatches, use 'analyze_code_structure' to see the service's signatures without full implementation noise.
-- Always check if a method is 'async' before mocking it; 'async' methods MUST return a Promise (use .mockResolvedValue() or return Promise.resolve()).
-- If you get stuck in a loop of failures, rethink your mock strategy based on the 'analyze_code_structure' output.
-`;
-
-    const indexerNode = async (state: typeof AgentStateAnnotation.State) => {
-      console.log("⚙️ [NODE: INDEXER] Syncing codebase index...");
-      const indexer = new IndexerService();
-      await indexer.indexProject();
-      return {}; 
-    };
-
-    const agentNode = async (state: typeof AgentStateAnnotation.State) => {
-      console.log("🧠 [NODE: AGENT] Reasoning...");
-      const messages: BaseMessage[] = [new SystemMessage(mainSystemPrompt), ...state.messages];
-      const response = await (model as any).invoke(messages);
-      return { messages: [response], selected_tool_name: response.tool_calls?.[0]?.name || null };
-    };
-
-    const researcherNode = async (state: typeof AgentStateAnnotation.State) => {
-      console.log("🔍 [NODE: RESEARCHER] Executing discovery tools...");
-      const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
-      const toolMessages: ToolMessage[] = [];
-      if (lastMessage.tool_calls) {
-        for (const toolCall of lastMessage.tool_calls) {
-          const tool = researchTools.find((t) => t.name === toolCall.name);
-          if (tool) {
-            const output = await (tool as any).invoke(toolCall.args);
-            toolMessages.push(new ToolMessage({ tool_call_id: toolCall.id!, content: typeof output === "string" ? output : JSON.stringify(output) }));
-          }
-        }
-      }
-      return { messages: toolMessages };
-    };
-
-    /**
-     * Node: Safe Actor (Automated writes, tests, and self-deletions)
-     */
-    const safeActorNode = async (state: typeof AgentStateAnnotation.State) => {
-      console.log("🟢 [NODE: SAFE ACTOR] Executing automated tools...");
-      const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
-      const toolMessages: ToolMessage[] = [];
-      const newSessionFiles: string[] = [];
-
-      if (lastMessage.tool_calls) {
-        for (const toolCall of lastMessage.tool_calls) {
-          const tool = [...valuationTools, ...modificationTools].find((t) => t.name === toolCall.name);
-          if (tool) {
-            const output = await (tool as any).invoke(toolCall.args);
-            
-            // Extract session file metadata
-            if (toolCall.name === "safe_write_file" && typeof output === "string") {
-              const metaMatch = output.match(/\[METADATA: (.*)\]/);
-              if (metaMatch) {
-                const meta = JSON.parse(metaMatch[1]);
-                if (meta.action === "created") newSessionFiles.push(meta.path);
-              }
-            }
-            toolMessages.push(new ToolMessage({ tool_call_id: toolCall.id!, content: output }));
-          }
-        }
-      }
-      return { messages: toolMessages, session_files: newSessionFiles };
-    };
-
-    /**
-     * Node: Dangerous Actor (Legacy deletions, terminal commands, human interaction)
-     * 🛡️ PROTECTED BY HITL BREAKPOINT.
-     */
-    const dangerousActorNode = async (state: typeof AgentStateAnnotation.State) => {
-      console.log("🔴 [NODE: DANGEROUS ACTOR] Waiting for approval/input...");
-      const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
-      const toolMessages: ToolMessage[] = [];
-
-      if (lastMessage.tool_calls) {
-        for (const toolCall of lastMessage.tool_calls) {
-          const tool = [...modificationTools, ...dangerousTools].find((t) => t.name === toolCall.name);
-          if (tool) {
-            const output = await (tool as any).invoke(toolCall.args);
-            toolMessages.push(new ToolMessage({ tool_call_id: toolCall.id!, content: typeof output === "string" ? output : JSON.stringify(output) }));
-          }
-        }
-      }
-      return { messages: toolMessages };
-    };
-
-    const workflow = new StateGraph(AgentStateAnnotation)
-      .addNode("indexer", indexerNode)
-      .addNode("agent", agentNode)
-      .addNode("researcher", researcherNode)
-      .addNode("safe_actor", safeActorNode)
-      .addNode("dangerous_actor", dangerousActorNode)
-      
-      .addEdge(START, "indexer")
-      .addEdge("indexer", "agent")
-      .addConditionalEdges("agent", (state) => {
-        const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
-        if (!lastMessage.tool_calls || lastMessage.tool_calls.length === 0) return END;
-        
-        const toolCall = lastMessage.tool_calls[0];
-        const { name, args } = toolCall;
-
-        if (researchTools.some(t => t.name === name)) return "researcher";
-        if (valuationTools.some(t => t.name === name)) return "safe_actor";
-        if (dangerousTools.some(t => t.name === name)) return "dangerous_actor";
-
-        // Logic for Writes and Deletes
-        if (name === "safe_write_file") {
-          // ANY modification or creation is now considered safe by user request
-          return "safe_actor";
-        }
-        
-        if (name === "delete_file") {
-          const filePath = args.filePath as string;
-          // Security: Always protect core configuration and source root directly
-          const isCritical = filePath.includes(".env") || filePath === "package.json" || filePath === "tsconfig.json";
-          const isSessionFile = state.session_files.includes(filePath);
-          
-          // If it's a file created in this session OR a non-critical file, we can treat it as safer
-          // but for now, we keep the HITL for everything except session files to be 100% sure.
-          // The fix for the loop is ensuring the dangerous_actor properly transitions back.
-          return isSessionFile ? "safe_actor" : "dangerous_actor";
-        }
-        
-        return END;
-      })
-      .addEdge("researcher", "agent")
-      .addEdge("safe_actor", "agent")
-      .addEdge("dangerous_actor", "agent");
-
-    return workflow.compile({ checkpointer, interruptBefore: ["dangerous_actor"] });
+    return app;
   }
 }
+

@@ -1,4 +1,5 @@
 import { CreateAgentParams, createAgent } from "langchain"; // Usamos la versión estándar
+import { InteractionService } from "../interaction";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { InMemoryStore } from "@langchain/langgraph-checkpoint";
 import { LLMProvider } from "../llm/provider";
@@ -15,7 +16,7 @@ import * as path from "path";
 import * as fs from "fs";
 
 export class AgentFactory {
-  public static async create(threadId: string = "cli-session") {
+  public static async create(threadId: string = "cli-session", interaction?: InteractionService) {
     const rootDir = process.cwd();
 
     // Configuración de directorios
