@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import * as dotenv from "dotenv";
-dotenv.config(); // Load .env variables
+dotenv.config({ quiet: true }); // Load .env variables silently
 import { Command } from "commander";
 import chalk from "chalk";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
@@ -46,7 +46,7 @@ program
         return;
       }
 
-      log.sys("Initializing Agent in GRAPH mode (LangGraph)...");
+      // log.sys("Initializing Agent in GRAPH mode (LangGraph)...");
 
       const threadId = "cli-user-graph";
       const config = { configurable: { thread_id: threadId }, recursionLimit: 50 };
@@ -146,7 +146,7 @@ program
         console.log(chalk.cyan("------------------------------------\n"));
       }
 
-      log.sys("Tarea completada (Grafo).");
+      // log.sys("Tarea completada (Grafo).");
     } catch (error: any) {
       log.error("Error in graph agent:");
       log.error(error?.message || "Unknown error");

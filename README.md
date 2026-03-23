@@ -1,83 +1,72 @@
-# NestJS AI Agent Project Documentation
+# NestJS AI Agent
 
-This document provides a guide to using and understanding the NestJS AI Agent Project, tailored for project managers and developers. It prioritizes practical usage and results, followed by architectural and strategic details.
+An AI-powered autonomous agent for code analysis, understanding, and modification within NestJS applications. Built for Principal Software Engineer level tasks using RAG and a Multi-Agent architecture.
 
 ## Table of Contents
+- [Getting Started (Quick Setup)](#getting-started-quick-setup)
+- [Architecture](#architecture)
+- [Graph Flow](#graph-flow)
+- [RAG Strategy (X-Ray)](#rag-strategy-x-ray)
+- [Cost Tracking & Usage Metrics](#cost-tracking--usage-metrics)
+- [Development Standards](#development-standards)
+- [Persistence Strategy](#persistence-strategy)
+- [Project Structure](#project-structure)
 
-1.  [Usage & Commands](#usage--commands)
-2.  [Architecture](#architecture)
-    *   [Multi-Agent System](#multi-agent-system)
-        *   [Supervisor Agent](#supervisor-agent)
-        *   [Researcher Agent](#researcher-agent)
-        *   [Coder Agent](#coder-agent)
-3.  [Graph Flow](#graph-flow)
-4.  [RAG Strategy (X-Ray)](#rag-strategy-x-ray)
-5.  [Development Standards](#development-standards)
-    *   [Surgeon's Rule](#surgeons-rule)
-    *   [Golden Prompt](#golden-prompt)
-6.  [Persistence Strategy](#persistence-strategy)
-    *   [Isolated SQLite Persistence](#isolated-sqlite-persistence)
-7.  [Getting Started](#getting-started)
+## Getting Started (Quick Setup)
 
----
+### 1. Installation
+Install the package via npm:
+```bash
+npm install @dastbal/nestjs-ai-agent
+```
 
-## Usage & Commands
+### 2. Configuration
+Create a `.env` file in your project root with your Google Cloud Vertex AI credentials and chosen models:
 
-This section details how to interact with the AI Agent system, focusing on practical application and available commands.
+```dotenv
+# Vertex AI JSON Credentials Path
+GOOGLE_APPLICATION_CREDENTIALS="/absolute/path/to/your/keyfile.json"
 
-### Core Functionality
+# Models
+GOOGLE_CLOUD_MODEL_NAME="gemini-1.0-pro"
+EMBEDDING_MODEL_NAME="textembedding-004"
+```
 
-The AI Agent system is designed to assist with code analysis, understanding, and modification. Interaction is primarily through the command line interface (CLI), which allows triggering specific agent tasks.
+### 3. Usage
 
-### Running the Agent
+#### Import in NestJS
+Import the module into your `app.module.ts`:
 
-Before running, ensure you have completed the setup steps in the [Getting Started](#getting-started) section, including installing dependencies and configuring environment variables.
+```typescript
+import { AiAgentModule } from '@dastbal/nestjs-ai-agent';
 
-*   **Start the Application:**
-    ```bash
-    npm run start:dev
-    ```
-    This command starts the NestJS application in development mode. Upon startup, the agent typically initiates its indexing process to build its knowledge base from the codebase.
+@Module({
+  imports: [
+    AiAgentModule.forRoot(),
+  ],
+})
+export class AppModule {}
+```
 
-### CLI Commands
+#### Run the Agent (CLI)
+Interact with the agent directly using the built-in CLI:
 
-The agent exposes several commands via a CLI interface (conceptualized here, actual commands may vary based on implementation). These commands allow you to trigger specific agent actions.
+```bash
+# Start multi-agent mode
+npm run agent "Explícame la arquitectura de este proyecto"
+```
+*(The first run will automatically sync and index your codebase for RAG context).*
 
-*   **Indexing:** Manually trigger the RAG indexing process.
-    ```bash
-    # Example: Index the entire 'src' directory
-    npm run cli -- index --dir src
-    ```
-    *   **Purpose:** Updates the agent's knowledge base with the latest code changes. Essential for ensuring the agent has up-to-date information for analysis and refactoring.
+#### Advanced CLI Commands (Optional)
+If your CLI is configured for standalone tool execution, you can trigger them manually:
 
-*   **Research:** Utilize the Researcher agent to analyze specific code files or components.
-    ```bash
-    # Example: Analyze a specific file
-    npm run cli -- research src/my-component.ts
+```bash
+# Manually trigger RAG indexing
+npm run cli -- index --dir src
 
-    # Example: Analyze dependencies of a file
-    npm run cli -- research --dependencies src/my-service.ts
-    ```
-    *   **Purpose:** Provides insights into code structure, dependencies, and potential issues. Useful for understanding the impact of changes or debugging.
-
-*   **Code Actions (Refactoring, Generation):** Instruct the Coder agent to perform code modifications or generation tasks.
-    ```bash
-    # Example: Refactor a function with specific instructions
-    npm run cli -- code refactor --file src/utils.ts --prompt "Refactor the 'calculateTotal' function to improve performance and add error handling."
-
-    # Example: Generate a new DTO based on requirements
-    npm run cli -- code generate --type dto --prompt "Create a DTO for user profile data including name, email, and registration date."
-    ```
-    *   **Purpose:** Automates code improvements, refactoring, and generation based on natural language instructions, adhering to project standards.
-
-*   **Supervisor Commands:** (If applicable) Commands to manage agent workflows or complex tasks.
-    ```bash
-    # Example: Run a complex analysis workflow
-    npm run cli -- supervisor run-workflow --workflow analyze-feature --params '{"feature": "user-auth"}'
-    ```
-    *   **Purpose:** Orchestrates multi-step processes involving different agents.
-
-**Note:** The exact CLI commands and their parameters will depend on the specific implementation and may require consulting additional project-specific documentation or source code.
+# Use Researcher to analyze dependencies
+npm run cli -- research src/my-service.ts
+```
 
 ---
 
@@ -142,7 +131,7 @@ The Researcher agent employs an advanced RAG (Retrieval-Augmented Generation) st
 2.  **Semantic Search & Retrieval:**
     *   When a query is made, the Researcher generates an embedding for the query and performs a vector similarity search against the indexed code chunks stored in the `AgentDB`.
     *   This retrieves the most semantically relevant code segments.
-    *   **Key Files:** `src/core/rag/retriever.ts` (Implements the `query` method for semantic search).
+    *   **Key Files:** `src/core/rag/retriever.ts` (Implements `query` method for semantic search).
 3.  **Context Augmentation:**
     *   To provide rich context, the retrieved code chunks are augmented with additional information:
         *   **File Dependencies:** The import graph for the file containing the chunk is retrieved.
@@ -153,6 +142,29 @@ The Researcher agent employs an advanced RAG (Retrieval-Augmented Generation) st
     *   All gathered information (query, relevant chunks, scores, dependencies, skeletons) is compiled into a structured "RAG ANALYSIS REPORT". This comprehensive report serves as the input context for the LLM, enabling more informed responses and actions.
 
 This "X-Ray" strategy allows the agents to "see" into the codebase's structure and semantics, facilitating accurate analysis and modification.
+
+---
+
+## Cost Tracking & Usage Metrics
+
+The system now includes built-in real-time cost tracking and token usage monitoring for transparency and resource management.
+
+### Features
+- **Real-time Monitoring**: See exact token counts (prompt/completion) and USD cost for every agent action.
+- **Configurable Pricing**: Easily update model prices via `llm-pricing.json` in the root directory.
+- **DDD Implementation**: Uses `Money` and `TokenUsage` Value Objects for high-precision calculations.
+- **Visual Feedback**: Integration with the CLI spinner shows status and cost metrics upon success.
+
+### Configuration (`llm-pricing.json`)
+You can customize the cost per million tokens for any model:
+```json
+{
+  "gemini-2.0-flash-lite-001": {
+    "inputPricePerMillion": 0.1,
+    "outputPricePerMillion": 0.3
+  }
+}
+```
 
 ---
 
@@ -218,102 +230,6 @@ This strategy ensures that each agent operates with its own clean state, enhanci
 
 ---
 
-## Getting Started
-
-This section provides instructions for setting up and running the AI Agent project.
-
-### Prerequisites
-
-*   **Node.js:** Version 18.x or higher is recommended.
-*   **Google Cloud Account:** Access to Google Cloud Platform is required for using Vertex AI services.
-*   **Google Cloud SDK:** Installed and configured.
-
-### 1. Install Dependencies
-
-Navigate to the project's root directory in your terminal and run the following command to install all necessary Node.js dependencies:
-
-```bash
-npm install
-```
-
-### 2. Configure Google Vertex AI Credentials
-
-This project uses Google Vertex AI for its language models and embeddings. You need to provide your service account credentials.
-
-*   **Create a Service Account:** If you haven't already, create a service account in your Google Cloud project with the necessary roles (e.g., Vertex AI User). Download the service account key as a JSON file.
-*   **Set Environment Variable:** Set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the absolute path of your downloaded JSON key file.
-
-    **Example (Linux/macOS):**
-    ```bash
-    export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/keyfile.json"
-    ```
-
-    **Example (Windows Command Prompt):**
-    ```bash
-    set GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\your\keyfile.json"
-    ```
-
-    **Example (Windows PowerShell):**
-    ```powershell
-    $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\your\keyfile.json"
-    ```
-    *Note: For persistent configuration, add this line to your shell's profile file (e.g., `.bashrc`, `.zshrc`, or system environment variables).*
-
-### 3. Environment Variables (`.env` file)
-
-Create a `.env` file in the root directory of the project and populate it with your specific configuration.
-
-**Example `.env` file:**
-
-```dotenv
-# Google Cloud Project Configuration
-GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
-GOOGLE_CLOUD_REGION="us-central1" # e.g., us-central1
-
-# Vertex AI Model Configuration
-GOOGLE_CLOUD_MODEL_NAME="gemini-1.0-pro" # Or other compatible model like 'gemini-1.5-pro-preview-0414'
-EMBEDDING_MODEL_NAME="textembedding-004" # Default embedding model
-
-# Agent Configuration
-AGENT_SOURCE_DIR="src" # Directory to index for RAG
-
-# Persistence Configuration
-PERSISTENCE_PATH=".agent/memory.db" # Path for the SQLite database
-```
-
-*Replace placeholders like `"your-gcp-project-id"` and `"us-central1"` with your actual Google Cloud project details and desired region.*
-
-### 4. Running the Agent
-
-Once dependencies are installed and environment variables are configured, you can run the agent using the NestJS CLI.
-
-*   **Start the application:**
-    ```bash
-    npm run start:dev
-    ```
-    This command will compile the TypeScript code and start the NestJS application in development mode. The agent will typically begin its indexing process upon startup.
-
-*   **Interacting with the Agent:**
-    The primary interaction with the agent is expected to be through its core functionalities, which might be exposed via:
-    *   **CLI Commands:** Specific commands might be available to trigger indexing, run analysis tasks, or perform code modifications. (e.g., `npm run cli -- index`, `npm run cli -- analyze src/my-file.ts`). *Note: The exact CLI commands depend on the implementation of the CLI interface.*
-    *   **Programmatic Usage:** You can import and use the agent services (Supervisor, Researcher, Coder) within other parts of your application or in separate scripts.
-
-    **Example CLI Interaction (Conceptual):**
-    Assuming a CLI script is set up (e.g., in `src/cli.ts`):
-
-    ```bash
-    # Trigger a full indexing of the 'src' directory
-    npm run cli -- index --dir src
-
-    # Ask the Researcher to analyze a specific file
-    npm run cli -- research src/my-component.ts
-
-    # Instruct the Coder to refactor a function (requires more complex prompt setup)
-    npm run cli -- code refactor --file src/utils.ts --prompt "Refactor the 'calculateTotal' function to improve performance and add error handling."
-    ```
-
-    *Refer to the specific implementation details or additional documentation for available CLI commands and their usage.*
-
 ## Project Structure
 
 ```
@@ -346,7 +262,6 @@ Once dependencies are installed and environment variables are configured, you ca
 │   ├── interaction/
 │   │   ├── interaction.service.ts     # Service for user interaction (spinners, etc.)
 │   │   └── ora-spinner-adapter.ts     # Adapter for ora spinner
-│   ├── cli.ts                         # Example CLI entry point (if implemented)
 │   ├── app.module.ts
 │   └── main.ts
 ├── .agent/
@@ -357,8 +272,4 @@ Once dependencies are installed and environment variables are configured, you ca
 ├── tsconfig.json
 └── package.json
 ```
-*Note: The project structure is illustrative and may vary based on the exact implementation. The CLI interaction examples are conceptual and depend on a dedicated CLI script being implemented.*
-
----
-
-*This README has been updated with a detailed 'Getting Started' guide, including dependency installation, Google Vertex AI credential configuration, an example `.env` file, and guidance on running the agent via the CLI.*
+*Note: The project structure is illustrative and may vary based on the exact implementation.*

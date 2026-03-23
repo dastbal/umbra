@@ -1,5 +1,7 @@
 import { Annotation } from "@langchain/langgraph";
 import { BaseMessage } from "@langchain/core/messages";
+import { TokenUsage } from "../../domain/value-objects/token-usage";
+import { Money } from "../../domain/value-objects/money";
 
 export interface AgentConfig {
   modelName?: string;
@@ -34,5 +36,23 @@ export const GraphAnnotation = Annotation.Root({
   session_files: Annotation<string[]>({
     reducer: (x, y) => Array.from(new Set([...x, ...y])),
     default: () => [],
+  }),
+  accumulatedTokens: Annotation<TokenUsage>({
+    reducer: (state, update) => {
+      if (!update) return state;
+      const stateUsage = new TokenUsage((state as any).promptTokens || 0, (state as any).completionTokens || 0);
+      const updateUsage = new TokenUsage((update as any).promptTokens || 0, (update as any).completionTokens || 0);
+      return stateUsage.add(updateUsage);
+    },
+    default: () => new TokenUsage(0, 0),
+  }),
+  accumulatedCost: Annotation<Money>({
+    reducer: (state, update) => {
+      if (!update) return state;
+      const stateObj = new Money((state as any).amount || 0, (state as any).currency || 'USD');
+      const updateObj = new Money((update as any).amount || 0, (update as any).currency || 'USD');
+      return stateObj.add(updateObj);
+    },
+    default: () => new Money(0, 'USD'),
   }),
 });

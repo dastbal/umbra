@@ -33,7 +33,7 @@ export class LLMProvider {
   public static getModel(): ChatVertexAI {
     if (!this.instance) {
       this.ensureCredentials();
-      console.log(`📄 Usando credenciales: ${process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
+
       this.instance = new ChatVertexAI({
         model: process.env.GOOGLE_CLOUD_MODEL_NAME || 'gemini-2.0-flash-lite-001',
         temperature: 0,

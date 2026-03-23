@@ -12,6 +12,10 @@ import {
   queryDependencyGraphTool,
 } from "../../tools";
 import { AgentConfig, GraphAnnotation } from "./types";
+import { CostTrackerService } from "../../application/services/cost-tracker.service";
+import { LlmPricingConfig } from "../../infrastructure/config/llm-pricing.config";
+import { TokenUsage } from "../../domain/value-objects/token-usage";
+import { Money } from "../../domain/value-objects/money";
 
 /**
  * Creates and compiles the Researcher Sub-graph
@@ -45,9 +49,26 @@ export function createResearcherGraph(
       
       - Root is ${process.cwd()} (src/). Use RELATIVE PATHS only.`
     );
-    const response = await researcherModel.invoke([sysPrompt, ...state.messages] as any);
-    task.succeed("Researcher investigation reasoning complete");
-    return { messages: [response] };
+    const pricingConfig = new LlmPricingConfig();
+    const costTracker = new CostTrackerService(pricingConfig);
+    try {
+      const response = await researcherModel.invoke([sysPrompt, ...state.messages] as any);
+      
+      let tokens = new TokenUsage(0, 0);
+      let cost = new Money(0, 'USD');
+      const metadata = (response as any).usage_metadata;
+      if (metadata) {
+         tokens = new TokenUsage(metadata.input_tokens || 0, metadata.output_tokens || 0);
+         const model = context?.modelName || process.env.GOOGLE_CLOUD_MODEL_NAME || 'gemini-1.5-pro';
+         cost = costTracker.calculateCost(model, tokens);
+      }
+      
+      task.succeed(`Researcher investigation reasoning complete [Tokens: ${tokens.promptTokens} in / ${tokens.completionTokens} out | Cost: ${cost.amount.toFixed(4)} USD]`);
+      return { messages: [response], accumulatedTokens: tokens, accumulatedCost: cost };
+    } catch (error: any) {
+      task.fail(`Researcher LLM Error: ${error.message}`);
+      return { messages: [new SystemMessage(`[SYSTEM ERROR]: API Crash. Check your previous output formats or tool calls. Error: ${error.message}`)] };
+    }
   };
 
   const researcherToolsNode = async (state: typeof GraphAnnotation.State) => {
@@ -76,7 +97,8 @@ export function createResearcherGraph(
     .addNode("researcher_tools", researcherToolsNode)
     .addEdge(START, "researcher_agent")
     .addConditionalEdges("researcher_agent", (state) => {
-      const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
+      const lastMessage = state.messages[state.messages.length - 1] as any;
+      if (lastMessage._getType() === "system" && lastMessage.content.toString().startsWith("[SYSTEM ERROR]")) return "researcher_agent"; // Auto-recovery loop
       return (lastMessage.tool_calls && lastMessage.tool_calls.length > 0) ? "researcher_tools" : END;
     })
     .addEdge("researcher_tools", "researcher_agent");

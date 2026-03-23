@@ -1,12 +1,19 @@
 /**
  * Represents a running task indicator in the terminal.
  */
+import { TokenUsage } from "../../domain/value-objects/token-usage";
+import { Money } from "../../domain/value-objects/money";
+
+export interface TaskSuccessMetadata {
+  tokens?: TokenUsage;
+  cost?: Money;
+}
 export interface TaskIndicator {
   /** Updates the text of the current task */
   update(text: string): void;
   
   /** Completes the task successfully with an optional specific message */
-  succeed(text?: string): void;
+  succeed(text?: string, metadata?: TaskSuccessMetadata): void;
   
   /** Fails the task with an optional specific error message */
   fail(text?: string): void;

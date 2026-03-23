@@ -30,7 +30,7 @@ export class AgentDB {
         fs.mkdirSync(dbDir, { recursive: true });
       }
 
-      console.log(`💾 Connecting to Local State DB: ${dbPath}`);
+
 
       this.instance = new Database(dbPath);
 

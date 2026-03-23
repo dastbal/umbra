@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { LoggerPort } from '../domain/logger.port';
-import { SpinnerPort, TaskIndicator } from '../domain/spinner.port';
+import { SpinnerPort, TaskIndicator, TaskSuccessMetadata } from '../domain/spinner.port';
 import { ChalkLoggerAdapter } from '../infrastructure/chalk-logger.adapter';
 import { OraSpinnerAdapter } from '../infrastructure/ora-spinner.adapter';
 
@@ -89,8 +89,8 @@ export class InteractionService {
     const originalFail = this.currentTask.fail.bind(this.currentTask);
     const originalStop = this.currentTask.stop.bind(this.currentTask);
 
-    this.currentTask.succeed = (msg?: string) => {
-      originalSucceed(msg);
+    this.currentTask.succeed = (msg?: string, metadata?: TaskSuccessMetadata) => {
+      originalSucceed(msg, metadata);
       this.currentTask = null;
     };
 
