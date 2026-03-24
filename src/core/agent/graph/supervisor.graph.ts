@@ -1,5 +1,7 @@
 import { StateGraph, START, END, CompiledStateGraph } from "@langchain/langgraph";
 import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages";
+import { prepareMessagesForLlm } from "./utils";
+
 import { InteractionService } from "../../interaction";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { LLMProvider } from "../../llm/provider";
@@ -79,7 +81,8 @@ export function createSupervisorGraph(
     const pricingConfig = new LlmPricingConfig();
     const costTracker = new CostTrackerService(pricingConfig);
     try {
-      routingResult = await structuredModel.invoke([new SystemMessage(sysPrompt), ...state.messages] as any);
+      routingResult = await structuredModel.invoke(prepareMessagesForLlm(new SystemMessage(sysPrompt), state.messages) as any);
+
     } catch (error: any) {
       task.fail(`Supervisor LLM Error: ${error.message}`);
       return { 

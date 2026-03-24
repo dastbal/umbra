@@ -1,5 +1,7 @@
 import { StateGraph, START, END } from "@langchain/langgraph";
 import { AIMessage, ToolMessage, SystemMessage } from "@langchain/core/messages";
+import { prepareMessagesForLlm } from "./utils";
+
 import { InteractionService } from "../../interaction";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { LLMProvider } from "../../llm/provider";
@@ -52,7 +54,8 @@ export function createResearcherGraph(
     const pricingConfig = new LlmPricingConfig();
     const costTracker = new CostTrackerService(pricingConfig);
     try {
-      const response = await researcherModel.invoke([sysPrompt, ...state.messages] as any);
+      const response = await researcherModel.invoke(prepareMessagesForLlm(sysPrompt, state.messages) as any);
+
       
       let tokens = new TokenUsage(0, 0);
       let cost = new Money(0, 'USD');
