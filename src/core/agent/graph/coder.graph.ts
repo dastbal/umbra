@@ -6,12 +6,8 @@ import { InteractionService } from "../../interaction";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { LLMProvider } from "../../llm/provider";
 import {
-  executeTestsTool,
-  integrityCheckTool,
-  safeWriteFileTool,
-  executeCommandTool,
-  askHumanTool,
-  deleteFileTool
+  executeTestsTool, integrityCheckTool, safeWriteFileTool,
+  executeCommandTool, askHumanTool, deleteFileTool
 } from "../../tools";
 import { AgentConfig, GraphAnnotation } from "./types";
 import { CostTrackerService } from "../../application/services/cost-tracker.service";
@@ -35,42 +31,52 @@ export function createCoderGraph(
 
   const coderAgentNode = async (state: typeof GraphAnnotation.State) => {
     const task = interactor.startTask("Coder Reasoning...");
+    
     const sysPrompt = new SystemMessage(
       `You are a Principal Software Engineer (Coder) specialized in NestJS.
-      
-      💎 QUALITY STANDARDS:
-      - DDD & NestJS: Follow entities, DTOs (with class-validator), and clean modules.
-      - Surgeon's Rule: READ-BEFORE-WRITE. Never overwrite without understanding the logic first.
-      - Anti-Regression: Preserve TSDocs, comments, and unrelated business logic.
-      
+
+      💎 QUALITY STANDARDS (UNBREAKABLE):
+      - DDD & Architecture: Follow Domain-Driven Design and clean modules.
+      - Surgeon's Rule (READ-BEFORE-WRITE): NEVER overwrite a file without reading it first via 'safe_read_file'. Understand local logic, TSDocs, and dependencies.
+      - Preservation First: DO NOT delete existing TSDocs, helpful comments, or business logic. Augment and refine, don't destroy.
+      - Anti-Regression: Ensure you don't lose edge-case handling. Research before removing any piece of code.
+
       🧪 TESTING PROTOCOL (MANDATORY):
-      1. No Regressions: Run 'integrity_check' and 'run_tests' after any write.
-      2. Auto-Fix: If tests fail, fix it yourself. Ask for help only after 3 tries.
+      1. Spec First: When creating a new feature, you MUST create the corresponding '.spec.ts'.
+      2. No Regressions: Run 'integrity_check' and 'run_tests' after any write.
+      3. Auto-Fix: If tests fail, analyze output and fix it yourself. Do not give up easily.
       
-      - Strict TypeScript. NO 'any'.
+      - Strict TypeScript. THE USE OF 'any' IS FORBIDDEN.
       - No mass deletions.
-      - Relative paths in ${process.cwd()} (src/).`
+      - Root: ${process.cwd()} (src/). Use RELATIVE PATHS only.`
     );
+
     const pricingConfig = new LlmPricingConfig();
     const costTracker = new CostTrackerService(pricingConfig);
     try {
-      const response = await coderModel.invoke(prepareMessagesForLlm(sysPrompt, state.messages) as any);
+      const response = await coderModel.invoke(
+        prepareMessagesForLlm(sysPrompt, state.messages, "Coder") as any
+      );
 
       
       let tokens = new TokenUsage(0, 0);
       let cost = new Money(0, 'USD');
-      const metadata = (response as any).usage_metadata;
+      const msg = response as any;
+      const metadata = msg.usage_metadata || (msg.response_metadata ? msg.response_metadata.usage : undefined);
+      
       if (metadata) {
-         tokens = new TokenUsage(metadata.input_tokens || 0, metadata.output_tokens || 0);
+         tokens = new TokenUsage(metadata.input_tokens || metadata.prompt_tokens || 0, metadata.output_tokens || metadata.completion_tokens || 0);
          const model = context?.modelName || process.env.GOOGLE_CLOUD_MODEL_NAME || 'gemini-1.5-pro';
          cost = costTracker.calculateCost(model, tokens);
       }
+
       
       task.succeed(`Coder reasoning complete [Tokens: ${tokens.promptTokens} in / ${tokens.completionTokens} out | Cost: ${cost.amount.toFixed(4)} USD]`);
+
       return { messages: [response], accumulatedTokens: tokens, accumulatedCost: cost };
     } catch (error: any) {
       task.fail(`Coder LLM Error: ${error.message}`);
-      return { messages: [new SystemMessage(`[SYSTEM ERROR]: API Crash. Check your previous output formats or tool calls. Error: ${error.message}`)] };
+      return { messages: [new SystemMessage(`[SYSTEM ERROR]: API Crash in Coder. Error: ${error.message}`)] };
     }
   };
 
@@ -129,7 +135,7 @@ export function createCoderGraph(
     .addEdge(START, "coder_agent")
     .addConditionalEdges("coder_agent", (state) => {
       const lastMessage = state.messages[state.messages.length - 1] as any;
-      if (lastMessage._getType() === "system" && lastMessage.content.toString().startsWith("[SYSTEM ERROR]")) return "coder_agent"; // Auto-recovery loop
+      if (lastMessage._getType() === "system" && lastMessage.content.toString().startsWith("[SYSTEM ERROR]")) return "coder_agent";
       if (!lastMessage.tool_calls || lastMessage.tool_calls.length === 0) return END;
       const toolCall = lastMessage.tool_calls[0];
       if (safeCodingTools.some(t => t.name === toolCall.name)) return "safe_actor";
@@ -139,9 +145,5 @@ export function createCoderGraph(
     .addEdge("safe_actor", "coder_agent")
     .addEdge("dangerous_actor", "coder_agent");
 
-  // HITL Pause on exactly dangerous_actor inside Coder graph
-  return coderGraph.compile({
-    checkpointer,
-    interruptBefore: ["dangerous_actor"]
-  });
+  return coderGraph.compile({ checkpointer, interruptBefore: ["dangerous_actor"] });
 }
