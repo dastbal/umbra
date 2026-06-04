@@ -55,6 +55,7 @@ export function createSupervisorGraph(
     - DISCOVERY: ALWAYS delegate to 'Researcher' first to map the codebase DNA and find existing patterns.
     - IMPLEMENTATION: Delegate to 'Coder' ONLY when the context/files to modify are clearly identified.
     - VALIDATION: After coding, ensure the result is summarized and verified.
+    - NO INFINITE LOOPS: If a Specialist (Researcher/Coder) repeats their previous answer or fails to provide new information, you MUST 'FINISH' and explain the limitation.
 
     - Root: ${process.cwd()}. Use RELATIVE PATHS only (e.g., 'src/...').`;
 
@@ -70,6 +71,10 @@ export function createSupervisorGraph(
         prepareMessagesForLlm(new SystemMessage(sysPrompt), state.messages, "Supervisor") as any
       );
       routingResult = routingFull.parsed;
+
+      if (!routingResult) {
+        throw new Error("Model failed to provide a valid routing decision.");
+      }
     } catch (error: any) {
       task.fail(`Supervisor LLM Error: ${error.message}`);
       return { 
@@ -89,17 +94,10 @@ export function createSupervisorGraph(
        cost = costTracker.calculateCost(model, tokens);
     }
 
-
     let nextAgent = routingResult.assignee || "FINISH";
     const instruction = routingResult.instruction || "Finalizing task.";
 
-    // Logic fallback to prevent premature finishing
-    if (nextAgent === "FINISH" && !state.messages.some(m => m.content.toString().includes('[Coder Result]'))) {
-      const history = state.messages.map(m => m.content.toString().toLowerCase()).join(" ");
-      if (history.includes('crea') || history.includes('update') || history.includes('refactor') || history.includes('arregla')) {
-         nextAgent = "Researcher";
-      }
-    }
+    // [FIX]: Removed dangerous fallback loop. Added loop detection check here if needed, but for now relies on Instruction in Prompt.
 
     const decisionMsg = new AIMessage({
       content: `[Supervisor Decision]: ${nextAgent}. Reasoning: ${instruction}`,
@@ -115,7 +113,6 @@ export function createSupervisorGraph(
     }
     
     task.succeed(`Supervisor decided: ${nextAgent} [Tokens: ${tokens.promptTokens} in / ${tokens.completionTokens} out | Cost: ${cost.amount.toFixed(4)} USD]`);
-
     return { messages, next_agent: nextAgent, accumulatedTokens: tokens, accumulatedCost: cost };
   };
 

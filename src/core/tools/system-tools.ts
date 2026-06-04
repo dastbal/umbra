@@ -36,11 +36,11 @@ export const executeCommandTool = tool(
     const forbiddenPatterns = [/rm\s+-rf\s+\//, /mkfs/, /dd\s+if/];
     if (forbiddenPatterns.some((pattern) => pattern.test(command))) return "❌ Error: Command blocked for security reasons.";
     try {
-      const { stdout, stderr } = await execAsync(command, { cwd: rootDir });
+      const { stdout, stderr } = await execAsync(command, { cwd: rootDir, timeout: 30000 });
       log.tool("✅ Command executed successfully.");
       return `✅ SUCCESS: Command executed.\nSTDOUT: ${stdout}\nSTDERR: ${stderr}`;
     } catch (error: any) {
-      log.error(`Command failed: ${command}`);
+      log.error(`Command failed or timed out: ${command}`);
       const output = error.stdout || error.stderr || error.message;
       return `❌ ERROR: Command failed.\n${output}`;
     }

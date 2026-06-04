@@ -7,6 +7,7 @@ import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import * as readline from "readline";
 import { AgentFactory } from "../core/agent/factory";
 import { GraphAgentFactory } from "../core/agent/graph-factory";
+import { AgentDB } from "../core/state/db";
 
 const program = new Command();
 
@@ -17,6 +18,18 @@ const log = {
   error: (msg: string) => console.log(chalk.red("❌ [ERR]: ") + msg),
   hitl: (msg: string) => console.log(chalk.yellow("✋ [WAITING FOR APPROVAL]: ") + msg),
 };
+
+/**
+ * Ensures clean exit and database closing
+ */
+const cleanupAndExit = () => {
+  log.sys("Shutting down... Closing DB connections.");
+  AgentDB.close();
+  process.exit(0);
+};
+
+process.on("SIGINT", cleanupAndExit);
+process.on("SIGTERM", cleanupAndExit);
 
 /**
  * Helper to ask for user confirmation in the CLI.
@@ -189,12 +202,115 @@ program
   .description("Same as default: use the Graph-based agent")
   .argument("<instruction>", "Technical instruction for the agent")
   .action(async (instruction: string) => {
-    // Just delegate to the main root action logic (we can just call it or keep it separate)
-    // For simplicity, I'll repeat the action or refactor it.
-    // Let's just point both to the same logic by calling the root action or similar.
-    // Actually, program.action handles the root, and subcommands handle subcommands.
-    // I will just keep the logic here as well for now to avoid complexity in command registration.
     program.parse([process.argv[0], process.argv[1], instruction]);
+  });
+
+program
+  .command("chat")
+  .description("Inicia un chat interactivo continuo con el agente")
+  .action(async () => {
+    try {
+      log.sys("Initializing Agent in GRAPH mode (Interactive Chat)...");
+      const threadId = "cli-user-chat";
+      const config = { configurable: { thread_id: threadId }, recursionLimit: 50 };
+      const agent = await GraphAgentFactory.create({ threadId });
+
+      console.log(chalk.cyan("======================================="));
+      console.log(chalk.cyan(" 🤖 NestJS AI Agent - Chat Interactivo"));
+      console.log(chalk.cyan("======================================="));
+      console.log(chalk.gray("Escribe 'exit' o 'quit' para salir.\n"));
+
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+      const askLoop = () => {
+        rl.question(chalk.blueBright("Tú: "), async (input) => {
+          if (!input || input.trim().length === 0) {
+            return askLoop();
+          }
+          if (input.toLowerCase() === "exit" || input.toLowerCase() === "quit") {
+            rl.close();
+            cleanupAndExit();
+          }
+
+          try {
+            let response = await (agent as any).invoke(
+              { messages: [new HumanMessage(input)] },
+              config,
+            );
+
+            while (true) {
+              const state = await agent.getState(config);
+              if (!state.next || state.next.length === 0) break;
+              
+              if (state.next.includes("dangerous_actor")) {
+                 const lastMessage = state.values.messages[state.values.messages.length - 1] as AIMessage;
+                 if (lastMessage.tool_calls && lastMessage.tool_calls.length > 0) {
+                    const toolCall = lastMessage.tool_calls[0];
+                    if (toolCall.name === "ask_human") {
+                      console.log(chalk.magenta("\n❓ [AGENT NEEDS HELP]:"));
+                      console.log(chalk.white(`   "${toolCall.args.question}"`));
+                      
+                      const userResponse = await new Promise<string>((resolve) => {
+                        rl.question(chalk.magentaBright("\nYour response: "), resolve);
+                      });
+
+                      const toolMessage = new ToolMessage({
+                        tool_call_id: toolCall.id!,
+                        content: userResponse,
+                      });
+                      await agent.updateState(config, { messages: [toolMessage] });
+                      response = await agent.invoke(null, config);
+                    } else {
+                      console.log(chalk.yellow("\n⚠️  [HITL] The Agent wants to take the following actions:"));
+                      lastMessage.tool_calls.forEach(call => {
+                        console.log(chalk.white(`   - Tool: ${chalk.bold(call.name)}`));
+                        console.group();
+                        console.log(chalk.gray(`Arguments: ${JSON.stringify(call.args, null, 2)}`));
+                        console.groupEnd();
+                      });
+
+                      const confirmed = await new Promise<boolean>((resolve) => {
+                        rl.question(chalk.yellowBright("Do you approve these actions? (y/n): "), (ans) => {
+                          resolve(ans.toLowerCase() === "y" || ans.toLowerCase() === "yes");
+                        });
+                      });
+                      
+                      if (confirmed) {
+                        const toolMessages = lastMessage.tool_calls.map(tc => new ToolMessage({
+                           tool_call_id: tc.id!,
+                           content: "✅ Approved by user. Executing now..."
+                        }));
+                        await agent.updateState(config, { messages: toolMessages });
+                        response = await agent.invoke(null, config);
+                      } else {
+                        log.error("Action denied by user. Task aborted.");
+                        break;
+                      }
+                    }
+                 }
+              } else {
+                 response = await agent.invoke(null, config);
+              }
+            }
+
+            const lastMessage = response.messages[response.messages.length - 1];
+            if (lastMessage && lastMessage.content) {
+              console.log("\n" + chalk.green("🤖 Agente: ") + lastMessage.content + "\n");
+            }
+          } catch (error: any) {
+             log.error("Error in chat loop: " + (error?.message || "Unknown error"));
+          }
+
+          askLoop();
+        });
+      };
+
+      askLoop();
+
+    } catch (error: any) {
+      log.error("Error starting chat:");
+      log.error(error?.message || "Unknown error");
+    }
   });
 
 program.parse(process.argv);

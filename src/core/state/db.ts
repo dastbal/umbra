@@ -43,6 +43,20 @@ export class AgentDB {
   }
 
   /**
+   * Gracefully closes the active database connection.
+   */
+  public static close(): void {
+    if (this.instance) {
+      try {
+        this.instance.close();
+      } catch (err) {
+        console.error('Error closing AgentDB:', err);
+      }
+      this.instance = undefined as any;
+    }
+  }
+
+  /**
    * Initializes the database tables based on our architectural plan.
    * 1. file_registry: Tracks file hashes and cached skeletons.
    */

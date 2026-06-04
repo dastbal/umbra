@@ -15,6 +15,7 @@ export class IndexerService {
   private registry: FileRegistry;
   private chunker: NestChunker;
   private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
+  private static isIndexing = false;
 
   // Optimization: Send chunks to Vertex AI in groups to respect rate limits and improve speed.
   private BATCH_SIZE = 10;
@@ -31,10 +32,17 @@ export class IndexerService {
    * * @param sourceDir - Relative path to source code (usually 'src').
    */
   public async indexProject(sourceDir: string = 'src') {
-    const rootDir = process.cwd();
-    const fullSourceDir = path.join(rootDir, sourceDir);
+    if (IndexerService.isIndexing) {
+      console.log('⏳ Indexing already in progress. Skipping duplicate request.');
+      return;
+    }
+    IndexerService.isIndexing = true;
 
-    console.log(`🚀 Starting Indexing Process on: ${sourceDir}`);
+    try {
+      const rootDir = process.cwd();
+      const fullSourceDir = path.join(rootDir, sourceDir);
+
+      console.log(`🚀 Starting Indexing Process on: ${sourceDir}`);
 
     const files = this.getAllFiles(fullSourceDir);
     const filesToProcess: string[] = [];
@@ -69,12 +77,15 @@ export class IndexerService {
       this.saveGraph(pendingEdges);
     }
 
-    // 3. TERCERA PASADA: Guardar Vectores
-    if (pendingChunks.length > 0) {
-      await this.embedAndSaveBatches(pendingChunks);
-    }
+      // 3. TERCERA PASADA: Guardar Vectores
+      if (pendingChunks.length > 0) {
+        await this.embedAndSaveBatches(pendingChunks);
+      }
 
-    console.log('✅ Indexing Complete.');
+      console.log('✅ Indexing Complete.');
+    } finally {
+      IndexerService.isIndexing = false;
+    }
   }
 
   // ==========================================
@@ -134,8 +145,6 @@ export class IndexerService {
       const batch = allChunks.slice(i, i + this.BATCH_SIZE);
 
       // 1. Prepare Text for Embedding
-      // CRITICAL: We embed "metadata + content" for better semantic search results.
-      // This allows the LLM to find "UsersService method" even if the code doesn't say "User".
       const textsToEmbed = batch.map((c) => {
         const metaStr = c.metadata.methodName
           ? `Method: ${c.metadata.methodName}`
@@ -143,37 +152,55 @@ export class IndexerService {
         return `${metaStr}\n${c.content}`;
       });
 
-      try {
-        // 2. Call Vertex AI (Embeddings API)
-        const embeddingsModel = LLMProvider.getEmbeddingsModel();
-        const vectors = await embeddingsModel.embedDocuments(textsToEmbed);
+      let retries = 3;
+      let delay = 2000;
+      let success = false;
 
-        // 3. Save to DB (Transaction for performance)
-        const insertChunk = this.db.prepare(`
-          INSERT OR REPLACE INTO code_chunks (id, file_path, chunk_type, content, vector_json, metadata)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
+      while (retries > 0 && !success) {
+        try {
+          // 2. Call Vertex AI (Embeddings API)
+          const embeddingsModel = LLMProvider.getEmbeddingsModel();
+          const vectors = await embeddingsModel.embedDocuments(textsToEmbed);
 
-        // Explicitly typed transaction callback to fix TS7006
-        const insertMany = this.db.transaction(
-          (chunks: ProcessedChunk[], vectors: number[][]) => {
-            chunks.forEach((chunk, idx) => {
-              insertChunk.run(
-                chunk.id,
-                (chunk as any).filePath, // filePath added in processSingleFile
-                chunk.type,
-                chunk.content,
-                JSON.stringify(vectors[idx]), // Serialize vector to string for storage
-                JSON.stringify(chunk.metadata),
-              );
-            });
-          },
-        );
+          // 3. Save to DB (Transaction for performance)
+          const insertChunk = this.db.prepare(`
+            INSERT OR REPLACE INTO code_chunks (id, file_path, chunk_type, content, vector_json, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
 
-        insertMany(batch, vectors);
-        process.stdout.write('.'); // Visual feedback
-      } catch (err) {
-        console.error('❌ Embedding Error:', err);
+          // Explicitly typed transaction callback to fix TS7006
+          const insertMany = this.db.transaction(
+            (chunks: ProcessedChunk[], vectors: number[][]) => {
+              chunks.forEach((chunk, idx) => {
+                insertChunk.run(
+                  chunk.id,
+                  (chunk as any).filePath, // filePath added in processSingleFile
+                  chunk.type,
+                  chunk.content,
+                  JSON.stringify(vectors[idx]), // Serialize vector to string for storage
+                  JSON.stringify(chunk.metadata),
+                );
+              });
+            },
+          );
+
+          insertMany(batch, vectors);
+          process.stdout.write('.'); // Visual feedback
+          success = true;
+          
+          // Delay between batches to prevent triggering limits on large projects
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (err: any) {
+          retries--;
+          if (err.status === 429 || err.message?.includes('429')) {
+             console.log(`\n⚠️ Rate Limit Hit (429). Retrying in ${delay}ms...`);
+             await new Promise(resolve => setTimeout(resolve, delay));
+             delay *= 2; // Exponential backoff
+          } else {
+             console.error('\n❌ Embedding Error:', err);
+             break;
+          }
+        }
       }
     }
     console.log('\n💾 Vectors Saved.');
