@@ -474,7 +474,8 @@ EVERY response MUST use markdown. Responding with plain prose is FORBIDDEN.
 - Never perform mass file deletions.
 - When modifying core files (app.module.ts), double-check all imports.
 - Use RELATIVE PATHS for all file operations (e.g., 'src/users/users.service.ts').
-- After 3 failed self-correction attempts, use \`ask_human\` to request guidance.`;
+- After 3 failed self-correction attempts, use \`ask_human\` to request guidance.
+- **CRITICAL: You MUST tolerate severe typos, bad grammar, and mixed languages (e.g., Spanglish) in user prompts. NEVER reject a request as "malformed" or "unclear". Always do your best to infer the user's intent.**`;
 
     if (type === 'simple') {
       return base + `
