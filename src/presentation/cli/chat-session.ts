@@ -27,6 +27,7 @@ import chalk from 'chalk';
 import { Command as LangGraphCommand } from '@langchain/langgraph';
 import { StreamRenderer } from './stream-renderer';
 import { colors, buildWelcomeBanner } from './theme';
+import { showModelMenu } from './model-menu';
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -44,6 +45,18 @@ export interface ChatSessionConfig {
   sessionName?: string;
   /** LangGraph recursion limit. @default 100 */
   recursionLimit?: number;
+  /**
+   * Absolute path to the `.env` file for model persistence.
+   * When the user uses `/model`, the new AGENT_MODEL is saved here.
+   * @default process.cwd() + "/.env"
+   */
+  envFilePath?: string;
+  /**
+   * Factory function to recreate the agent with a different model.
+   * Required for the `/model` restart feature.
+   * Called with the new model string after the user selects it.
+   */
+  agentFactory?: (newModel: string) => Promise<any>;
 }
 
 /**
@@ -67,9 +80,13 @@ export class ChatSession {
     threadId: string;
     sessionName?: string;
     recursionLimit: number;
+    envFilePath?: string;
+    agentFactory?: (newModel: string) => Promise<any>;
   };
   private readonly graphConfig: { configurable: { thread_id: string }; recursionLimit: number };
   private isRunning = false;
+  /** Currently active model string — updated when the user uses /model. */
+  private currentModel: string;
 
   /**
    * @param agent - A compiled LangGraph agent (from createDeepAgent).
@@ -78,7 +95,7 @@ export class ChatSession {
    */
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    private readonly agent: any,
+    private agent: any,
     private readonly renderer: StreamRenderer,
     config: ChatSessionConfig,
   ) {
@@ -86,6 +103,7 @@ export class ChatSession {
       recursionLimit: 100,
       ...config,
     };
+    this.currentModel = config.model;
     this.graphConfig = {
       configurable: { thread_id: this.config.threadId },
       recursionLimit: this.config.recursionLimit,
@@ -274,15 +292,32 @@ export class ChatSession {
    *
    * Shows "You: " prompt, waits for user input, sends it, repeats.
    * Exits cleanly on empty input or Ctrl+C.
+   *
+   * ## Slash Commands
+   * - `/model` — opens the interactive model selection menu
+   * - `/help`  — shows available slash commands
    */
   private async promptLoop(): Promise<void> {
     while (this.isRunning) {
       const input = await this.readLine();
 
       if (input === null || !this.isRunning) break;
-      if (!input.trim()) continue;
 
-      await this.sendMessage(input.trim());
+      const trimmed = input.trim();
+      if (!trimmed) continue;
+
+      // ── Slash command dispatcher ─────────────────────────────────────────
+      if (trimmed === '/model') {
+        await this.handleModelSwitch();
+        continue;
+      }
+
+      if (trimmed === '/help') {
+        this.showHelp();
+        continue;
+      }
+
+      await this.sendMessage(trimmed);
     }
   }
 
@@ -347,5 +382,69 @@ export class ChatSession {
     this.isRunning = false;
     process.stdout.write('\n' + colors.muted('  Session ended. Goodbye!\n\n'));
     process.exit(0);
+  }
+
+  // ── Private: Slash Command Handlers ───────────────────────────────────────
+
+  /**
+   * Handles the `/model` slash command.
+   *
+   * Opens the interactive model selection menu. If the user selects a new model:
+   * 1. Saves it to `.env` via `ModelSwitcher`.
+   * 2. Calls `agentFactory(newModel)` to rebuild the agent.
+   * 3. Updates `this.agent` with the new instance.
+   * 4. Shows the welcome banner again with the new model.
+   *
+   * If no `agentFactory` is provided in config, shows a warning and tells
+   * the user to restart manually.
+   */
+  private async handleModelSwitch(): Promise<void> {
+    const result = await showModelMenu(
+      this.currentModel,
+      this.config.envFilePath,
+    );
+
+    if (!result) return; // User cancelled
+
+    if (result.model === this.currentModel) {
+      console.log(colors.muted('  Already using ' + result.model + '.\n'));
+      return;
+    }
+
+    if (!this.config.agentFactory) {
+      // No factory provided — can't hot-swap. Tell user to restart.
+      console.log(colors.warning(
+        `  ⚠️  Restart the agent to apply: npm run agent -- deep (AGENT_MODEL is now ${result.model})\n`,
+      ));
+      return;
+    }
+
+    try {
+      // Rebuild the agent with the new model
+      const newAgent = await this.config.agentFactory(result.model);
+      // Hot-swap the agent reference
+      this.agent = newAgent;
+      this.currentModel = result.model;
+
+      // Show banner with updated model info
+      process.stdout.write(
+        buildWelcomeBanner(this.config.mode, result.model, this.config.sessionName),
+      );
+    } catch (err: unknown) {
+      const message = (err as Error)?.message ?? String(err);
+      console.log(colors.danger(`  ✗ Failed to restart agent: ${message}\n`));
+    }
+  }
+
+  /**
+   * Displays the list of available slash commands.
+   */
+  private showHelp(): void {
+    console.log('');
+    console.log(colors.secondary.bold('  Available slash commands:'));
+    console.log(`  ${colors.primary.bold('/model')}  — Switch the active LLM model (Ollama / Vertex AI)`);
+    console.log(`  ${colors.primary.bold('/help')}   — Show this help message`);
+    console.log(`  ${colors.muted('Ctrl+C')}  — Exit the session`);
+    console.log('');
   }
 }
