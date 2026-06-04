@@ -1,116 +1,117 @@
-# 🏗️ Arquitectura: nestjs-ai-agent-lib
+# 🏗️ Architecture: nestjs-ai-agent-lib
 
-> Documento vivo — se actualiza con cada fase completada.
-> Lee esto para entender QUÉ hay, POR QUÉ existe, y a DÓNDE vamos.
-
----
-
-## Visión General
-
-Esta librería implementa un sistema de agentes IA autónomos para proyectos NestJS.
-El agente puede analizar un codebase, planear tareas, escribir código con tests,
-y auto-corregirse — todo siguiendo DDD y TDD.
+> Living document — updated with every completed phase.
+> Read this to understand WHAT exists, WHY it exists, and WHERE we're going.
 
 ---
 
-## Evolución del Sistema (Bitácora)
+## Overview
 
-### 🏛️ Era 1: Agente Clásico ReAct (archivo: `factory.ts`)
-**Cuándo:** versión inicial
-**Qué es:** Un agente `createReactAgent` de LangChain — el patrón más básico.
-**Cómo funciona:**
-```
-Usuario → LLM → decide qué tool llamar → ejecuta tool → LLM → decide → ...
-```
-**Problema:** Sin planificación, sin contexto comprimido, sin HITL. Un loop básico.
+This library implements an autonomous AI agent system for NestJS codebases.
+The agent can analyze a codebase, plan tasks, write code with tests, and
+self-correct — all following DDD and TDD principles.
 
 ---
 
-### 🏛️ Era 2: Multi-Agent Graph (archivo: `graph-factory.ts`)
-**Cuándo:** versión 1.2.0 pre-deep
-**Qué es:** Un `StateGraph` de LangGraph con 3 nodos explícitos:
-```
-Supervisor → (routing) → Researcher → devuelve → Supervisor
-                     → (routing) → Coder → devuelve → Supervisor
-                     → FINISH
-```
-**Por qué fue un avance:**
-- Roles separados: Researcher solo lee, Coder solo escribe
-- El Supervisor tiene structured output para decidir a quién delegar
+## System Evolution (Build Log)
 
-**Problema:** Todo el orquestamiento es código manual. Sin `write_todos`,
-sin context compression, sin HITL nativo. Mucho boilerplate.
+### 🏛️ Era 1: Classic ReAct Agent (`factory.ts`)
+**When:** Initial version
+**What:** A `createReactAgent` from LangChain — the most basic pattern.
+**How it works:**
+```
+User → LLM → decides which tool to call → executes tool → LLM → decides → ...
+```
+**Problem:** No planning, no context compression, no HITL. Just a basic loop.
 
 ---
 
-### ⭐ Era 3: Deep Agent (archivo: `deep-agent-factory.ts`) — ACTIVO HOY
-**Cuándo:** 2026-06-04, commit `a62aadc`
-**Qué es:** Un agente construido con `createDeepAgent` de la librería `deepagents`.
+### 🏛️ Era 2: Multi-Agent Graph (`graph-factory.ts`)
+**When:** v1.2.0 pre-deep
+**What:** A `StateGraph` from LangGraph with 3 explicit nodes:
+```
+Supervisor → (routing) → Researcher → returns → Supervisor
+                      → (routing) → Coder     → returns → Supervisor
+                      → FINISH
+```
+**Why it was an improvement:**
+- Separated roles: Researcher only reads, Coder only writes
+- Supervisor uses structured output to decide who to delegate to
 
-**Por qué `createDeepAgent` es mejor:**
+**Problem:** All orchestration is manual code. No `write_todos`, no context
+compression, no native HITL. Too much boilerplate.
+
+---
+
+### ⭐ Era 3: Deep Agent (`deep-agent-factory.ts`) — ACTIVE TODAY
+**When:** 2026-06-04, commit `a62aadc`
+**What:** An agent built with `createDeepAgent` from the `deepagents` library.
+
+**Why `createDeepAgent` is better:**
 ```
 createReactAgent (LangChain base)
-  +  FilesystemMiddleware → write_file, read_file, edit_file
-  +  PlanningMiddleware   → write_todos, read_todos, update_todo
-  +  SubAgentMiddleware   → task (lanzar subagentes)
-  +  SummarizationMiddleware → context compression automática
+  + FilesystemMiddleware  → write_file, read_file, edit_file
+  + PlanningMiddleware    → write_todos, read_todos, update_todo
+  + SubAgentMiddleware    → task (launch subagents)
+  + SummarizationMiddleware → automatic context compression
   = createDeepAgent
 ```
-Es decir: `createDeepAgent` = `createReactAgent` + superpoderes automáticos.
+In other words: `createDeepAgent` = `createReactAgent` + superpowers for free.
 
-**Tools disponibles en Deep Agent:**
+**Available tools in Deep Agent mode:**
 
-| Tool | Fuente | Para qué |
+| Tool | Source | Purpose |
 |---|---|---|
-| `write_todos` | deepagents built-in | Crear plan antes de actuar |
-| `read_todos` | deepagents built-in | Releer el plan si se pierde |
-| `update_todo` | deepagents built-in | Marcar pasos completados |
-| `task` | deepagents built-in | Lanzar subagente especializado |
-| `ask_human` | deepagents built-in | Pedir ayuda al humano (HITL) |
-| `read_file` | deepagents built-in | Leer archivo del disco |
-| `write_file` | deepagents built-in | Escribir archivo del disco |
-| `edit_file` | deepagents built-in | Editar fragmentos de archivo |
-| `ls` | deepagents built-in | Listar directorio |
-| `safe_write_file` | nuestro (SafeFilesystemBackend) | Escribir con backup automático |
-| `safe_read_file` | nuestro (SafeFilesystemBackend) | Leer con validación |
-| `list_files` | nuestro | Listar con filtros |
-| `ask_codebase` | nuestro (RAG) | Búsqueda semántica en el código |
-| `refresh_project_index` | nuestro (RAG) | Reindexar después de escribir |
-| `run_integrity_check` | nuestro | Ejecutar `tsc --noEmit` + lint |
-| `run_tests` | nuestro | Ejecutar Jest |
+| `write_todos` | deepagents built-in | Create a plan before acting |
+| `read_todos` | deepagents built-in | Re-read the plan if lost |
+| `update_todo` | deepagents built-in | Mark steps as completed |
+| `task` | deepagents built-in | Launch a specialized subagent |
+| `ask_human` | deepagents built-in | Ask the human for help (HITL) |
+| `read_file` | deepagents built-in | Read a file from disk |
+| `write_file` | deepagents built-in | Write a file to disk |
+| `edit_file` | deepagents built-in | Edit exact string fragments in a file |
+| `ls` | deepagents built-in | List directory contents |
+| `safe_write_file` | ours (SafeFilesystemBackend) | Write with auto-backup |
+| `safe_read_file` | ours (SafeFilesystemBackend) | Read with validation |
+| `list_files` | ours | List with filters |
+| `ask_codebase` | ours (RAG) | Semantic search over the codebase |
+| `refresh_project_index` | ours (RAG) | Re-index after writes |
+| `run_integrity_check` | ours | Run `tsc --noEmit` + lint |
+| `run_tests` | ours | Run Jest test suite |
 
-**Problema resuelto — Bug Gemini:**
-`deepagents` v1.10.x incluye un tool `grep` con schema Zod que usa union types.
-Gemini no soporta union types en function calling. Solución:
+**Key bug fixed — Gemini Incompatibility:**
+`deepagents` v1.10.x includes a `grep` tool whose Zod schema uses union types.
+Gemini rejects union types in function calling schemas. Solution:
 ```typescript
+// Must use the EXACT model string as the harness profile key
 registerHarnessProfile('gemini-2.5-flash-lite', {
   excludedTools: ['grep', 'glob']
 });
 ```
-El harness profile es el mecanismo de deepagents para personalizar el set de tools
-por modelo. La clave debe ser el string exacto del modelo (no 'google' ni 'gemini').
+The harness profile is deepagents' mechanism for customizing the tool set per model.
+The key must be the exact model string passed to `createDeepAgent` (not 'google').
 
 ---
 
-## Arquitectura Target (Lo que estamos construyendo)
+## Target Architecture (What We're Building)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CLI / API (Presentación)                      │
-│  npm run agent -- deep "tarea"  |  POST /agent/stream (SSE)     │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                      ORCHESTRATOR                                │
-│              DeepAgent (createDeepAgent)                        │
-│         model: AGENT_MODEL (env configurable)                   │
-│                                                                  │
-│  Protocolo mandatorio:                                          │
-│  1. write_todos → crear plan                                    │
-│  2. task(researcher) → analizar                                 │
-│  3. task(coder) → implementar                                   │
-│  4. run_integrity_check → verificar                             │
-└──────────┬───────────────────────────────┬──────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                  CLI / API (Presentation)                         │
+│  npm run agent -- deep "task"  |  POST /agent/stream (SSE)       │
+└─────────────────────────┬────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼────────────────────────────────────────┐
+│                       ORCHESTRATOR                                │
+│               DeepAgent (createDeepAgent)                        │
+│          model: AGENT_MODEL (env configurable)                   │
+│                                                                   │
+│  Mandatory protocol:                                             │
+│  1. write_todos → create plan                                    │
+│  2. task(researcher) → analyze codebase                          │
+│  3. task(coder) → implement                                      │
+│  4. run_integrity_check → verify                                 │
+└──────────┬───────────────────────────────┬───────────────────────┘
            │ tool: task()                  │ tool: task()
            ▼                               ▼
 ┌──────────────────────┐   ┌──────────────────────────────────────┐
@@ -118,137 +119,146 @@ por modelo. La clave debe ser el string exacto del modelo (no 'google' ni 'gemin
 │   SubAgent           │   │   SubAgent                           │
 │   (DeepAgent)        │   │   (DeepAgent)                        │
 │                      │   │                                      │
-│  Solo LEE:           │   │  Solo ESCRIBE:                       │
-│  - ask_codebase      │   │  - safe_write_file (con backup)      │
+│  Read-only:          │   │  Write-focused:                      │
+│  - ask_codebase      │   │  - safe_write_file (with backup)     │
 │  - safe_read_file    │   │  - safe_read_file                    │
 │  - list_files        │   │  - run_tests                         │
 │  - write_todos       │   │  - run_integrity_check               │
 │                      │   │  - write_todos                       │
-│  Devuelve: análisis  │   │  Devuelve: código implementado       │
-│  + plan detallado    │   │  + resultado de tests                │
+│  Returns: analysis   │   │  Returns: implemented code           │
+│  + detailed plan     │   │  + test results                      │
 └──────────────────────┘   └──────────────────────────────────────┘
            │
            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    INFRAESTRUCTURA                               │
-│  SafeFilesystemBackend → backup antes de cada write             │
-│  SqliteSaver → persistencia de conversación                     │
-│  IndexerService (RAG) → embeddings del codebase                 │
-│  ModelResolver → AGENT_MODEL env → LangChain LLM instance      │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                     INFRASTRUCTURE                               │
+│  SafeFilesystemBackend → backup before every write               │
+│  SqliteSaver → conversation persistence (thread_id)             │
+│  IndexerService (RAG) → codebase embeddings                     │
+│  ModelResolver → AGENT_MODEL env → LangChain LLM instance       │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Roadmap de Fases
+## Phase Roadmap
 
-### ✅ Fase 0 — Deep Agent Base
-Commit: `a62aadc` | `DeepAgentFactory` con `createDeepAgent` funcionando.
+### ✅ Phase 0 — Deep Agent Base
+Commit `a62aadc` | `DeepAgentFactory` with `createDeepAgent` working.
 
-### ⏳ Fase 1 — LLM Switch Configurable
-**Qué:** Variable `AGENT_MODEL` controla qué LLM usa el agente.
-**Por qué:** Gemini lite para tareas rápidas, Gemini pro para arquitectura,
-Ollama para desarrollo offline sin gastar créditos.
-**Archivo nuevo:** `src/core/config/model-resolver.ts`
+### ⏳ Phase 1 — Configurable LLM Switch
+**What:** `AGENT_MODEL` environment variable controls which LLM the agent uses.
+**Why:** Use Gemini lite for quick tasks, Gemini pro for architecture decisions,
+Ollama for offline development without burning API credits.
+**New file:** `src/core/config/model-resolver.ts`
 
 ```bash
-AGENT_MODEL=gemini-2.5-flash-lite   # default, rápido y barato
-AGENT_MODEL=gemini-2.5-pro          # para tareas de arquitectura
-AGENT_MODEL=ollama:llama3.2         # local, sin internet, gratis
-AGENT_MODEL=anthropic:claude-opus-4-7  # máxima calidad de código
+AGENT_MODEL=gemini-2.5-flash-lite      # default, fast and cheap
+AGENT_MODEL=gemini-2.5-pro             # for architecture tasks
+AGENT_MODEL=ollama:llama3.2            # local, no internet, free
+AGENT_MODEL=anthropic:claude-opus-4-7  # maximum code quality
 ```
 
-### ⏳ Fase 2 — Researcher SubAgent
-**Qué:** SubAgent especializado SOLO en leer y analizar.
-**Por qué:** Separación de responsabilidades. El que analiza no escribe.
-Reduce errores de "implementación prematura antes de entender el codebase".
-**Archivo nuevo:** `src/core/subagents/researcher.subagent.ts`
+### ⏳ Phase 2 — Researcher SubAgent
+**What:** Specialized subagent for reading and analyzing ONLY.
+**Why:** Separation of concerns. The one who analyzes does not write.
+Reduces "premature implementation before understanding the codebase" errors.
+**New file:** `src/core/subagents/researcher.subagent.ts`
 
-### ⏳ Fase 3 — Coder SubAgent
-**Qué:** SubAgent especializado en TDD — escribe spec ANTES que implementación.
-**Por qué:** El que implementa no distrae con análisis. Foco = calidad de código.
-**Archivo nuevo:** `src/core/subagents/coder.subagent.ts`
+### ⏳ Phase 3 — Coder SubAgent
+**What:** Subagent specialized in TDD — writes the spec BEFORE the implementation.
+**Why:** The one who implements does not get distracted with analysis. Focus = code quality.
+**New file:** `src/core/subagents/coder.subagent.ts`
 
-### ⏳ Fase 4 — Orchestrator
-**Qué:** Agente principal que coordina Researcher + Coder via `task` tool.
-**Por qué:** Reemplaza el viejo `StateGraph` manual con un flujo más inteligente.
-**Modificación:** `DeepAgentFactory.createOrchestrator(config)`
+### ⏳ Phase 4 — Orchestrator
+**What:** Main agent that coordinates Researcher + Coder via the `task` tool.
+**Why:** Replaces the old manual `StateGraph` with a smarter, more adaptive flow.
+**Modification:** `DeepAgentFactory.createOrchestrator(config)`
 
-### ⏳ Fase 5 — Context Compression
-**Qué:** `createSummarizationMiddleware` de deepagents.
-**Por qué:** En tareas largas (refactor de módulo completo), el contexto puede
-llenarse. La compresión resume mensajes viejos automáticamente.
+### ⏳ Phase 5 — Context Compression
+**What:** `createSummarizationMiddleware` from deepagents.
+**Why:** For long tasks (e.g., refactoring an entire module), the context can fill up.
+Compression automatically summarizes old messages to free up tokens.
 
-### ⏳ Fase 6 — Event Streaming SSE
-**Qué:** `POST /agent/stream` en NestJS que devuelve `text/event-stream`.
-**Por qué:** Permite integrar el agente en una app web o dashboard
-con progreso en tiempo real.
+### ⏳ Phase 6 — Event Streaming (SSE)
+**What:** `POST /agent/stream` in NestJS returning `text/event-stream`.
+**Why:** Allows integrating the agent into a web app or dashboard with real-time progress.
 
-### ⏳ Fase 7 — Skills System
-**Qué:** Empaquetar estrategias del agente como `SKILL.md` reutilizables.
-**Por qué:** Distribuir y reutilizar "cómo hacer DDD en NestJS" entre proyectos.
+### ⏳ Phase 7 — Skills System
+**What:** Package agent strategies as reusable `SKILL.md` files.
+**Why:** Distribute and reuse "how to do DDD in NestJS" across multiple projects.
 
 ---
 
-## Conceptos Clave para Aprender
+## Key Concepts Glossary
 
-### ¿Qué es un SubAgent?
-Un SubAgent es un agente que corre DENTRO de otro agente, invocado por el tool `task`.
-Es como un empleado especializado que tu agente principal puede contratar para tareas específicas.
+### What is a SubAgent?
+A SubAgent is an agent running INSIDE another agent, invoked by the `task` tool.
+Think of it as a specialized employee that your main agent can hire for specific tasks.
 
 ```
-Orchestrator (el jefe):
-  "Necesito analizar el codebase" → task(researcher) → espera resultado
-  "Necesito implementar X"        → task(coder)      → espera resultado
+Orchestrator (the boss):
+  "I need to analyze the codebase" → task(researcher) → waits for result
+  "I need to implement X"          → task(coder)      → waits for result
 ```
 
-### ¿Qué es el Harness Profile?
-Es el sistema de deepagents para personalizar el comportamiento del agente
-por modelo de LLM. Puedes:
-- Excluir tools incompatibles (`excludedTools`)
-- Añadir instrucciones al system prompt (`systemPromptSuffix`)
-- Sobrescribir descripciones de tools (`toolDescriptionOverrides`)
+### What is a Harness Profile?
+deepagents' system for customizing agent behavior per LLM model. You can:
+- Exclude incompatible tools (`excludedTools`)
+- Add instructions to the system prompt (`systemPromptSuffix`)
+- Override tool descriptions (`toolDescriptionOverrides`)
 
-### ¿Qué es Context Compression?
-Cuando el agente trabaja en tareas largas, el historial de mensajes crece.
-La compresión toma los mensajes más viejos y los resume en un bloque compacto,
-liberando tokens para continuar trabajando sin perder el contexto general.
+Key: the profile key must match the exact model string (e.g., `"gemini-2.5-flash-lite"`),
+not a generic provider name (e.g., `"google"`).
 
-### ¿Qué es SafeFilesystemBackend?
-Un wrapper sobre las operaciones de filesystem que hace backup automático
-antes de cada escritura. Si el agente escribe código malo, puedes restaurar.
-Vive en `src/core/agent/safe-backend.ts`.
+### What is Context Compression?
+When an agent works on long tasks, the message history grows. Compression takes the
+oldest messages and summarizes them into a compact block, freeing tokens to continue
+working without losing the overall context.
+
+### What is SafeFilesystemBackend?
+A wrapper over filesystem operations that creates automatic backups before every write.
+If the agent writes bad code, you can restore. Lives in `src/core/agent/safe-backend.ts`.
+
+### What is a Harness Profile Key?
+deepagents resolves harness profiles using this lookup order (from `index.cjs` line 7940):
+1. Exact match on the model string: `"gemini-2.5-flash-lite"` → looks up `"gemini-2.5-flash-lite"`
+2. Provider prefix (only when model has a colon): `"anthropic:claude"` → looks up `"anthropic"`
+3. No match → uses `EMPTY_HARNESS_PROFILE` (no customizations)
 
 ---
 
-## Estructura de Carpetas (Target)
+## Target Folder Structure
 
 ```
 src/
 ├── bin/
-│   └── cli.ts                    # Comandos: deep, orchestrate, classic
+│   └── cli.ts                      # Commands: deep, orchestrate, classic
 ├── core/
 │   ├── agent/
-│   │   ├── factory.ts            # 🏛️ legacy ReAct
-│   │   ├── graph-factory.ts      # 🏛️ legacy StateGraph
-│   │   ├── deep-agent-factory.ts # ⭐ activo — createDeepAgent
-│   │   └── safe-backend.ts       # backup engine
+│   │   ├── factory.ts              # 🏛️ museum — classic ReAct
+│   │   ├── graph-factory.ts        # 🏛️ museum — StateGraph
+│   │   ├── deep-agent-factory.ts   # ⭐ active — createDeepAgent
+│   │   └── safe-backend.ts         # backup engine
 │   ├── config/
-│   │   └── model-resolver.ts     # ⏳ Fase 1 — LLM switch
+│   │   └── model-resolver.ts       # ⏳ Phase 1 — LLM switch
 │   ├── subagents/
-│   │   ├── researcher.subagent.ts  # ⏳ Fase 2
-│   │   └── coder.subagent.ts       # ⏳ Fase 3
+│   │   ├── researcher.subagent.ts  # ⏳ Phase 2
+│   │   └── coder.subagent.ts       # ⏳ Phase 3
 │   ├── rag/
 │   │   └── indexer.ts
 │   ├── tools/
 │   │   └── index.ts
 │   └── interaction/
 │       └── index.ts
-├── presentation/                 # ⏳ Fase 6 — SSE API
+├── presentation/                   # ⏳ Phase 6 — SSE API
 │   ├── agent.controller.ts
 │   ├── agent.module.ts
 │   └── dtos/
-└── skills/                       # ⏳ Fase 7
+│       └── agent-request.dto.ts
+└── skills/                         # ⏳ Phase 7
     ├── nestjs-ddd-researcher/
+    │   └── SKILL.md
     └── nestjs-tdd-coder/
+        └── SKILL.md
 ```
