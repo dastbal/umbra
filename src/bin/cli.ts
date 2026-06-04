@@ -395,5 +395,82 @@ program
     }
   });
 
+program
+  .command("orchestrate")
+  .description("🎯 Orchestrator mode — Researcher + Coder subagents with context compression")
+  .argument("<instruction>", "Technical instruction for the agent")
+  .action(async (instruction: string) => {
+    try {
+      if (!instruction || instruction.trim().length === 0) {
+        log.error("Provide a valid instruction.");
+        return;
+      }
+
+      log.sys("Initializing Orchestrator (Researcher + Coder subagents)...");
+      const threadId = "orchestrator-session";
+      const config = { configurable: { thread_id: threadId }, recursionLimit: 100 };
+      const agent = await DeepAgentFactory.createOrchestrator({ threadId });
+
+      log.ai(`Processing (Orchestrator): "${instruction}"`);
+
+      let result = await (agent as any).invoke(
+        { messages: [{ role: "human", content: instruction }] },
+        config,
+      );
+
+      // Native HITL loop — same as deep command (createDeepAgent uses __interrupt__)
+      while (result.__interrupt__) {
+        const interrupts = result.__interrupt__[0].value;
+        const actionRequests = interrupts.actionRequests ?? [];
+        const reviewConfigs = interrupts.reviewConfigs ?? [];
+
+        console.log(chalk.yellow("\n✋ [HITL — ORCHESTRATOR PAUSED FOR APPROVAL]"));
+
+        const decisions: any[] = [];
+
+        for (let i = 0; i < actionRequests.length; i++) {
+          const action = actionRequests[i];
+          const reviewConfig = reviewConfigs[i];
+          const allowed: string[] = reviewConfig?.allowedDecisions ?? ["approve", "reject"];
+
+          console.log(chalk.white(`\n   Tool: ${chalk.bold(action.name)}`));
+          console.log(chalk.gray(`   Args: ${JSON.stringify(action.args, null, 2)}`));
+          console.log(chalk.gray(`   Allowed: ${allowed.join(", ")}`));
+
+          const confirmed = await askConfirmation("Do you approve this action?");
+
+          if (confirmed) {
+            log.sys("Approved ✅");
+            decisions.push({ type: "approve" });
+          } else {
+            log.error("Rejected ❌");
+            decisions.push({
+              type: "reject",
+              message: "User rejected this action. Do not retry. Ask the user what to do next.",
+            });
+          }
+        }
+
+        result = await (agent as any).invoke(
+          new LangGraphCommand({ resume: { decisions } }),
+          config,
+        );
+      }
+
+      // Display final response
+      const lastMessage = result.messages?.[result.messages.length - 1];
+      if (lastMessage?.content) {
+        console.log("\n" + chalk.cyan("--- 🎯 ORCHESTRATOR RESPONSE ---"));
+        console.log(lastMessage.content);
+        console.log(chalk.cyan("--------------------------------\n"));
+      }
+
+      log.sys("Task completed (Orchestrator).");
+    } catch (error: any) {
+      log.error("Error in orchestrator:");
+      log.error(error?.message || "Unknown error");
+    }
+  });
+
 program.parse(process.argv);
 
