@@ -39,17 +39,31 @@ export const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
  * Maps a tier to the recommended model string for that use case.
  */
 export const MODEL_TIERS: Record<string, string> = {
+  // ── Vertex AI / Gemini Cloud ──────────────────────────────────────────────
   /** Quick tasks, cheap. Best for: simple file edits, Q&A. */
   lite: 'gemini-2.5-flash-lite',
   /** Balanced. Best for: most coding tasks. */
   flash: 'gemini-2.5-flash',
-  /** Most capable. Best for: architecture, complex refactors. */
+  /** Most capable cloud model. Best for: architecture, complex refactors. */
   pro: 'gemini-2.5-pro',
   /** Maximum quality. Best for: code review, critical logic. */
   claude: 'anthropic:claude-opus-4-7',
+
+  // ── Ollama / Local (free, no API key required) ───────────────────────────
   /** Local inference. Best for: offline development, no API costs. */
   local: 'ollama:llama3.2',
+  /** Gemma4 balanced — best local model for general coding tasks. */
+  gemma: 'ollama:gemma4',
+  /** Gemma4 26B — high quality, needs ~16GB RAM. */
+  'gemma-26b': 'ollama:gemma4:26b',
+  /** Gemma4 e2b — 2B params, very fast, low RAM. */
+  'gemma-2b': 'ollama:gemma4:e2b',
+  /** Gemma4 e4b — 4B params, good balance speed/quality. */
+  'gemma-4b': 'ollama:gemma4:e4b',
+  /** Qwen 3.6B — strong reasoning, fast locally. */
+  qwen: 'ollama:qwen3.6',
 };
+
 
 /**
  * Resolve the active LLM model string.

@@ -338,6 +338,10 @@ program
         model,
         threadId,
         sessionName: options.session,
+        envFilePath: require('path').join(process.cwd(), '.env'),
+        // agentFactory: called by /model to hot-swap the agent without losing session
+        agentFactory: async (newModel: string) =>
+          DeepAgentFactory.create({ model: newModel, threadId }),
       });
       await session.start(instruction);
     } catch (error: any) {
@@ -395,6 +399,10 @@ program
         threadId,
         sessionName: options.session,
         recursionLimit: 100,
+        envFilePath: require('path').join(process.cwd(), '.env'),
+        // agentFactory: called by /model to hot-swap the orchestrator agent
+        agentFactory: async (newModel: string) =>
+          DeepAgentFactory.createOrchestrator({ model: newModel, threadId }),
       });
       await session.start(instruction);
     } catch (error: any) {

@@ -5,7 +5,7 @@ import {
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import { InteractionService } from '../interaction';
 import { IndexerService } from '../rag/indexer';
-import { resolveModel, isGeminiModel } from '../config/model-resolver';
+import { resolveModel, isGeminiModel, isOllamaModel } from '../config/model-resolver';
 import {
   askCodebaseTool,
   executeTestsTool,
@@ -17,6 +17,7 @@ import {
 } from '../tools';
 import { researcherSubAgent } from '../subagents/researcher.subagent';
 import { coderSubAgent } from '../subagents/coder.subagent';
+import { LLMProvider } from '../llm/provider';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -138,15 +139,17 @@ export class DeepAgentFactory {
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir);
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'simple');
 
-    // Phase 5 — Context Compression
-    // deepagents ALREADY injects SummarizationMiddleware internally as a required
-    // middleware (see REQUIRED_MIDDLEWARE_NAMES). Adding it manually causes
-    // "Middleware SummarizationMiddleware is defined multiple times" error.
-    // deepagents auto-configures trigger/keep thresholds from the model's token profile.
-    // ModelFactory is kept for future use (e.g., custom summarization prompts).
+    // For Ollama models, pass a pre-built BaseChatModel instance instead of the
+    // model string. This ensures deepagents uses our OllamaChatAdapter (which
+    // serializes non-string ToolMessage content) rather than creating a raw
+    // ChatOllama via initChatModel. Vertex AI models continue to use the string
+    // path — deepagents' initChatModel handles them correctly.
+    const modelParam = isOllamaModel(model)
+      ? LLMProvider.createChatModel(model)
+      : model;
 
     return createDeepAgent({
-      model,
+      model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
       tools: [                           // ADR-002
@@ -194,12 +197,14 @@ export class DeepAgentFactory {
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator');
 
-    // Phase 5 — Context Compression (Orchestrator)
-    // Same as simple agent: deepagents manages SummarizationMiddleware internally.
-    // No manual middleware needed.
+    // Same Ollama adapter pattern as create() — pass BaseChatModel for Ollama,
+    // string for Vertex AI.
+    const modelParam = isOllamaModel(model)
+      ? LLMProvider.createChatModel(model)
+      : model;
 
     return createDeepAgent({
-      model,
+      model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
       subagents: [researcherSubAgent, coderSubAgent],
@@ -231,28 +236,55 @@ export class DeepAgentFactory {
     const agentDir = path.join(rootDir, '.agent');
     if (!fs.existsSync(agentDir)) fs.mkdirSync(agentDir, { recursive: true });
 
-    // 2. Register Gemini-compatible harness profile (ADR-003)
-    // Gemini rejects Zod union types in tool schemas. `grep` and `glob` built-in
-    // tools use union types → crash at invoke time. We exclude them for Gemini models.
-    // The key MUST be the exact model string, not a provider prefix like 'google'.
+    // 2. Register provider-specific harness profile
+    //
+    // ADR-003 (Gemini): Gemini rejects Zod union types in tool schemas.
+    // We exclude incompatible tools automatically via schema scanning.
+    //
+    // ADR-009 (Ollama): Ollama uses the OpenAI-compatible API format and
+    // does NOT reject Zod union types. However, we still exclude `task`
+    // for the simple agent (same reason as Gemini: no subagent delegation).
+    // We also exclude `grep`, `glob` on Ollama because they cause issues
+    // on Windows paths — our `safe_read_file` / `list_files` are safer.
     if (isGeminiModel(model)) {
-      // ADR-003 (updated): Dynamic tool exclusion for Gemini compatibility.
-      // Instead of a hard-coded list, we auto-scan deepagents' built-in tools
-      // and exclude any whose schemas contain Zod union types (anyOf/oneOf).
-      // This future-proofs the harness profile against deepagents upgrades.
+      // ADR-003: Dynamic tool exclusion for Gemini compatibility.
+      // Auto-scan detects any new deepagents tools with Zod union types.
       const unsafeTools = DeepAgentFactory.detectGeminiIncompatibleTools();
-
-      // Always exclude 'task' for the simple agent: deepagents injects 'task'
-      // even without subagents. The simple agent works directly—no delegation.
-      // (The orchestrator explicitly needs 'task' — it gets its own profile below.)
       const simpleAgentExcluded = [...new Set([...unsafeTools, 'task'])];
-
-      registerHarnessProfile(model, {
-        excludedTools: simpleAgentExcluded,
+      registerHarnessProfile(model, { excludedTools: simpleAgentExcluded });
+    } else if (isOllamaModel(model)) {
+      // ADR-009: Register the Ollama harness profile under the bare "ollama"
+      // provider key (not a model-specific key). This is intentional.
+      //
+      // WHY "ollama" as the key (not "ollama:gemma4")?
+      // deepagents' getHarnessProfile() resolves in this order:
+      //   1. Exact match: "ollama:gemma4:e2b" → not found (3 parts, immediately rejected)
+      //   2. Provider fallback: profiles.get("ollama") → FOUND ✓
+      //
+      // If we registered as "ollama:gemma4-e2b" (normalized), deepagents would
+      // still look for "ollama:gemma4:e2b" (the raw spec) → not found, then
+      // "ollama" → FOUND via fallback. But we'd also pollute the registry
+      // with a key no one looks up.
+      //
+      // Registering under "ollama" cleanly applies these exclusions to ALL
+      // local Ollama models regardless of tag format.
+      //
+      // The excluded tools are those deepagents injects by default that either:
+      //   a) have Zod union schemas (grep, glob) — though Ollama's OpenAI-compat
+      //      API is more tolerant, they're still replaced by our safer versions.
+      //   b) cause Windows path issues (ls, read_file, write_file, edit_file).
+      //   c) shouldn't be available in simple agent mode (task).
+      registerHarnessProfile('ollama', {
+        excludedTools: ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'task'],
       });
     }
 
+
+
     // 3. Sync RAG index (lazy — skips if index is fresh < 5 min)
+    // NOTE: RAG embeddings always use Vertex AI (text-embedding-004), even for
+    // Ollama chat models. If Vertex credentials are missing, indexing is skipped
+    // gracefully — the agent can still function without semantic search.
     await DeepAgentFactory.maybeReindex(rootDir, interaction);
   }
 
@@ -269,7 +301,35 @@ export class DeepAgentFactory {
    *
    * @returns Array of tool names that are incompatible with Gemini.
    */
+  /**
+   * Normalizes an Ollama model string into a valid deepagents harness profile key.
+   *
+   * `deepagents` profile keys must follow `"provider"` or `"provider:model"` format
+   * — exactly **one** colon is allowed. Ollama models with tags use the format
+   * `"ollama:gemma4:e2b"` (two colons), which `registerHarnessProfile` rejects.
+   *
+   * This method normalizes by replacing any colon **after the first** with a dash:
+   * - `"ollama:gemma4"` → `"ollama:gemma4"` (no change, valid)
+   * - `"ollama:gemma4:e2b"` → `"ollama:gemma4-e2b"` (valid key)
+   * - `"ollama:gemma4:26b"` → `"ollama:gemma4-26b"` (valid key)
+   *
+   * The normalized key is only used for profile registration/lookup, never
+   * for the Ollama API call (which uses the original model string).
+   *
+   * @param model - The full model string (e.g., "ollama:gemma4:e2b").
+   * @returns A valid harness profile key with at most one colon.
+   */
+  private static normalizeHarnessKey(model: string): string {
+    const colonIndex = model.indexOf(':');
+    if (colonIndex === -1) return model; // No colon — return as-is
+    const afterFirstColon = model.slice(colonIndex + 1);
+    // Replace any remaining colons with dashes
+    const normalized = afterFirstColon.replaceAll(':', '-');
+    return model.slice(0, colonIndex + 1) + normalized;
+  }
+
   private static detectGeminiIncompatibleTools(): string[] {
+
     // Known always-problematic tools — hard-coded baseline (NEVER remove these).
     // grep, glob: Zod union types → Gemini rejects their schema at parse time.
     // ls, read_file, write_file, edit_file: Windows path bugs + no backup safety.
@@ -379,6 +439,18 @@ export class DeepAgentFactory {
     rootDir: string,
     interaction?: InteractionService,
   ): Promise<void> {
+    // If Vertex AI credentials are not configured, skip RAG indexing entirely.
+    // Ollama-only users won't have GOOGLE_APPLICATION_CREDENTIALS set.
+    // The agent still works — it just won't have semantic RAG search.
+    if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      if (interaction) {
+        interaction
+          .startTask('RAG index skipped (no Vertex credentials)')
+          .succeed('RAG index skipped — Ollama mode (no Google credentials)');
+      }
+      return;
+    }
+
     /** Maximum age (ms) before the index is considered stale and rebuilt. */
     const FRESH_TTL_MS = 5 * 60 * 1000; // 5 minutes
     const metaPath = path.join(rootDir, '.agent', 'index.meta.json');
@@ -401,17 +473,30 @@ export class DeepAgentFactory {
       return;
     }
 
-    if (interaction) {
-      const task = interaction.startTask('Syncing codebase index...');
-      await new IndexerService().indexProject();
-      task.succeed('Codebase index synced ✅');
-    } else {
-      await new IndexerService().indexProject();
+    try {
+      if (interaction) {
+        const task = interaction.startTask('Syncing codebase index...');
+        await new IndexerService().indexProject();
+        task.succeed('Codebase index synced ✅');
+      } else {
+        await new IndexerService().indexProject();
+      }
+      // Persist timestamp so the next startup can skip re-indexing
+      fs.writeFileSync(metaPath, JSON.stringify({ indexedAt: Date.now() }), 'utf-8');
+    } catch (err: unknown) {
+      // Non-fatal: if indexing fails (e.g., transient Vertex error), log and continue.
+      // The agent can still operate — it just loses semantic search for this session.
+      const message = (err as Error)?.message ?? String(err);
+      if (interaction) {
+        interaction
+          .startTask('RAG index failed')
+          .fail(`RAG index failed (agent still works): ${message}`);
+      } else {
+        console.warn(`⚠️ RAG indexing failed (agent still works): ${message}`);
+      }
     }
-
-    // Persist timestamp so the next startup can skip re-indexing
-    fs.writeFileSync(metaPath, JSON.stringify({ indexedAt: Date.now() }), 'utf-8');
   }
+
 
   /**
    * Builds a SqliteSaver checkpointer for conversation persistence.
@@ -474,7 +559,8 @@ EVERY response MUST use markdown. Responding with plain prose is FORBIDDEN.
 - Never perform mass file deletions.
 - When modifying core files (app.module.ts), double-check all imports.
 - Use RELATIVE PATHS for all file operations (e.g., 'src/users/users.service.ts').
-- After 3 failed self-correction attempts, use \`ask_human\` to request guidance.`;
+- After 3 failed self-correction attempts, use \`ask_human\` to request guidance.
+- **CRITICAL: You MUST tolerate severe typos, bad grammar, and mixed languages (e.g., Spanglish) in user prompts. NEVER reject a request as "malformed" or "unclear". Always do your best to infer the user's intent.**`;
 
     if (type === 'simple') {
       return base + `
