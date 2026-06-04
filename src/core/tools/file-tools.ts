@@ -41,7 +41,7 @@ export const safeWriteFileTool = tool(
       // DEBOUNCED INDEXING: Prevent parallel indexing locks when multiple files are written rapidly
       if (indexTimer) clearTimeout(indexTimer);
       indexTimer = setTimeout(() => {
-        log.sys("Triggering debounced indexing...");
+        IndexerService.silent = true; // suppress output during streaming sessions
         const indexer = new IndexerService();
         indexer.indexProject().catch((err) => log.error(`Failed to re-index after write: ${err.message}`));
       }, 3000);

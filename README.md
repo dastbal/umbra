@@ -1,250 +1,307 @@
 # NestJS AI Agent Lib
 
-An AI-powered autonomous agent framework for NestJS applications, designed for sophisticated code analysis, understanding, modification, and orchestration. Built for Principal Software Engineer level tasks using advanced RAG, Multi-Agent architecture, and robust safety protocols.
+> Built by **David Balladares** — Principal Software Engineer level autonomous agent for NestJS.
+
+An autonomous AI agent framework for NestJS codebases. Analyzes, plans, writes, and verifies code with specialized subagents — all via a premium streaming CLI that stays open like Claude or Gemini's terminal experience.
+
+---
 
 ## Table of Contents
 
-*   [Overview](#overview)
-*   [Getting Started](#getting-started)
-*   [Core Concepts](#core-concepts)
-    *   [DeepAgentFactory](#deepagentfactory)
-    *   [RAG Strategy (X-Ray)](#rag-strategy-x-ray)
-    *   [Development Standards](#development-standards)
-    *   [Security & Persistence](#security--persistence)
-*   [Command Line Interface (CLI)](#command-line-interface-cli)
-*   [Project Structure](#project-structure)
-*   [Cost Tracking & Usage Metrics](#cost-tracking--usage-metrics)
-*   [Roadmap](#roadmap)
-*   [Contributing](#contributing)
-*   [License](#license)
+- [Overview](#overview)
+- [Getting Started](#getting-started)
+- [CLI — Interactive Streaming Sessions](#cli--interactive-streaming-sessions)
+  - [Session Management](#session-management)
+  - [LLM Switching](#llm-switching)
+- [Agent Modes](#agent-modes)
+- [Architecture](#architecture)
+- [Core Concepts](#core-concepts)
+- [Project Structure](#project-structure)
+- [Roadmap](#roadmap)
 
 ---
 
 ## Overview
 
-The NestJS AI Agent Lib empowers developers to automate complex coding tasks within their NestJS projects. It leverages a combination of Large Language Models (LLMs), Retrieval-Augmented Generation (RAG), and a flexible multi-agent system to provide intelligent code assistance. From refactoring and bug fixing to generating new modules, the agent operates with a strong emphasis on code quality, safety, and adherence to project standards.
+This library gives your NestJS project an autonomous AI agent that can:
+
+- 📋 **Plan** — uses `write_todos` to break tasks into steps before acting
+- 🔍 **Analyze** — semantic search over your codebase via RAG (X-Ray strategy)
+- 💾 **Write code** — safely, with automatic backup before every file write
+- 🧪 **Test** — runs Jest + `tsc --noEmit` and self-corrects on failures
+- 🤖 **Delegate** — spawns specialized Researcher and Coder subagents for complex tasks
+- ✋ **Ask you** — HITL approval flow for risky operations
+- 💬 **Remember** — full conversation history via SQLite, persistent across sessions
 
 ---
 
 ## Getting Started
 
-### 1. Installation
-
-Install the package via npm:
+### 1. Prerequisites
 
 ```bash
-npm install @dastbal/nestjs-ai-agent
+npm install
 ```
 
 ### 2. Configuration
 
-Create a `.env` file in your project root with your API credentials. The agent supports dynamic model switching (via `model-resolver.ts`), prioritizing the `AGENT_MODEL` environment variable.
-
 ```dotenv
-# API Keys (Required for Google models)
-GEMINI_API_KEY="your-api-key"
-
-# Model Selection (Optional - overrides default)
-# Example: AGENT_MODEL="gemini-2.5-pro"
-AGENT_MODEL="gemini-2.5-flash-lite"
+# .env.development
+GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json
+AGENT_MODEL=gemini-2.5-flash-lite   # optional — see LLM Switching below
 ```
 
-### 3. Usage
+### 3. Run
 
-Import the module into your `app.module.ts`:
-
-```typescript
-import { AiAgentModule } from '@dastbal/nestjs-ai-agent';
-
-@Module({
-  imports: [AiAgentModule.forRoot()],
-})
-export class AppModule {}
+```bash
+npm run agent -- deep
 ```
+
+---
+
+## CLI — Interactive Streaming Sessions
+
+The CLI stays open like Claude/Gemini's terminal. Tokens stream in real-time,
+tool calls show a live spinner with elapsed time, and `You:` waits for your next message.
+
+```
+╭────────────────────────────────────────────────╮
+│                                                │
+│  NestJS AI Agent — Deep Mode                  │
+│  Single autonomous agent with planning tools  │
+│  Model: gemini-2.5-flash-lite                 │
+│  Session: auth-module (continuing)            │
+│  Type your task. Ctrl+C to exit.              │
+│                                                │
+╰────────────────────────────────────────────────╯
+
+You: create a UsersModule following DDD
+
+  ⠋  Thinking...
+╭─ 📋  write_todos
+│  └─ Creating implementation plan...
+╰─ ✓  done in 1.2s
+
+╭─ 🔍  ask_codebase
+│  └─ How is AuthModule structured?
+╰─ ✓  done in 3.4s
+
+Agent: I'll implement UsersModule following the same DDD pattern as AuthModule...
+       (tokens stream as they're generated)
+
+──────────────────────────────────────────────────
+
+You: ▌
+```
+
+### Session Management
+
+Sessions persist across terminal restarts via SQLite. The agent remembers everything.
+
+```bash
+# Default session — continues across all runs
+npm run agent -- deep
+npm run agent -- orchestrate
+
+# Named session — create or continue by name
+npm run agent -- deep --session auth-module
+npm run agent -- deep --session users-refactor
+npm run agent -- orchestrate --session big-feature
+
+# Fresh session — no history, ephemeral
+npm run agent -- deep --new
+npm run agent -- orchestrate --new
+
+# First message + named session (sends task, then stays open)
+npm run agent -- deep "create a CacheModule" --session cache-work
+```
+
+**How it works:**
+- `--session auth` → `threadId = "deep-auth"` → same SQLite rows every run → agent remembers
+- `--new` → `threadId = "deep-new-1717530012789"` → unique, discarded after session
+- No flag → `threadId = "deep-default"` → persistent main session
+
+### LLM Switching
+
+```powershell
+# Lite (default) — fast, cheap, great for most tasks
+$env:AGENT_MODEL="gemini-2.5-flash-lite"; npm run agent -- deep
+
+# Flash — more capable
+$env:AGENT_MODEL="gemini-2.5-flash"; npm run agent -- deep
+
+# Pro — for complex architecture decisions
+$env:AGENT_MODEL="gemini-2.5-pro"; npm run agent -- orchestrate
+
+# Local (no API cost)
+$env:AGENT_MODEL="ollama:llama3.2"; npm run agent -- deep
+```
+
+---
+
+## Agent Modes
+
+### `deep` — Single Autonomous Agent
+Best for: most tasks. Debugging, analysis, single file changes, quick Q&A, medium complexity.
+
+```bash
+npm run agent -- deep
+npm run agent -- deep --session my-session
+npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts" --new
+```
+
+**Built-in tools:**
+| Tool | Purpose |
+|---|---|
+| `write_todos` | Create a plan before acting |
+| `list_files` | List directory contents |
+| `safe_read_file` | Read files (with path validation) |
+| `safe_write_file` | Write files (with auto-backup) |
+| `ask_codebase` | Semantic search over your codebase (RAG) |
+| `run_integrity_check` | `tsc --noEmit` + lint |
+| `run_tests` | Jest test suite |
+| `task` | Launch a subagent for isolated work |
+| `ask_human` | HITL — pause and ask you before proceeding |
+
+---
+
+### `orchestrate` — Multi-Subagent Coordinator
+Best for: complex features, creating full modules, large refactors touching many files.
+
+```bash
+npm run agent -- orchestrate
+npm run agent -- orchestrate --session big-refactor
+```
+
+**Flow enforced by system prompt:**
+```
+1. write_todos         → create step-by-step plan
+2. task(researcher)    → analyze codebase, return findings + plan
+3. task(coder)         → implement with TDD (spec first, then code)
+4. run_integrity_check → verify types + lint
+```
+
+**Researcher subagent** — read-only analyst:
+- Tools: `ask_codebase`, `safe_read_file`, `list_files`
+- Never writes. Returns a structured analysis + implementation plan.
+
+**Coder subagent** — TDD implementer:
+- Tools: `safe_write_file`, `safe_read_file`, `run_tests`, `run_integrity_check`
+- Writes `.spec.ts` BEFORE implementation.
+- Self-corrects up to 3 times on test failures.
+
+---
+
+### Legacy modes (museum 🏛️)
+```bash
+npm run agent -- classic "task"   # original ReAct agent (AgentFactory)
+npm run agent -- "task"           # original StateGraph (GraphAgentFactory)
+```
+Kept for historical reference. Not recommended for new work.
+
+---
+
+## Architecture
+
+```
+CLI (interactive streaming)
+    │
+    ├── deep      → DeepAgentFactory.create()
+    │                  createDeepAgent (deepagents lib)
+    │                  + SafeFilesystemBackend (auto-backup)
+    │                  + RAG IndexerService (X-Ray)
+    │                  + SqliteSaver (history)
+    │
+    └── orchestrate → DeepAgentFactory.createOrchestrator()
+                         createDeepAgent with subagents:
+                              ├── researcher (read-only)
+                              └── coder (TDD-focused)
+```
+
+The `task` tool is the mechanism the Orchestrator uses to invoke subagents.
+When the agent calls `task("researcher", "analyze auth module")`, a Researcher
+DeepAgent spins up, runs to completion, and returns its findings as a string.
 
 ---
 
 ## Core Concepts
 
-### DeepAgentFactory
+### SafeFilesystemBackend
+Every `safe_write_file` call creates a backup in `.agent/backups/` before writing.
+If the agent writes bad code, the backup is there. The agent is sandboxed to the project root.
 
-The `DeepAgentFactory` is the central orchestrator for creating and configuring AI agents. It offers two primary factory methods:
+### RAG X-Ray Strategy
+1. `IndexerService` scans `src/` on startup, creates embeddings per code chunk
+2. `ask_codebase` performs vector similarity search to find relevant code
+3. Results include file content + dependency context → LLM gets deep understanding
 
-*   **`DeepAgentFactory.create(config, interaction)`**:
-    *   Initializes a **simple, single-agent** instance.
-    *   Ideal for straightforward tasks, quick code modifications, and direct Q&A sessions.
-    *   Includes core tools: filesystem access (`safe_write_file`, `safe_read_file`), RAG search (`ask_codebase`), planning (`write_todos`), and validation (`run_integrity_check`).
-    *   Uses isolated SQLite persistence for its conversation history.
-
-*   **`DeepAgentFactory.createOrchestrator(config, interaction)`**:
-    *   Initializes a **multi-subagent orchestrator**.
-    *   Designed for complex features, new module generation, and architectural changes.
-    *   Delegates tasks to specialized subagents (`researcher`, `coder`) via the `task` tool.
-    *   Enforces a strict orchestration protocol: Plan → Research → Implement → Verify.
-    *   Supports context compression for long-running tasks.
-    *   Uses a separate SQLite database for its history to avoid conflicts with simple agents.
-
-Both methods ensure proper project indexing (`IndexerService`), safe filesystem operations, and adherence to defined quality and safety standards.
-
-### Multi-Agent Roles (Subagents)
-
-When operating in Orchestrator mode, tasks are delegated to specialized subagents:
-
-#### Supervisor Agent
-*   **Role:** The central orchestrator. It manages the overall workflow, delegates tasks to specialized agents (Researcher, Coder), monitors progress, and coordinates their interactions.
-*   **Key Files:** `src/core/agent/graph/supervisor.graph.ts`, `src/core/agent/supervisor.service.ts`
-
-#### Researcher Agent
-*   **Role:** The intelligence gatherer. It specializes in analyzing the codebase, understanding its structure, identifying dependencies, and retrieving relevant information using RAG.
-*   **Key Files:** `src/core/agent/researcher.service.ts`, `src/core/rag/retriever.ts`, `src/core/tools/ast/chunker.ts`
-
-#### Coder Agent
-*   **Role:** The code manipulator. It is responsible for generating, modifying, and refactoring code based on the Researcher's analysis, applying strict development standards ('Surgeon's Rule', 'Golden Prompt').
-*   **Key Files:** `src/core/agent/coder.service.ts`, `src/core/agent/graph/coder.graph.ts`
-
-### Graph Flow
-
-The interaction between agents is managed through graph-based execution (LangGraph), defining complex workflows as state machines:
-1.  Supervisor receives a request.
-2.  Supervisor delegates analysis to Researcher.
-3.  Researcher performs analysis using RAG (X-Ray).
-4.  Supervisor instructs Coder based on findings.
-5.  Coder modifies code surgically.
-6.  Supervisor confirms completion or initiates further steps.
-
-### RAG Strategy (X-Ray)
-
-The agent employs an advanced Retrieval-Augmented Generation (RAG) strategy, internally termed "X-Ray," for deep code understanding.
-
-1.  **Code Indexing:** The codebase is scanned, parsed using Abstract Syntax Trees (ASTs), and broken down into meaningful code chunks. Structural dependencies are extracted to build a dependency graph.
-    *   *Key Components:* `IndexerService`, `NestChunker`, AST parsing.
-2.  **Semantic Search & Retrieval:** Queries are embedded and used to perform vector similarity searches against the indexed code chunks, retrieving the most relevant segments.
-    *   *Key Components:* `Retriever.query()`, Vector Similarity Search.
-3.  **Context Augmentation:** Retrieved code chunks are enriched with file dependencies, import graphs, and simplified file skeletons to provide rich contextual information for the LLM.
-    *   *Key Components:* `Retriever.getContextForLLM()`, `getFileSkeleton()`, dependency analysis.
-4.  **Report Generation:** All gathered information is compiled into a structured "RAG ANALYSIS REPORT," which serves as the primary input for the LLM, enabling informed analysis and code generation.
-
-This "X-Ray" approach allows agents to deeply "see" and understand the codebase's structure, semantics, and relationships.
-
-### Development Standards
-
-#### Surgeon's Rule
-
-The Coder agent strictly adheres to the "Surgeon's Rule" to ensure code modifications are precise, safe, and non-disruptive:
-
-1.  **Read-Before-Write:** NEVER overwrite a file without first reading and thoroughly understanding its existing logic, TSDocs, dependencies, and context using `safe_read_file`.
-2.  **Preservation First:** Do not delete existing TSDocs, comments, or unrelated business logic. Focus on augmenting and refining code surgically, avoiding unintended side effects.
-3.  **Anti-Regression:** Understand the purpose of existing code before altering or removing it. Ensure that no functionality, especially edge-case handling, is lost. If unsure, research its purpose first.
-
-#### Golden Prompt
-
-Prompts are carefully crafted using the "Golden Prompt" principles to ensure clarity, context, and adherence to standards, guiding the AI to produce high-quality, relevant code.
-
-### Security & Persistence
-
-#### SafeFilesystemBackend
-
-All filesystem operations are routed through `SafeFilesystemBackend`, which enforces critical safety measures:
-
-*   **Sandboxing:** Operations are strictly confined to the project's root directory (`rootDir`) to prevent accidental modifications outside the intended scope.
-*   **Backup System:** Before any file write operation (`safe_write_file`), an automatic backup of the original file is created in the `.agent/backups/` directory. This provides a rollback mechanism.
-*   **Atomic Operations:** Designed to ensure that file writes are as atomic as possible, reducing the risk of corrupted files.
-
-#### Human-in-the-Loop (HITL)
-
-For critical operations or when safety protocols are triggered (e.g., after multiple failed self-corrections), the agent may pause and request explicit human approval before proceeding. This ensures that potentially risky code modifications are reviewed by a human.
-
----
-
-## Command Line Interface (CLI)
-
-Interact with the agent using the provided CLI commands.
-
-### Basic Usage
-
-The most common way to interact is by running the agent directly with a prompt:
-
-```bash
-# Start the main agent in a conversational mode
-npm run agent "Explain the architecture of this project"
+### HITL (Human-in-the-Loop)
+For risky operations, the agent pauses with an approval prompt:
+```
+  ✋  APPROVAL REQUIRED
+  └─ Tool: 💾 safe_write_file
+  └─ Args: { "file_path": "src/auth/auth.service.ts", ... }
+  Approve? [approve/reject]
 ```
 
-*(The first run of an agent type typically syncs and indexes your codebase for RAG context).*
-
-### Advanced Commands
-
-For more granular control and specific agent modes, use the `run` command with subcommands:
-
-*   **`deep`**:
-    *   Launches the primary, sophisticated `DeepAgentFactory` orchestrator.
-    *   Ideal for complex, multi-step tasks requiring research, planning, and coding.
-    *   Example: `npm run agent deep -- "Implement a caching layer using Redis"`
-
-*   **`chat`**:
-    *   Initiates a simpler, conversational agent mode.
-    *   Suitable for quick questions, code explanations, or single-file modifications.
-    *   Example: `npm run agent chat -- "What does this function do?"`
-
-*   **`graph`**:
-    *   Allows direct interaction with agents operating on a graph-based execution flow (e.g., using LangGraph).
-    *   Useful for debugging or understanding specific agent state transitions.
-    *   Example: `npm run agent graph -- "Trace the execution flow for the refactoring task"`
-
-*   **`classic`**:
-    *   Launches the older, simpler agent based on `AgentFactory`.
-    *   May be used for backward compatibility or tasks not requiring the full power of `DeepAgentFactory`.
-    *   Example: `npm run agent classic -- "Add a comment to calculateTotal function"`
+### Session Persistence
+threadId → SQLite rows → full message history restored on next run.
+The agent picks up exactly where the last session ended.
 
 ---
 
 ## Project Structure
 
-```text
-.
-├── src/
-│   ├── core/
-│   │   ├── agent/                 # Agent factory, supervisor, researcher, coder, etc.
-│   │   ├── llm/                   # LLM provider configuration
-│   │   ├── rag/                   # RAG indexing and retrieval logic
-│   │   ├── state/                 # Persistence (SQLite) and DB abstraction
-│   │   ├── interaction/           # CLI interaction, spinners, etc.
-│   │   ├── tools/                 # Reusable agent tools (filesystem, codebase, etc.)
-│   │   ├── config/                # Configuration resolvers (models, etc.)
-│   │   └── subagents/             # Specialized subagents (e.g., researcher, coder)
-│   ├── app.module.ts              # Main application module
-│   └── main.ts                    # Application entry point
-├── .agent/                        # Agent-specific data
-│   ├── history.db                 # Default agent conversation history
-│   ├── deep_agent_history.db      # Orchestrator conversation history
-│   └── backups/                   # Backups for safe file operations
-├── .env                           # Environment variables
-├── README.md
-├── tsconfig.json
-└── package.json
 ```
-
----
-
-## Cost Tracking & Usage Metrics
-
-The library includes integrated, real-time cost tracking and token usage monitoring. Prices are configurable via `llm-pricing.json`, allowing for precise cost management and transparency. The system utilizes DDD Value Objects (`Money`, `TokenUsage`) for accurate calculations.
+src/
+├── bin/
+│   └── cli.ts                         # CLI entry — deep, orchestrate, classic
+├── core/
+│   ├── agent/
+│   │   ├── factory.ts                 # 🏛️ museum — classic ReAct
+│   │   ├── graph-factory.ts           # 🏛️ museum — StateGraph
+│   │   ├── deep-agent-factory.ts      # ⭐ active — createDeepAgent
+│   │   └── safe-backend.ts            # auto-backup filesystem
+│   ├── config/
+│   │   └── model-resolver.ts          # AGENT_MODEL env → LLM instance
+│   ├── subagents/
+│   │   ├── researcher.subagent.ts     # read-only analyst
+│   │   └── coder.subagent.ts          # TDD implementer
+│   ├── rag/
+│   │   └── indexer.ts                 # X-Ray codebase indexer
+│   └── tools/
+│       └── index.ts                   # all custom tools
+├── presentation/
+│   └── cli/
+│       ├── theme.ts                   # design system (colors, icons, box chars)
+│       ├── stream-renderer.ts         # token/tool event → terminal output
+│       ├── chat-session.ts            # interactive loop + HITL + session
+│       └── index.ts                   # barrel export
+.agent/
+├── deep_agent_history.db              # deep mode SQLite
+├── orchestrator_history.db            # orchestrate mode SQLite
+└── backups/                           # auto-backups before every write
+```
 
 ---
 
 ## Roadmap
 
-- [x] **Phase 1: LLM Agnosticism:** Dynamic model switching via `.env` configured in `src/core/config/model-resolver.ts` (*Completed in commit `4d11081`*).
-- [ ] **Phase 2: SubAgents:** Splitting responsibilities into specialized `Researcher` and `Coder` subagents orchestrated by the DeepAgent.
-- [ ] **Phase 3: Web UI Interface:** Exposing a frontend dashboard to view the dependency graph and approve HITL actions visually.
-
----
-
-## Contributing
-
-Contributions are welcome! Please follow the development standards outlined in this README and submit a Pull Request. For major changes, please open an issue first to discuss the proposed changes.
+| Phase | Feature | Status |
+|---|---|---|
+| 0 | DeepAgentFactory base | ✅ Done |
+| 1 | LLM switching (`AGENT_MODEL` env) | ✅ Done |
+| 2 | Researcher subagent | ✅ Done |
+| 3 | Coder subagent (TDD) | ✅ Done |
+| 4 | Orchestrator (Researcher + Coder) | ✅ Done |
+| CLI | Premium streaming sessions | ✅ Done |
+| Sessions | `--session` / `--new` persistence | ✅ Done |
+| 5 | Context compression (long tasks) | ⏳ Planned |
+| 6 | SSE HTTP API (`/agent/stream`) | ⏳ Planned |
+| 7 | Skills system (`SKILL.md` reusable strategies) | ⏳ Planned |
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
+MIT — David Balladares

@@ -234,10 +234,61 @@ export class DeepAgentFactory {
     // tools use union types → crash at invoke time. We exclude them for Gemini models.
     // The key MUST be the exact model string, not a provider prefix like 'google'.
     if (isGeminiModel(model)) {
-      registerHarnessProfile(model, { excludedTools: ['grep', 'glob'] });
+      // ADR-003: Exclude deepagents' built-in filesystem tools.
+      // deepagents injects: grep, glob, ls, read_file, write_file, edit_file.
+      // On Windows, `ls` resolves paths differently and returns empty arrays for
+      // valid directories, causing the agent to think the project is empty.
+      // We exclude ALL deepagents filesystem tools so the agent is forced to use
+      // our custom tools: list_files, safe_read_file, safe_write_file — which use
+      // SafeFilesystemBackend with proper Windows path handling and auto-backup.
+      registerHarnessProfile(model, {
+        excludedTools: ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file'],
+      });
+
     }
 
-    // 3. Sync RAG index
+    // 3. Sync RAG index (lazy — skips if index is fresh < 5 min)
+    await DeepAgentFactory.maybeReindex(rootDir, interaction);
+  }
+
+  /**
+   * Conditionally re-indexes the project only when the RAG index is stale.
+   *
+   * Reads `.agent/index.meta.json` to check the last index timestamp.
+   * If the index was built less than `FRESH_TTL_MS` milliseconds ago, the
+   * re-index is skipped entirely — saving 3-5 seconds on every startup.
+   * If stale or missing, a full `indexProject()` run is triggered and the
+   * metadata file is updated with the new timestamp.
+   *
+   * @param rootDir - The project root directory.
+   * @param interaction - Optional interaction service for CLI task indicators.
+   */
+  private static async maybeReindex(
+    rootDir: string,
+    interaction?: InteractionService,
+  ): Promise<void> {
+    /** Maximum age (ms) before the index is considered stale and rebuilt. */
+    const FRESH_TTL_MS = 5 * 60 * 1000; // 5 minutes
+    const metaPath = path.join(rootDir, '.agent', 'index.meta.json');
+
+    let isStale = true;
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as { indexedAt: number };
+        isStale = Date.now() - meta.indexedAt > FRESH_TTL_MS;
+      } catch {
+        // Corrupted meta → treat as stale
+        isStale = true;
+      }
+    }
+
+    if (!isStale) {
+      if (interaction) {
+        interaction.startTask('Index is fresh ✓ (skipping re-index)').succeed('Index is fresh ✓');
+      }
+      return;
+    }
+
     if (interaction) {
       const task = interaction.startTask('Syncing codebase index...');
       await new IndexerService().indexProject();
@@ -245,6 +296,9 @@ export class DeepAgentFactory {
     } else {
       await new IndexerService().indexProject();
     }
+
+    // Persist timestamp so the next startup can skip re-indexing
+    fs.writeFileSync(metaPath, JSON.stringify({ indexedAt: Date.now() }), 'utf-8');
   }
 
   /**
@@ -301,11 +355,23 @@ You operate directly on the local file system of a live, real-world project at: 
     if (type === 'simple') {
       return base + `
 
-📋 PLANNING PROTOCOL (MANDATORY):
+⚡ TASK SIZING — classify before starting:
+- SMALL (1-2 files, obvious change): DO NOT use write_todos. Read → Write → Done. Max 3 tool calls.
+- MEDIUM (3+ files, new feature): Use write_todos briefly (3-5 steps max).
+- LARGE (full module, major refactor): Full protocol with write_todos.
+
+NEVER use more than 3 tool calls for a change that fits in a single file.
+
+📋 PLANNING PROTOCOL (MEDIUM/LARGE only):
 Before starting ANY task with more than one step:
 1. Call \`write_todos\` to create a structured, numbered plan.
-2. Execute each step, calling \`update_todo\` when a step is done.
+2. Execute each step, calling \`update_todo\` (NOT update_todos — exact name: update_todo) when a step is done.
 3. If you lose track, call \`read_todos\` to re-orient yourself.
+
+TODO TOOL NAMES (exact, case-sensitive):
+- write_todos   ← create the plan
+- read_todos    ← re-read the plan
+- update_todo   ← mark ONE step done (singular, not plural)
 
 📂 EXPLORATION STRATEGY:
 - Use \`ask_codebase\` for semantic RAG search of the codebase.

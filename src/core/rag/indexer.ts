@@ -17,6 +17,18 @@ export class IndexerService {
   private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
   private static isIndexing = false;
 
+  /**
+   * When true, all progress console.log calls are suppressed.
+   * Set by the CLI streaming layer so background re-indexing
+   * doesn't pollute the token stream output.
+   */
+  public static silent = false;
+
+  /** Conditional logger — silent when streaming. */
+  private static log(...args: unknown[]): void {
+    if (!IndexerService.silent) console.log(...args);
+  }
+
   // Optimization: Send chunks to Vertex AI in groups to respect rate limits and improve speed.
   private BATCH_SIZE = 10;
 
@@ -42,7 +54,7 @@ export class IndexerService {
       const rootDir = process.cwd();
       const fullSourceDir = path.join(rootDir, sourceDir);
 
-      console.log(`🚀 Starting Indexing Process on: ${sourceDir}`);
+      IndexerService.log(`🚀 Starting Indexing Process on: ${sourceDir}`);
 
     const files = this.getAllFiles(fullSourceDir);
     const filesToProcess: string[] = [];
@@ -55,11 +67,11 @@ export class IndexerService {
     }
 
     if (filesToProcess.length === 0) {
-      console.log('✨ Project is up to date.');
+      IndexerService.log('✨ Project is up to date.');
       return;
     }
 
-    console.log(`📦 Found ${filesToProcess.length} files to process.`);
+    IndexerService.log(`📦 Found ${filesToProcess.length} files to process.`);
 
     // --- CAMBIO IMPORTANTE ---
     // Acumuladores separados
@@ -73,7 +85,7 @@ export class IndexerService {
 
     // 2. SEGUNDA PASADA: Guardar Grafo (Ahora que todos los archivos existen en registry)
     if (pendingEdges.length > 0) {
-      console.log(`🕸️ Saving ${pendingEdges.length} dependency relations...`);
+      IndexerService.log(`🕸️ Saving ${pendingEdges.length} dependency relations...`);
       this.saveGraph(pendingEdges);
     }
 
@@ -82,7 +94,7 @@ export class IndexerService {
         await this.embedAndSaveBatches(pendingChunks);
       }
 
-      console.log('✅ Indexing Complete.');
+      IndexerService.log('✅ Indexing Complete.');
     } finally {
       IndexerService.isIndexing = false;
     }
@@ -139,7 +151,7 @@ export class IndexerService {
    * Generates embeddings using Vertex AI and saves them to SQLite in transactions.
    */
   private async embedAndSaveBatches(allChunks: ProcessedChunk[]) {
-    console.log(`🧠 Generating Embeddings for ${allChunks.length} chunks...`);
+    IndexerService.log(`🧠 Generating Embeddings for ${allChunks.length} chunks...`);
 
     for (let i = 0; i < allChunks.length; i += this.BATCH_SIZE) {
       const batch = allChunks.slice(i, i + this.BATCH_SIZE);
@@ -203,7 +215,7 @@ export class IndexerService {
         }
       }
     }
-    console.log('\n💾 Vectors Saved.');
+    IndexerService.log('\n💾 Vectors Saved.');
   }
 
   /**
