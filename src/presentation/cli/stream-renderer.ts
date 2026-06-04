@@ -24,6 +24,7 @@ import {
   getToolIcon,
   labels,
 } from './theme';
+import { MarkdownRenderer } from './markdown-renderer';
 
 /** Internal state for a tool call currently in progress. */
 interface ActiveTool {
@@ -74,6 +75,11 @@ export class StreamRenderer {
   private toolCallCount = 0;
   /** Agent mode label. */
   private modeLabel: string;
+  /**
+   * Raw token buffer. Accumulates all streamed tokens for this turn.
+   * Used to re-render the full response with markdown styling in finalizeTurn().
+   */
+  private tokenBuffer = '';
 
   /**
    * @param mode - 'deep' | 'orchestrate' — used for color theming.
@@ -97,11 +103,16 @@ export class StreamRenderer {
 
     // Print "Agent: " prefix before the first token
     if (!this.isStreaming && !this.hasStreamedContent) {
-      process.stdout.write('\n' + colors.secondary.bold('Agent: '));
+      process.stdout.write('\n' + colors.secondary.bold('Agent: ') + '\n');
       this.isStreaming = true;
     }
 
-    process.stdout.write(chalk.white(token));
+    // Buffer the raw token for markdown rendering in finalizeTurn()
+    this.tokenBuffer += token;
+
+    // Stream a muted placeholder dot per token for real-time feedback.
+    // The full styled response is printed after all tokens arrive.
+    process.stdout.write(colors.dim('.'));
     this.hasStreamedContent = true;
   }
 
@@ -200,7 +211,15 @@ export class StreamRenderer {
   public finalizeTurn(): void {
     this.clearActiveTool();
 
-    if (this.isStreaming || this.hasStreamedContent) {
+    // Render the accumulated token buffer with full markdown styling
+    if (this.tokenBuffer.trim()) {
+      // Clear the streaming dots line
+      process.stdout.write('\r' + ' '.repeat(80) + '\r');
+
+      const renderer = new MarkdownRenderer();
+      const styled = renderer.render(this.tokenBuffer.trim());
+      process.stdout.write('\n' + styled + '\n');
+    } else if (this.isStreaming || this.hasStreamedContent) {
       process.stdout.write('\n');
     }
 
@@ -212,6 +231,7 @@ export class StreamRenderer {
     this.isStreaming = false;
     this.hasStreamedContent = false;
     this.toolCallCount = 0;
+    this.tokenBuffer = '';
   }
 
   // ── HITL (Human-in-the-Loop) ───────────────────────────────────────────────

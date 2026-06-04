@@ -31,8 +31,12 @@ This library gives your NestJS project an autonomous AI agent that can:
 - 💾 **Write code** — safely, with automatic backup before every file write
 - 🧪 **Test** — runs Jest + `tsc --noEmit` and self-corrects on failures
 - 🤖 **Delegate** — spawns specialized Researcher and Coder subagents for complex tasks
-- ✋ **Ask you** — HITL approval flow for risky operations
+- ✋ **Ask you** — HITL approval flow for risky operations (delete, drop table, infra files)
 - 💬 **Remember** — full conversation history via SQLite, persistent across named sessions
+- 🧠 **Compress** — auto-summarizes long sessions so context never overflows
+- 🎨 **Render beautifully** — markdown responses styled with chalk (headers, code blocks, bold, bullets)
+- 🔁 **Work autonomously** — executes full plans without stopping for `yes/no` confirmation
+- 🩹 **Self-heal** — auto-recovers corrupted sessions (SQLite checkpoint corruption)
 
 ---
 
