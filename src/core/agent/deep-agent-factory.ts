@@ -138,6 +138,13 @@ export class DeepAgentFactory {
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir);
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'simple');
 
+    // Phase 5 — Context Compression
+    // deepagents ALREADY injects SummarizationMiddleware internally as a required
+    // middleware (see REQUIRED_MIDDLEWARE_NAMES). Adding it manually causes
+    // "Middleware SummarizationMiddleware is defined multiple times" error.
+    // deepagents auto-configures trigger/keep thresholds from the model's token profile.
+    // ModelFactory is kept for future use (e.g., custom summarization prompts).
+
     return createDeepAgent({
       model,
       systemPrompt,
@@ -187,21 +194,16 @@ export class DeepAgentFactory {
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator');
 
-    // NOTE (Phase 5 — Context Compression): createSummarizationMiddleware requires
-    // an instantiated BaseChatModel instance, not a model string. This will be wired
-    // in Phase 5 once we have a ModelFactory that returns a model instance.
-    // For now, context compression is deferred.
-    void enableCompression; // acknowledged, not yet implemented
+    // Phase 5 — Context Compression (Orchestrator)
+    // Same as simple agent: deepagents manages SummarizationMiddleware internally.
+    // No manual middleware needed.
 
     return createDeepAgent({
       model,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      // Phase 2 + 3: Researcher and Coder SubAgents
-      // deepagents uses lowercase `subagents` (not `subAgents`)
       subagents: [researcherSubAgent, coderSubAgent],
       tools: [                           // ADR-002
-        // Orchestrator keeps RAG + integrity — it needs to verify the final result
         askCodebaseTool,
         refreshIndexTool,
         integrityCheckTool,
