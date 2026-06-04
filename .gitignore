@@ -21,6 +21,10 @@ history.db-journal
 !package-lock.json
 !tsconfig.json
 
+# --- AI Orchestration (no va al repo público) ---
+ANTIGRAVITY.md
+.claude/
+
 # --- Logs y Temporales ---
 npm-debug.log*
 yarn-debug.log*

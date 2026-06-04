@@ -5,6 +5,8 @@ import * as path from "path";
 import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
 
+let indexTimer: NodeJS.Timeout | null = null;
+
 const createBackup = (filePath: string) => {
   log.debug(`Starting backup process for file: ${filePath}`);
   const rootDir = process.cwd();
@@ -21,7 +23,8 @@ const createBackup = (filePath: string) => {
 };
 
 export const safeWriteFileTool = tool(
-  async ({ filePath, content }) => {
+  async ({ file_path, content }) => {
+    const filePath = file_path;
     log.debug(`safe_write_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
@@ -34,8 +37,15 @@ export const safeWriteFileTool = tool(
       fs.writeFileSync(targetPath, content, "utf-8");
       const action = exists ? "modified" : "created";
       log.sys(`File ${action} on REAL DISK: ${filePath}`);
-      const indexer = new IndexerService();
-      indexer.indexProject().catch((err) => log.error(`Failed to re-index after write for ${filePath}: ${err.message}`));
+      
+      // DEBOUNCED INDEXING: Prevent parallel indexing locks when multiple files are written rapidly
+      if (indexTimer) clearTimeout(indexTimer);
+      indexTimer = setTimeout(() => {
+        IndexerService.silent = true; // suppress output during streaming sessions
+        const indexer = new IndexerService();
+        indexer.indexProject().catch((err) => log.error(`Failed to re-index after write: ${err.message}`));
+      }, 3000);
+
       return `✅ SUCCESS: File ${action} at ${filePath}. [METADATA: {"path": "${filePath}", "action": "${action}"}]`;
     } catch (error: any) {
       log.error(`Failed to write file ${filePath}: ${error.message}`);
@@ -46,14 +56,15 @@ export const safeWriteFileTool = tool(
     name: "safe_write_file",
     description: "WRITES code to the REAL local disk. Returns if it was created or modified.",
     schema: z.object({
-      filePath: z.string().describe("Relative path (e.g., src/app.service.ts)"),
+      file_path: z.string().describe("Relative path (e.g., src/app.service.ts)"),
       content: z.string().describe("Full file content"),
     }),
   },
 );
 
 export const safeReadFileTool = tool(
-  async ({ filePath }) => {
+  async ({ file_path }) => {
+    const filePath = file_path;
     log.debug(`safe_read_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
@@ -71,13 +82,16 @@ export const safeReadFileTool = tool(
   {
     name: "safe_read_file",
     description: "READS code from the REAL local disk.",
-    schema: z.object({ filePath: z.string() }),
+    schema: z.object({ file_path: z.string().describe("The relative path to the file to read (e.g., README.md, src/app.ts)") }),
   },
 );
 
 export const deleteFileTool = tool(
-  async ({ filePath }) => {
-    const fullPath = path.resolve(process.cwd(), filePath);
+  async ({ file_path }) => {
+    const filePath = file_path;
+    const rootDir = process.cwd();
+    const fullPath = path.resolve(rootDir, filePath);
+    if (!fullPath.startsWith(rootDir)) return "❌ Error: Access denied. Cannot delete files outside the project root.";
     if (!fs.existsSync(fullPath)) return `❌ ERROR: File ${filePath} does not exist.`;
     fs.unlinkSync(fullPath);
     log.tool(`🗑️ File deleted: ${filePath}`);
@@ -86,6 +100,6 @@ export const deleteFileTool = tool(
   {
     name: "delete_file",
     description: "Deletes a file at the specified path.",
-    schema: z.object({ filePath: z.string().describe("The relative path to the file to delete.") }),
+    schema: z.object({ file_path: z.string().describe("The relative path to the file to delete.") }),
   },
 );

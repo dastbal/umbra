@@ -30,7 +30,7 @@ export class AgentDB {
         fs.mkdirSync(dbDir, { recursive: true });
       }
 
-      console.log(`💾 Connecting to Local State DB: ${dbPath}`);
+
 
       this.instance = new Database(dbPath);
 
@@ -40,6 +40,20 @@ export class AgentDB {
       this.initSchema();
     }
     return this.instance;
+  }
+
+  /**
+   * Gracefully closes the active database connection.
+   */
+  public static close(): void {
+    if (this.instance) {
+      try {
+        this.instance.close();
+      } catch (err) {
+        console.error('Error closing AgentDB:', err);
+      }
+      this.instance = undefined as any;
+    }
   }
 
   /**

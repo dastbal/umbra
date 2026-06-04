@@ -62,7 +62,7 @@ describe("Tools Unit Tests", () => {
         return true; // Directory exists
       });
 
-      const res = await safeWriteFileTool.invoke({ filePath, content: "data" });
+      const res = await safeWriteFileTool.invoke({ file_path: filePath, content: "data" });
       expect(res).toContain('METADATA: {"path": "test.ts", "action": "modified"}');
       expect(mockFs.writeFileSync).toHaveBeenCalledWith(fullPath, "data", "utf-8");
     });
@@ -76,12 +76,12 @@ describe("Tools Unit Tests", () => {
         return true; // Directory exists
       });
 
-      const res = await safeWriteFileTool.invoke({ filePath, content: "data" });
+      const res = await safeWriteFileTool.invoke({ file_path: filePath, content: "data" });
       expect(res).toContain('METADATA: {"path": "new.ts", "action": "created"}');
     });
 
     it("should block writes outside root", async () => {
-      const res = await safeWriteFileTool.invoke({ filePath: "../outside.ts", content: "data" });
+      const res = await safeWriteFileTool.invoke({ file_path: "../outside.ts", content: "data" });
       expect(res).toContain("Access denied");
       expect(mockFs.writeFileSync).not.toHaveBeenCalled();
     });
@@ -90,14 +90,14 @@ describe("Tools Unit Tests", () => {
   describe("deleteFileTool", () => {
     it("should delete existing file", async () => {
       mockFs.existsSync.mockReturnValue(true);
-      const res = await deleteFileTool.invoke({ filePath: "temp.ts" });
+      const res = await deleteFileTool.invoke({ file_path: "temp.ts" });
       expect(res).toContain("✅ SUCCESS: File temp.ts has been deleted.");
       expect(mockFs.unlinkSync).toHaveBeenCalled();
     });
 
     it("should return error if file missing", async () => {
       mockFs.existsSync.mockReturnValue(false);
-      const res = await deleteFileTool.invoke({ filePath: "missing.ts" });
+      const res = await deleteFileTool.invoke({ file_path: "missing.ts" });
       expect(res).toContain("❌ ERROR: File missing.ts does not exist.");
     });
   });
