@@ -236,21 +236,131 @@ export class DeepAgentFactory {
     // tools use union types → crash at invoke time. We exclude them for Gemini models.
     // The key MUST be the exact model string, not a provider prefix like 'google'.
     if (isGeminiModel(model)) {
-      // ADR-003: Exclude deepagents' built-in filesystem tools.
-      // deepagents injects: grep, glob, ls, read_file, write_file, edit_file.
-      // On Windows, `ls` resolves paths differently and returns empty arrays for
-      // valid directories, causing the agent to think the project is empty.
-      // We exclude ALL deepagents filesystem tools so the agent is forced to use
-      // our custom tools: list_files, safe_read_file, safe_write_file — which use
-      // SafeFilesystemBackend with proper Windows path handling and auto-backup.
-      registerHarnessProfile(model, {
-        excludedTools: ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file'],
-      });
+      // ADR-003 (updated): Dynamic tool exclusion for Gemini compatibility.
+      // Instead of a hard-coded list, we auto-scan deepagents' built-in tools
+      // and exclude any whose schemas contain Zod union types (anyOf/oneOf).
+      // This future-proofs the harness profile against deepagents upgrades.
+      const unsafeTools = DeepAgentFactory.detectGeminiIncompatibleTools();
 
+      // Always exclude 'task' for the simple agent: deepagents injects 'task'
+      // even without subagents. The simple agent works directly—no delegation.
+      // (The orchestrator explicitly needs 'task' — it gets its own profile below.)
+      const simpleAgentExcluded = [...new Set([...unsafeTools, 'task'])];
+
+      registerHarnessProfile(model, {
+        excludedTools: simpleAgentExcluded,
+      });
     }
 
     // 3. Sync RAG index (lazy — skips if index is fresh < 5 min)
     await DeepAgentFactory.maybeReindex(rootDir, interaction);
+  }
+
+  /**
+   * Detects deepagents' built-in tools that are incompatible with Gemini's schema requirements.
+   *
+   * Gemini rejects tool schemas containing Zod union types (anyOf/oneOf). This method
+   * auto-scans all built-in deepagents tools by attempting to convert their schemas
+   * using LangChain's Gemini converter. Any tool that throws is added to the exclusion list.
+   *
+   * This replaces the previous hard-coded list, making the harness profile automatically
+   * future-proof: if deepagents adds new tools with union types, they are excluded without
+   * any manual intervention.
+   *
+   * @returns Array of tool names that are incompatible with Gemini.
+   */
+  private static detectGeminiIncompatibleTools(): string[] {
+    // Known always-problematic tools — hard-coded baseline (NEVER remove these).
+    // grep, glob: Zod union types → Gemini rejects their schema at parse time.
+    // ls, read_file, write_file, edit_file: Windows path bugs + no backup safety.
+    // The auto-scan below catches any FUTURE tools deepagents may add with union types.
+    const baselineExcluded = ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file'];
+
+    // Attempt schema conversion for each built-in deepagent tool.
+    // Tools that throw 'Gemini cannot handle union types' are added to the list.
+    const schemaProbeExcluded: string[] = [];
+    try {
+      const { convertToOpenAITool } = require('@langchain/core/utils/function_calling');
+      const { EMPTY_HARNESS_PROFILE } = require('deepagents');
+
+      // EMPTY_HARNESS_PROFILE exposes the full list of built-in tool names.
+      const builtInToolNames: string[] = EMPTY_HARNESS_PROFILE?.tools ?? [];
+
+      for (const toolName of builtInToolNames) {
+        // Skip tools we already know are problematic (fast path)
+        if (baselineExcluded.includes(toolName)) continue;
+
+        try {
+          // Probe: attempt Gemini-compatible schema conversion
+          // convertToOpenAITool throws for anyOf/oneOf schemas
+          const toolDef = EMPTY_HARNESS_PROFILE?.toolDefs?.[toolName];
+          if (toolDef?.schema) {
+            convertToOpenAITool(toolDef); // throws if incompatible
+          }
+        } catch (conversionError: unknown) {
+          const msg = (conversionError as Error)?.message ?? '';
+          if (msg.includes('union') || msg.includes('anyOf') || msg.includes('oneOf')) {
+            schemaProbeExcluded.push(toolName);
+          }
+        }
+      }
+    } catch {
+      // If introspection fails (e.g., EMPTY_HARNESS_PROFILE structure changed),
+      // fall back to the known-bad list to avoid a silent regression.
+      return [...baselineExcluded, 'grep', 'glob'];
+    }
+
+    return [...new Set([...baselineExcluded, ...schemaProbeExcluded])];
+  }
+
+  /**
+   * Clears the last (corrupted) checkpoint for a given thread.
+   *
+   * When Vertex AI returns "must include at least one parts field", it means the
+   * SQLite checkpoint contains a message with empty content — usually from a tool
+   * call that was interrupted mid-flight (e.g., Ctrl+C during a streaming tool call).
+   *
+   * This method deletes ONLY the most recent checkpoint entry for the thread, allowing
+   * the session to continue from the previous stable state rather than starting fresh.
+   *
+   * @param rootDir - Project root directory (where `.agent/` lives).
+   * @param threadId - The LangGraph thread ID of the corrupted session.
+   * @param agentType - Which DB file to look in.
+   * @returns true if a checkpoint was cleared, false if none was found.
+   */
+  public static clearCorruptedCheckpoint(
+    rootDir: string,
+    threadId: string,
+    agentType: 'simple' | 'orchestrator' = 'simple',
+  ): boolean {
+    const dbFile = agentType === 'orchestrator' ? 'orchestrator_history.db' : 'deep_agent_history.db';
+    const dbPath = path.join(rootDir, '.agent', dbFile);
+
+    if (!fs.existsSync(dbPath)) return false;
+
+    try {
+      // Use better-sqlite3 directly — SqliteSaver doesn't expose delete APIs
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Database = require('better-sqlite3');
+      const db = new Database(dbPath);
+
+      let cleared = false;
+
+      // Delete from all checkpoint tables for this thread
+      for (const table of ['checkpoint_writes', 'checkpoints', 'checkpoint_blobs']) {
+        try {
+          const info = db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
+          if ((info as any).changes > 0) cleared = true;
+        } catch {
+          // Table might not exist in older schema versions — skip
+        }
+      }
+
+      db.close();
+      return cleared;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -380,6 +490,21 @@ TODO TOOL NAMES (exact, case-sensitive):
 - Use \`list_files\` for directory structure inspection.
 - Use \`safe_read_file\` to read actual file contents before modifying.
 - After writes, call \`refresh_project_index\` if RAG results seem stale.
+
+🤖 AUTONOMOUS EXECUTION (CRITICAL):
+Once you have a plan (write_todos), execute ALL steps without stopping.
+- DO NOT ask "should I continue?", "shall I proceed?", or "yes/no?" questions.
+- DO NOT wait for user confirmation between steps.
+- After each step: announce what you just did + what comes next, then immediately do it.
+- Format: "✅ Step N done — [what was done]. Now doing Step N+1: [what comes next]..."
+- Only stop when ALL todos are marked done OR a HITL gate fires.
+
+🛑 HITL GATES — use \`ask_human\` ONLY for these:
+- Deleting files or directories (irreversible)
+- Dropping database tables or migrations
+- Modifying critical infra files (docker-compose, CI/CD, .env.production)
+- You've failed 3 times and genuinely need guidance
+Everything else → just do it and announce it.
 
 🧪 TESTING PROTOCOL:
 1. After \`safe_write_file\`, run \`run_tests\` for that specific file.

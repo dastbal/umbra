@@ -322,26 +322,54 @@ program
   .command("deep")
   .description("⭐ Deep Agent — streaming session, stays open like Claude/Gemini CLI")
   .argument("[instruction]", "Optional first task (session stays open after)")
-  .option("-s, --session <name>", "Session name to continue or create", "default")
-  .option("-n, --new", "Start a fresh conversation (ignore history)")
-  .action(async (instruction: string | undefined, options: { session: string; new?: boolean }) => {
+  .option("-s, --session <name>", "Named session to persist and reopen across runs")
+  .action(async (instruction: string | undefined, options: { session?: string }) => {
     try {
       const model = resolveModel();
-      // If --new flag: generate unique id. Otherwise: use named session (persists across runs)
-      const threadId = options.new
-        ? `deep-new-${Date.now()}`
-        : `deep-${options.session}`;
+      // With --session <name>: always reopens the same named context (persistent).
+      // Without --session: ephemeral — fresh thread every run, nothing accumulates.
+      const threadId = options.session
+        ? `deep-${options.session}`
+        : `deep-ephemeral-${Date.now()}`;
       const agent = await DeepAgentFactory.create({ model, threadId });
       const renderer = new StreamRenderer('deep');
       const session = new ChatSession(agent, renderer, {
         mode: 'deep',
         model,
         threadId,
-        sessionName: options.new ? undefined : options.session,
+        sessionName: options.session,
       });
       await session.start(instruction);
     } catch (error: any) {
-      console.error(chalk.red("\n✗ Failed to start deep session:"), error?.message);
+      const isCorruptedSession = error?.message?.includes('at least one parts field');
+
+      if (isCorruptedSession && options.session) {
+        // Auto-recovery: clear the corrupted checkpoint and retry once
+        const threadId = `deep-${options.session}`;
+        process.stderr.write(
+          chalk.yellow('\n⚠️  Session history corrupted (empty message in checkpoint).\n') +
+          chalk.yellow(`   Auto-clearing session "${options.session}" and retrying...\n`)
+        );
+
+        const cleared = DeepAgentFactory.clearCorruptedCheckpoint(process.cwd(), threadId, 'simple');
+        if (cleared) {
+          try {
+            const model = resolveModel();
+            const agent = await DeepAgentFactory.create({ model, threadId });
+            const renderer = new StreamRenderer('deep');
+            const session = new ChatSession(agent, renderer, {
+              mode: 'deep', model, threadId, sessionName: options.session,
+            });
+            process.stderr.write(chalk.green('   ✅ Session recovered. Starting fresh for this session.\n\n'));
+            await session.start(instruction);
+            return;
+          } catch (retryError: any) {
+            process.stderr.write(chalk.red('   ✗ Recovery failed: ') + retryError?.message + '\n');
+          }
+        }
+      }
+
+      console.error(chalk.red('\n✗ Failed to start deep session:'), error?.message);
       process.exit(1);
     }
   });
@@ -350,21 +378,22 @@ program
   .command("orchestrate")
   .description("🎯 Orchestrator — Researcher + Coder subagents, streaming session")
   .argument("[instruction]", "Optional first task (session stays open after)")
-  .option("-s, --session <name>", "Session name to continue or create", "default")
-  .option("-n, --new", "Start a fresh conversation (ignore history)")
-  .action(async (instruction: string | undefined, options: { session: string; new?: boolean }) => {
+  .option("-s, --session <name>", "Named session to persist and reopen across runs")
+  .action(async (instruction: string | undefined, options: { session?: string }) => {
     try {
       const model = resolveModel();
-      const threadId = options.new
-        ? `orchestrate-new-${Date.now()}`
-        : `orchestrate-${options.session}`;
+      // With --session <name>: always reopens the same named context (persistent).
+      // Without --session: ephemeral — fresh thread every run, nothing accumulates.
+      const threadId = options.session
+        ? `orchestrate-${options.session}`
+        : `orchestrate-ephemeral-${Date.now()}`;
       const agent = await DeepAgentFactory.createOrchestrator({ model, threadId });
       const renderer = new StreamRenderer('orchestrate');
       const session = new ChatSession(agent, renderer, {
         mode: 'orchestrate',
         model,
         threadId,
-        sessionName: options.new ? undefined : options.session,
+        sessionName: options.session,
         recursionLimit: 100,
       });
       await session.start(instruction);
