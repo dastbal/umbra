@@ -36,6 +36,12 @@ export interface ChatSessionConfig {
   model: string;
   /** LangGraph thread ID for conversation persistence. */
   threadId: string;
+  /**
+   * Human-readable session name shown in the banner.
+   * If undefined, displays "new session" in the banner.
+   * @example "auth-module", "default", "users-refactor"
+   */
+  sessionName?: string;
   /** LangGraph recursion limit. @default 100 */
   recursionLimit?: number;
 }
@@ -55,7 +61,13 @@ export interface ChatSessionConfig {
  * readline is never alive while tokens are being streamed.
  */
 export class ChatSession {
-  private readonly config: Required<ChatSessionConfig>;
+  private readonly config: {
+    mode: 'deep' | 'orchestrate';
+    model: string;
+    threadId: string;
+    sessionName?: string;
+    recursionLimit: number;
+  };
   private readonly graphConfig: { configurable: { thread_id: string }; recursionLimit: number };
   private isRunning = false;
 
@@ -96,7 +108,7 @@ export class ChatSession {
     this.isRunning = true;
 
     // Welcome banner
-    process.stdout.write(buildWelcomeBanner(this.config.mode, this.config.model));
+    process.stdout.write(buildWelcomeBanner(this.config.mode, this.config.model, this.config.sessionName));
 
     // Handle Ctrl+C gracefully (no readline needed — process-level signal)
     process.on('SIGINT', () => this.shutdown());

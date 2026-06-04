@@ -177,9 +177,14 @@ export function formatToolInput(toolName: string, input: unknown): string {
  *
  * @param mode - 'deep' | 'orchestrate'
  * @param model - The resolved model string.
+ * @param sessionName - Named session being continued (undefined = new session).
  * @returns Multiline banner string ready to print.
  */
-export function buildWelcomeBanner(mode: 'deep' | 'orchestrate', model: string): string {
+export function buildWelcomeBanner(
+  mode: 'deep' | 'orchestrate',
+  model: string,
+  sessionName?: string,
+): string {
   const title = mode === 'deep'
     ? colors.deep.bold('  NestJS AI Agent — Deep Mode  ')
     : colors.orchestrator.bold('  NestJS AI Agent — Orchestrator  ');
@@ -189,9 +194,14 @@ export function buildWelcomeBanner(mode: 'deep' | 'orchestrate', model: string):
     : colors.muted('  Researcher + Coder subagents coordinated  ');
 
   const modelLine = colors.muted(`  Model: ${chalk.white(model)}  `);
-  const hint = colors.dim('  Type your task. Press Ctrl+C to exit.  ');
 
-  const width = 46;
+  const sessionLine = sessionName
+    ? colors.muted(`  Session: ${chalk.white(sessionName)} ${colors.accent('(continuing)')}  `)
+    : colors.muted(`  Session: ${chalk.hex('#F59E0B')('new')} ${colors.dim('(--session <name> to persist)')}  `);
+
+  const hint = colors.dim('  Type your task. Ctrl+C to exit.  ');
+
+  const width = 48;
   const top    = colors.dim('╭' + '─'.repeat(width) + '╮');
   const bottom = colors.dim('╰' + '─'.repeat(width) + '╯');
   const empty  = colors.dim('│' + ' '.repeat(width) + '│');
@@ -203,7 +213,7 @@ export function buildWelcomeBanner(mode: 'deep' | 'orchestrate', model: string):
     colors.dim('│') + title + colors.dim('│'),
     colors.dim('│') + subtitle + colors.dim('│'),
     colors.dim('│') + modelLine + colors.dim('│'),
-    empty,
+    colors.dim('│') + sessionLine + colors.dim('│'),
     colors.dim('│') + hint + colors.dim('│'),
     empty,
     bottom,

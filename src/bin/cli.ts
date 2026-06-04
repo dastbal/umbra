@@ -322,15 +322,22 @@ program
   .command("deep")
   .description("⭐ Deep Agent — streaming session, stays open like Claude/Gemini CLI")
   .argument("[instruction]", "Optional first task (session stays open after)")
-  .action(async (instruction?: string) => {
+  .option("-s, --session <name>", "Session name to continue or create", "default")
+  .option("-n, --new", "Start a fresh conversation (ignore history)")
+  .action(async (instruction: string | undefined, options: { session: string; new?: boolean }) => {
     try {
       const model = resolveModel();
-      const agent = await DeepAgentFactory.create({ model });
+      // If --new flag: generate unique id. Otherwise: use named session (persists across runs)
+      const threadId = options.new
+        ? `deep-new-${Date.now()}`
+        : `deep-${options.session}`;
+      const agent = await DeepAgentFactory.create({ model, threadId });
       const renderer = new StreamRenderer('deep');
       const session = new ChatSession(agent, renderer, {
         mode: 'deep',
         model,
-        threadId: `deep-${Date.now()}`,
+        threadId,
+        sessionName: options.new ? undefined : options.session,
       });
       await session.start(instruction);
     } catch (error: any) {
@@ -343,15 +350,21 @@ program
   .command("orchestrate")
   .description("🎯 Orchestrator — Researcher + Coder subagents, streaming session")
   .argument("[instruction]", "Optional first task (session stays open after)")
-  .action(async (instruction?: string) => {
+  .option("-s, --session <name>", "Session name to continue or create", "default")
+  .option("-n, --new", "Start a fresh conversation (ignore history)")
+  .action(async (instruction: string | undefined, options: { session: string; new?: boolean }) => {
     try {
       const model = resolveModel();
-      const agent = await DeepAgentFactory.createOrchestrator({ model });
+      const threadId = options.new
+        ? `orchestrate-new-${Date.now()}`
+        : `orchestrate-${options.session}`;
+      const agent = await DeepAgentFactory.createOrchestrator({ model, threadId });
       const renderer = new StreamRenderer('orchestrate');
       const session = new ChatSession(agent, renderer, {
         mode: 'orchestrate',
         model,
-        threadId: `orchestrate-${Date.now()}`,
+        threadId,
+        sessionName: options.new ? undefined : options.session,
         recursionLimit: 100,
       });
       await session.start(instruction);
