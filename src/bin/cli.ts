@@ -7,6 +7,8 @@ import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import * as readline from "readline";
 import { AgentFactory } from "../core/agent/factory";
 import { GraphAgentFactory } from "../core/agent/graph-factory";
+import { DeepAgentFactory } from "../core/agent/deep-agent-factory";
+import { Command as LangGraphCommand } from "@langchain/langgraph";
 import { AgentDB } from "../core/state/db";
 
 const program = new Command();
@@ -313,4 +315,85 @@ program
     }
   });
 
+
+program
+  .command("deep")
+  .description("🚀 Deep Agent mode — full createDeepAgent with write_todos, SafeFilesystem, and built-in HITL")
+  .argument("<instruction>", "Technical instruction for the agent")
+  .action(async (instruction: string) => {
+    try {
+      if (!instruction || instruction.trim().length === 0) {
+        log.error("Provide a valid instruction.");
+        return;
+      }
+
+      log.sys("Initializing Agent in DEEP mode (createDeepAgent)...");
+      const threadId = "deep-agent-session";
+      const config = { configurable: { thread_id: threadId }, recursionLimit: 50 };
+      const agent = await DeepAgentFactory.create({ threadId });
+
+      log.ai(`Processing (Deep): "${instruction}"`);
+
+      let result = await (agent as any).invoke(
+        { messages: [{ role: "human", content: instruction }] },
+        config,
+      );
+
+      // 🎓 NATIVE HITL LOOP — DeepAgents style
+      // createDeepAgent uses __interrupt__ + Command.resume instead of dangerous_actor nodes.
+      while (result.__interrupt__) {
+        const interrupts = result.__interrupt__[0].value;
+        const actionRequests = interrupts.actionRequests ?? [];
+        const reviewConfigs = interrupts.reviewConfigs ?? [];
+
+        console.log(chalk.yellow("\n✋ [HITL — AGENT PAUSED FOR APPROVAL]"));
+
+        const decisions: any[] = [];
+
+        for (let i = 0; i < actionRequests.length; i++) {
+          const action = actionRequests[i];
+          const reviewConfig = reviewConfigs[i];
+          const allowed: string[] = reviewConfig?.allowedDecisions ?? ["approve", "reject"];
+
+          console.log(chalk.white(`\n   Tool: ${chalk.bold(action.name)}`));
+          console.log(chalk.gray(`   Args: ${JSON.stringify(action.args, null, 2)}`));
+          console.log(chalk.gray(`   Allowed: ${allowed.join(", ")}`));
+
+          const confirmed = await askConfirmation("Do you approve this action?");
+
+          if (confirmed) {
+            log.sys("Approved ✅");
+            decisions.push({ type: "approve" });
+          } else {
+            log.error("Rejected ❌");
+            decisions.push({
+              type: "reject",
+              message: "User rejected this action. Do not retry. Ask the user what to do next.",
+            });
+          }
+        }
+
+        // Resume agent with human decisions
+        result = await (agent as any).invoke(
+          new LangGraphCommand({ resume: { decisions } }),
+          config,
+        );
+      }
+
+      // DISPLAY FINAL RESPONSE
+      const lastMessage = result.messages?.[result.messages.length - 1];
+      if (lastMessage?.content) {
+        console.log("\n" + chalk.cyan("--- 🤖 DEEP AGENT RESPONSE ---"));
+        console.log(lastMessage.content);
+        console.log(chalk.cyan("------------------------------\n"));
+      }
+
+      log.sys("Task completed (Deep Agent).");
+    } catch (error: any) {
+      log.error("Error in deep agent:");
+      log.error(error?.message || "Unknown error");
+    }
+  });
+
 program.parse(process.argv);
+
