@@ -1,275 +1,250 @@
-# NestJS AI Agent
+# NestJS AI Agent Lib
 
-An AI-powered autonomous agent for code analysis, understanding, and modification within NestJS applications. Built for Principal Software Engineer level tasks using RAG and a Multi-Agent architecture.
+An AI-powered autonomous agent framework for NestJS applications, designed for sophisticated code analysis, understanding, modification, and orchestration. Built for Principal Software Engineer level tasks using advanced RAG, Multi-Agent architecture, and robust safety protocols.
 
 ## Table of Contents
-- [Getting Started (Quick Setup)](#getting-started-quick-setup)
-- [Architecture](#architecture)
-- [Graph Flow](#graph-flow)
-- [RAG Strategy (X-Ray)](#rag-strategy-x-ray)
-- [Cost Tracking & Usage Metrics](#cost-tracking--usage-metrics)
-- [Development Standards](#development-standards)
-- [Persistence Strategy](#persistence-strategy)
-- [Project Structure](#project-structure)
 
-## Getting Started (Quick Setup)
+*   [Overview](#overview)
+*   [Getting Started](#getting-started)
+*   [Core Concepts](#core-concepts)
+    *   [DeepAgentFactory](#deepagentfactory)
+    *   [RAG Strategy (X-Ray)](#rag-strategy-x-ray)
+    *   [Development Standards](#development-standards)
+    *   [Security & Persistence](#security--persistence)
+*   [Command Line Interface (CLI)](#command-line-interface-cli)
+*   [Project Structure](#project-structure)
+*   [Cost Tracking & Usage Metrics](#cost-tracking--usage-metrics)
+*   [Roadmap](#roadmap)
+*   [Contributing](#contributing)
+*   [License](#license)
+
+---
+
+## Overview
+
+The NestJS AI Agent Lib empowers developers to automate complex coding tasks within their NestJS projects. It leverages a combination of Large Language Models (LLMs), Retrieval-Augmented Generation (RAG), and a flexible multi-agent system to provide intelligent code assistance. From refactoring and bug fixing to generating new modules, the agent operates with a strong emphasis on code quality, safety, and adherence to project standards.
+
+---
+
+## Getting Started
 
 ### 1. Installation
+
 Install the package via npm:
+
 ```bash
 npm install @dastbal/nestjs-ai-agent
 ```
 
 ### 2. Configuration
-Create a `.env` file in your project root with your Google Cloud Vertex AI credentials and chosen models:
+
+Create a `.env` file in your project root with your API credentials. The agent supports dynamic model switching (via `model-resolver.ts`), prioritizing the `AGENT_MODEL` environment variable.
 
 ```dotenv
-# Vertex AI JSON Credentials Path
-GOOGLE_APPLICATION_CREDENTIALS="/absolute/path/to/your/keyfile.json"
+# API Keys (Required for Google models)
+GEMINI_API_KEY="your-api-key"
 
-# Models
-GOOGLE_CLOUD_MODEL_NAME="gemini-1.0-pro"
-EMBEDDING_MODEL_NAME="textembedding-004"
+# Model Selection (Optional - overrides default)
+# Example: AGENT_MODEL="gemini-2.5-pro"
+AGENT_MODEL="gemini-2.5-flash-lite"
 ```
 
 ### 3. Usage
 
-#### Import in NestJS
 Import the module into your `app.module.ts`:
 
 ```typescript
 import { AiAgentModule } from '@dastbal/nestjs-ai-agent';
 
 @Module({
-  imports: [
-    AiAgentModule.forRoot(),
-  ],
+  imports: [AiAgentModule.forRoot()],
 })
 export class AppModule {}
 ```
 
-#### Run the Agent (CLI)
-Interact with the agent directly using the built-in CLI:
-
-```bash
-# Start multi-agent mode
-npm run agent "Explícame la arquitectura de este proyecto"
-```
-*(The first run will automatically sync and index your codebase for RAG context).*
-
-#### Advanced CLI Commands (Optional)
-If your CLI is configured for standalone tool execution, you can trigger them manually:
-
-```bash
-# Manually trigger RAG indexing
-npm run cli -- index --dir src
-
-# Use Researcher to analyze dependencies
-npm run cli -- research src/my-service.ts
-```
-
 ---
 
-## Architecture
+## Core Concepts
 
-### Multi-Agent System
+### DeepAgentFactory
 
-The project employs a sophisticated multi-agent architecture where specialized agents collaborate to perform complex code-related tasks. This modular approach enhances maintainability, scalability, and allows for focused development of each agent's capabilities.
+The `DeepAgentFactory` is the central orchestrator for creating and configuring AI agents. It offers two primary factory methods:
+
+*   **`DeepAgentFactory.create(config, interaction)`**:
+    *   Initializes a **simple, single-agent** instance.
+    *   Ideal for straightforward tasks, quick code modifications, and direct Q&A sessions.
+    *   Includes core tools: filesystem access (`safe_write_file`, `safe_read_file`), RAG search (`ask_codebase`), planning (`write_todos`), and validation (`run_integrity_check`).
+    *   Uses isolated SQLite persistence for its conversation history.
+
+*   **`DeepAgentFactory.createOrchestrator(config, interaction)`**:
+    *   Initializes a **multi-subagent orchestrator**.
+    *   Designed for complex features, new module generation, and architectural changes.
+    *   Delegates tasks to specialized subagents (`researcher`, `coder`) via the `task` tool.
+    *   Enforces a strict orchestration protocol: Plan → Research → Implement → Verify.
+    *   Supports context compression for long-running tasks.
+    *   Uses a separate SQLite database for its history to avoid conflicts with simple agents.
+
+Both methods ensure proper project indexing (`IndexerService`), safe filesystem operations, and adherence to defined quality and safety standards.
+
+### Multi-Agent Roles (Subagents)
+
+When operating in Orchestrator mode, tasks are delegated to specialized subagents:
 
 #### Supervisor Agent
-
-*   **Role:** The central orchestrator. The Supervisor agent is responsible for managing the overall workflow and task execution. It delegates tasks to specialized agents (Researcher, Coder), monitors their progress, and coordinates their interactions to achieve a larger objective. It acts as the main entry point for complex operations that require multiple steps or agent collaborations.
-*   **Key Files:**
-    *   `src/core/agent/graph/supervisor.graph.ts`: Defines the state machine or graph structure that dictates the flow of tasks and agent interactions.
-    *   `src/core/agent/supervisor.service.ts`: Contains the core logic for task delegation, state management, and coordination between agents.
+*   **Role:** The central orchestrator. It manages the overall workflow, delegates tasks to specialized agents (Researcher, Coder), monitors progress, and coordinates their interactions.
+*   **Key Files:** `src/core/agent/graph/supervisor.graph.ts`, `src/core/agent/supervisor.service.ts`
 
 #### Researcher Agent
-
-*   **Role:** The intelligence gatherer. The Researcher agent specializes in analyzing the codebase, understanding its structure, identifying dependencies, and retrieving relevant information. It heavily utilizes the RAG Discovery Strategy (X-Ray) to query and interpret code. Its findings are crucial for informing the Coder agent's actions or providing insights to the user.
-*   **Key Files:**
-    *   `src/core/agent/researcher.service.ts`: Implements the Researcher's core functionalities.
-    *   `src/core/rag/retriever.ts`: Handles the retrieval of relevant code chunks and context augmentation using semantic search and dependency information.
-    *   `src/core/tools/ast/chunker.ts`: Responsible for parsing code into Abstract Syntax Trees (ASTs) and segmenting it into meaningful chunks for analysis.
+*   **Role:** The intelligence gatherer. It specializes in analyzing the codebase, understanding its structure, identifying dependencies, and retrieving relevant information using RAG.
+*   **Key Files:** `src/core/agent/researcher.service.ts`, `src/core/rag/retriever.ts`, `src/core/tools/ast/chunker.ts`
 
 #### Coder Agent
+*   **Role:** The code manipulator. It is responsible for generating, modifying, and refactoring code based on the Researcher's analysis, applying strict development standards ('Surgeon's Rule', 'Golden Prompt').
+*   **Key Files:** `src/core/agent/coder.service.ts`, `src/core/agent/graph/coder.graph.ts`
 
-*   **Role:** The code manipulator. The Coder agent is responsible for generating, modifying, and refactoring code. It receives instructions, often based on the analysis provided by the Researcher, and applies strict development standards ('Surgeon's Rule', 'Golden Prompt') to ensure the generated or modified code is of high quality, safe, and maintainable.
-*   **Key Files:**
-    *   `src/core/agent/coder.service.ts`: Contains the core logic for code generation and modification tasks.
-    *   `src/core/agent/graph/coder.graph.ts`: Defines the specific task execution graph for the Coder agent, outlining its internal workflows.
+### Graph Flow
+
+The interaction between agents is managed through graph-based execution (LangGraph), defining complex workflows as state machines:
+1.  Supervisor receives a request.
+2.  Supervisor delegates analysis to Researcher.
+3.  Researcher performs analysis using RAG (X-Ray).
+4.  Supervisor instructs Coder based on findings.
+5.  Coder modifies code surgically.
+6.  Supervisor confirms completion or initiates further steps.
+
+### RAG Strategy (X-Ray)
+
+The agent employs an advanced Retrieval-Augmented Generation (RAG) strategy, internally termed "X-Ray," for deep code understanding.
+
+1.  **Code Indexing:** The codebase is scanned, parsed using Abstract Syntax Trees (ASTs), and broken down into meaningful code chunks. Structural dependencies are extracted to build a dependency graph.
+    *   *Key Components:* `IndexerService`, `NestChunker`, AST parsing.
+2.  **Semantic Search & Retrieval:** Queries are embedded and used to perform vector similarity searches against the indexed code chunks, retrieving the most relevant segments.
+    *   *Key Components:* `Retriever.query()`, Vector Similarity Search.
+3.  **Context Augmentation:** Retrieved code chunks are enriched with file dependencies, import graphs, and simplified file skeletons to provide rich contextual information for the LLM.
+    *   *Key Components:* `Retriever.getContextForLLM()`, `getFileSkeleton()`, dependency analysis.
+4.  **Report Generation:** All gathered information is compiled into a structured "RAG ANALYSIS REPORT," which serves as the primary input for the LLM, enabling informed analysis and code generation.
+
+This "X-Ray" approach allows agents to deeply "see" and understand the codebase's structure, semantics, and relationships.
+
+### Development Standards
+
+#### Surgeon's Rule
+
+The Coder agent strictly adheres to the "Surgeon's Rule" to ensure code modifications are precise, safe, and non-disruptive:
+
+1.  **Read-Before-Write:** NEVER overwrite a file without first reading and thoroughly understanding its existing logic, TSDocs, dependencies, and context using `safe_read_file`.
+2.  **Preservation First:** Do not delete existing TSDocs, comments, or unrelated business logic. Focus on augmenting and refining code surgically, avoiding unintended side effects.
+3.  **Anti-Regression:** Understand the purpose of existing code before altering or removing it. Ensure that no functionality, especially edge-case handling, is lost. If unsure, research its purpose first.
+
+#### Golden Prompt
+
+Prompts are carefully crafted using the "Golden Prompt" principles to ensure clarity, context, and adherence to standards, guiding the AI to produce high-quality, relevant code.
+
+### Security & Persistence
+
+#### SafeFilesystemBackend
+
+All filesystem operations are routed through `SafeFilesystemBackend`, which enforces critical safety measures:
+
+*   **Sandboxing:** Operations are strictly confined to the project's root directory (`rootDir`) to prevent accidental modifications outside the intended scope.
+*   **Backup System:** Before any file write operation (`safe_write_file`), an automatic backup of the original file is created in the `.agent/backups/` directory. This provides a rollback mechanism.
+*   **Atomic Operations:** Designed to ensure that file writes are as atomic as possible, reducing the risk of corrupted files.
+
+#### Human-in-the-Loop (HITL)
+
+For critical operations or when safety protocols are triggered (e.g., after multiple failed self-corrections), the agent may pause and request explicit human approval before proceeding. This ensures that potentially risky code modifications are reviewed by a human.
 
 ---
 
-## Graph Flow
+## Command Line Interface (CLI)
 
-The interaction between agents is managed through graph-based execution, typically using a library like LangGraph. This allows for defining complex workflows as state machines or directed graphs.
+Interact with the agent using the provided CLI commands.
 
-*   **Supervisor as Orchestrator:** The Supervisor agent often defines the high-level graph that dictates the sequence of operations. For example, a task might involve:
-    1.  Supervisor receives a request.
-    2.  Supervisor delegates analysis to Researcher.
-    3.  Researcher performs analysis using RAG (X-Ray).
-    4.  Researcher returns findings to Supervisor.
-    5.  Supervisor instructs Coder based on findings.
-    6.  Coder modifies code, adhering to standards.
-    7.  Supervisor confirms completion or initiates further steps.
-*   **Agent-Specific Graphs:** Individual agents like the Coder may also have their own internal graphs to manage complex sub-tasks (e.g., parsing, modification, validation).
-*   **State Management:** The graph execution manages the state transitions between different nodes (tasks or agent calls), ensuring a coherent flow.
+### Basic Usage
 
-*   **Key Files:** `src/core/agent/graph/supervisor.graph.ts`, `src/core/agent/graph/coder.graph.ts`.
+The most common way to interact is by running the agent directly with a prompt:
 
----
-
-## RAG Strategy (X-Ray)
-
-The Researcher agent employs an advanced RAG (Retrieval-Augmented Generation) strategy, termed "X-Ray," to achieve a deep and context-aware understanding of the codebase. This strategy combines semantic search with structural analysis.
-
-1.  **Code Indexing:**
-    *   The process begins with indexing the codebase. Files are scanned, and their content is parsed using Abstract Syntax Trees (ASTs) via the `NestChunker`.
-    *   Code is broken down into meaningful segments (`ProcessedChunk`).
-    *   Structural dependencies (e.g., import statements) are extracted, forming a dependency graph (`GraphEdge`).
-    *   **Key Files:** `src/core/rag/indexer.ts` (Orchestrates the indexing pipeline), `src/core/tools/ast/chunker.ts` (Handles AST parsing, chunking, and dependency extraction).
-2.  **Semantic Search & Retrieval:**
-    *   When a query is made, the Researcher generates an embedding for the query and performs a vector similarity search against the indexed code chunks stored in the `AgentDB`.
-    *   This retrieves the most semantically relevant code segments.
-    *   **Key Files:** `src/core/rag/retriever.ts` (Implements `query` method for semantic search).
-3.  **Context Augmentation:**
-    *   To provide rich context, the retrieved code chunks are augmented with additional information:
-        *   **File Dependencies:** The import graph for the file containing the chunk is retrieved.
-        *   **Code Structure:** A simplified "skeleton" of the file (e.g., class and method signatures) is fetched.
-    *   This multi-faceted information provides a deep understanding of the code's context and relationships.
-    *   **Key Files:** `src/core/rag/retriever.ts` (Implements `getContextForLLM` which performs augmentation using `getDependencies` and `getFileSkeleton`).
-4.  **Report Generation:**
-    *   All gathered information (query, relevant chunks, scores, dependencies, skeletons) is compiled into a structured "RAG ANALYSIS REPORT". This comprehensive report serves as the input context for the LLM, enabling more informed responses and actions.
-
-This "X-Ray" strategy allows the agents to "see" into the codebase's structure and semantics, facilitating accurate analysis and modification.
-
----
-
-## Cost Tracking & Usage Metrics
-
-The system now includes built-in real-time cost tracking and token usage monitoring for transparency and resource management.
-
-### Features
-- **Real-time Monitoring**: See exact token counts (prompt/completion) and USD cost for every agent action.
-- **Configurable Pricing**: Easily update model prices via `llm-pricing.json` in the root directory.
-- **DDD Implementation**: Uses `Money` and `TokenUsage` Value Objects for high-precision calculations.
-- **Visual Feedback**: Integration with the CLI spinner shows status and cost metrics upon success.
-
-### Configuration (`llm-pricing.json`)
-You can customize the cost per million tokens for any model:
-```json
-{
-  "gemini-2.0-flash-lite-001": {
-    "inputPricePerMillion": 0.1,
-    "outputPricePerMillion": 0.3
-  }
-}
+```bash
+# Start the main agent in a conversational mode
+npm run agent "Explain the architecture of this project"
 ```
 
----
+*(The first run of an agent type typically syncs and indexes your codebase for RAG context).*
 
-## Development Standards
+### Advanced Commands
 
-### Surgeon's Rule
+For more granular control and specific agent modes, use the `run` command with subcommands:
 
-The 'Surgeon's Rule' is a set of rigorous principles that the Coder agent strictly adheres to, ensuring that code modifications are performed with utmost care, precision, and minimal risk of regression. It emphasizes a deep understanding of the code before any changes are made.
+*   **`deep`**:
+    *   Launches the primary, sophisticated `DeepAgentFactory` orchestrator.
+    *   Ideal for complex, multi-step tasks requiring research, planning, and coding.
+    *   Example: `npm run agent deep -- "Implement a caching layer using Redis"`
 
-1.  **Read-Before-Write:**
-    *   **Description:** Before altering any code, the agent must thoroughly read and comprehend the existing code, its purpose, its dependencies, and its context within the broader system. This involves understanding the implications of any potential change.
-    *   **Implementation:** Guided by the Researcher's analysis and direct code inspection.
-2.  **Preservation First (Anti-Regression):**
-    *   **Description:** The primary goal is to preserve existing functionality and unrelated business logic. Changes should be targeted and isolated to the specific task, avoiding unintended side effects on other parts of the codebase. Existing comments, TSDocs, and code structure should be maintained unless they are the direct subject of modification.
-    *   **Implementation:** Focus on minimal, surgical changes; careful review of impact; maintaining code style and documentation.
-3.  **Differential Analysis:**
-    *   **Description:** The agent must clearly understand the difference between the existing code and the proposed changes. The focus is on implementing *only* the intended modifications, ensuring no extraneous code is introduced or existing code is altered unintentionally.
-    *   **Implementation:** Comparing old and new code states, validating changes against the prompt's requirements.
+*   **`chat`**:
+    *   Initiates a simpler, conversational agent mode.
+    *   Suitable for quick questions, code explanations, or single-file modifications.
+    *   Example: `npm run agent chat -- "What does this function do?"`
 
-*   **Application:** These rules are embedded in the Coder agent's operational logic and prompt engineering, guiding its code generation and modification processes.
+*   **`graph`**:
+    *   Allows direct interaction with agents operating on a graph-based execution flow (e.g., using LangGraph).
+    *   Useful for debugging or understanding specific agent state transitions.
+    *   Example: `npm run agent graph -- "Trace the execution flow for the refactoring task"`
 
-### Golden Prompt
-
-The 'Golden Prompt' is a standardized approach to crafting prompts for AI interactions, particularly for instructing the Coder agent. It ensures that prompts are clear, comprehensive, and provide all necessary information for the AI to generate accurate, high-quality, and contextually relevant code.
-
-*   **Key Characteristics:**
-    *   **Clarity and Specificity:** The objective and desired outcome are stated unambiguously.
-    *   **Contextual Richness:** Includes relevant background information, existing code snippets, architectural constraints, and data structures.
-    *   **Adherence to Standards:** Explicitly mentions standards to follow, such as the 'Surgeon's Rule', specific design patterns (e.g., DDD), or coding style guidelines.
-    *   **Defined Output Format:** Specifies the expected structure, format, or type of the generated code (e.g., a specific function signature, a class definition, a DTO).
-    *   **Error Handling Considerations:** May include instructions on how to handle potential errors or edge cases.
-
-*   **Application:** Prompts are carefully constructed based on these principles, often by the Supervisor or Researcher agents, before being sent to the Coder agent.
-
----
-
-## Persistence Strategy
-
-### Isolated SQLite Persistence
-
-The project employs a robust persistence strategy that ensures data isolation and efficient state management for each agent.
-
-*   **Core Idea:** Instead of a single, monolithic database, each agent (or a logical group of agents) manages its own dedicated SQLite database file.
-*   **Implementation:**
-    *   The `AgentDB` service acts as an abstraction layer over the actual database implementation.
-    *   `SqliteSaver` provides the concrete implementation for interacting with SQLite databases.
-    *   Each agent instance is typically associated with a specific SQLite file (e.g., `.agent/memory.db` for a default agent).
-*   **Data Managed:** These isolated databases store crucial agent-specific information:
-    *   **Code Embeddings:** Vector representations of code chunks used for RAG.
-    *   **Dependency Graph:** Structural relationships between code files.
-    *   **Agent State:** Memory, history, and configuration specific to the agent.
-*   **Benefits:**
-    *   **Data Isolation:** Prevents data conflicts and unintended side effects between different agents.
-    *   **Modularity & Scalability:** Simplifies agent development and allows for independent scaling or deployment.
-    *   **Performance:** Localized data access can lead to faster read/write operations for agent-specific tasks.
-    *   **Simplicity:** SQLite is lightweight and easy to manage, requiring no separate database server.
-*   **Key Files:**
-    *   `src/core/state/db.ts`: Defines the interface for database operations.
-    *   `src/core/state/sqlite-saver.ts`: Implements the SQLite persistence logic.
-    *   `src/core/agent/factory.ts`: Responsible for creating agent instances and configuring their persistence layers.
-
-This strategy ensures that each agent operates with its own clean state, enhancing the overall reliability and maintainability of the system.
+*   **`classic`**:
+    *   Launches the older, simpler agent based on `AgentFactory`.
+    *   May be used for backward compatibility or tasks not requiring the full power of `DeepAgentFactory`.
+    *   Example: `npm run agent classic -- "Add a comment to calculateTotal function"`
 
 ---
 
 ## Project Structure
 
-```
+```text
 .
 ├── src/
 │   ├── core/
-│   │   ├── agent/
-│   │   │   ├── graph/
-│   │   │   │   ├── coder.graph.ts
-│   │   │   │   └── supervisor.graph.ts
-│   │   │   ├── coder.service.ts
-│   │   │   ├── factory.ts             # Agent factory, persistence setup
-│   │   │   ├── graph-factory.ts       # Graph agent instantiation
-│   │   │   ├── index.ts               # Agent module exports
-│   │   │   └── researcher.service.ts
-│   │   ├── llm/
-│   │   │   └── provider.ts            # LLM and embedding model configuration
-│   │   ├── rag/
-│   │   │   ├── indexer.ts             # RAG indexing logic
-│   │   │   └── retriever.ts           # RAG retrieval and context augmentation
-│   │   ├── state/
-│   │   │   ├── agent-db.ts            # Database abstraction layer
-│   │   │   ├── file-registry.ts       # File change tracking
-│   │   │   └── sqlite-saver.ts        # SQLite persistence implementation
-│   │   └── tools/
-│   │       ├── ast/
-│   │       │   └── chunker.ts         # Code parsing and chunking
-│   │       ├── ask-codebase.tool.ts   # Tool for codebase queries
-│   │       └── execute-command.tool.ts # Tool for executing shell commands (requires caution)
-│   ├── interaction/
-│   │   ├── interaction.service.ts     # Service for user interaction (spinners, etc.)
-│   │   └── ora-spinner-adapter.ts     # Adapter for ora spinner
-│   ├── app.module.ts
-│   └── main.ts
-├── .agent/
-│   └── memory.db                      # Example SQLite database file for persistence
-├── .env                               # Environment variables configuration
-├── .gitignore
+│   │   ├── agent/                 # Agent factory, supervisor, researcher, coder, etc.
+│   │   ├── llm/                   # LLM provider configuration
+│   │   ├── rag/                   # RAG indexing and retrieval logic
+│   │   ├── state/                 # Persistence (SQLite) and DB abstraction
+│   │   ├── interaction/           # CLI interaction, spinners, etc.
+│   │   ├── tools/                 # Reusable agent tools (filesystem, codebase, etc.)
+│   │   ├── config/                # Configuration resolvers (models, etc.)
+│   │   └── subagents/             # Specialized subagents (e.g., researcher, coder)
+│   ├── app.module.ts              # Main application module
+│   └── main.ts                    # Application entry point
+├── .agent/                        # Agent-specific data
+│   ├── history.db                 # Default agent conversation history
+│   ├── deep_agent_history.db      # Orchestrator conversation history
+│   └── backups/                   # Backups for safe file operations
+├── .env                           # Environment variables
 ├── README.md
 ├── tsconfig.json
 └── package.json
 ```
-*Note: The project structure is illustrative and may vary based on the exact implementation.*
+
+---
+
+## Cost Tracking & Usage Metrics
+
+The library includes integrated, real-time cost tracking and token usage monitoring. Prices are configurable via `llm-pricing.json`, allowing for precise cost management and transparency. The system utilizes DDD Value Objects (`Money`, `TokenUsage`) for accurate calculations.
+
+---
+
+## Roadmap
+
+- [x] **Phase 1: LLM Agnosticism:** Dynamic model switching via `.env` configured in `src/core/config/model-resolver.ts` (*Completed in commit `4d11081`*).
+- [ ] **Phase 2: SubAgents:** Splitting responsibilities into specialized `Researcher` and `Coder` subagents orchestrated by the DeepAgent.
+- [ ] **Phase 3: Web UI Interface:** Exposing a frontend dashboard to view the dependency graph and approve HITL actions visually.
+
+---
+
+## Contributing
+
+Contributions are welcome! Please follow the development standards outlined in this README and submit a Pull Request. For major changes, please open an issue first to discuss the proposed changes.
+
+---
+
+## License
+
+This project is licensed under the MIT License.

@@ -8,6 +8,8 @@ import * as readline from "readline";
 import { AgentFactory } from "../core/agent/factory";
 import { GraphAgentFactory } from "../core/agent/graph-factory";
 import { DeepAgentFactory } from "../core/agent/deep-agent-factory";
+import { StreamRenderer, ChatSession } from "../presentation/cli";
+import { resolveModel } from "../core/config/model-resolver";
 import { Command as LangGraphCommand } from "@langchain/langgraph";
 import { AgentDB } from "../core/state/db";
 
@@ -318,157 +320,44 @@ program
 
 program
   .command("deep")
-  .description("🚀 Deep Agent mode — full createDeepAgent with write_todos, SafeFilesystem, and built-in HITL")
-  .argument("<instruction>", "Technical instruction for the agent")
-  .action(async (instruction: string) => {
+  .description("⭐ Deep Agent — streaming session, stays open like Claude/Gemini CLI")
+  .argument("[instruction]", "Optional first task (session stays open after)")
+  .action(async (instruction?: string) => {
     try {
-      if (!instruction || instruction.trim().length === 0) {
-        log.error("Provide a valid instruction.");
-        return;
-      }
-
-      log.sys("Initializing Agent in DEEP mode (createDeepAgent)...");
-      const threadId = "deep-agent-session";
-      const config = { configurable: { thread_id: threadId }, recursionLimit: 50 };
-      const agent = await DeepAgentFactory.create({ threadId });
-
-      log.ai(`Processing (Deep): "${instruction}"`);
-
-      let result = await (agent as any).invoke(
-        { messages: [{ role: "human", content: instruction }] },
-        config,
-      );
-
-      // 🎓 NATIVE HITL LOOP — DeepAgents style
-      // createDeepAgent uses __interrupt__ + Command.resume instead of dangerous_actor nodes.
-      while (result.__interrupt__) {
-        const interrupts = result.__interrupt__[0].value;
-        const actionRequests = interrupts.actionRequests ?? [];
-        const reviewConfigs = interrupts.reviewConfigs ?? [];
-
-        console.log(chalk.yellow("\n✋ [HITL — AGENT PAUSED FOR APPROVAL]"));
-
-        const decisions: any[] = [];
-
-        for (let i = 0; i < actionRequests.length; i++) {
-          const action = actionRequests[i];
-          const reviewConfig = reviewConfigs[i];
-          const allowed: string[] = reviewConfig?.allowedDecisions ?? ["approve", "reject"];
-
-          console.log(chalk.white(`\n   Tool: ${chalk.bold(action.name)}`));
-          console.log(chalk.gray(`   Args: ${JSON.stringify(action.args, null, 2)}`));
-          console.log(chalk.gray(`   Allowed: ${allowed.join(", ")}`));
-
-          const confirmed = await askConfirmation("Do you approve this action?");
-
-          if (confirmed) {
-            log.sys("Approved ✅");
-            decisions.push({ type: "approve" });
-          } else {
-            log.error("Rejected ❌");
-            decisions.push({
-              type: "reject",
-              message: "User rejected this action. Do not retry. Ask the user what to do next.",
-            });
-          }
-        }
-
-        // Resume agent with human decisions
-        result = await (agent as any).invoke(
-          new LangGraphCommand({ resume: { decisions } }),
-          config,
-        );
-      }
-
-      // DISPLAY FINAL RESPONSE
-      const lastMessage = result.messages?.[result.messages.length - 1];
-      if (lastMessage?.content) {
-        console.log("\n" + chalk.cyan("--- 🤖 DEEP AGENT RESPONSE ---"));
-        console.log(lastMessage.content);
-        console.log(chalk.cyan("------------------------------\n"));
-      }
-
-      log.sys("Task completed (Deep Agent).");
+      const model = resolveModel();
+      const agent = await DeepAgentFactory.create({ model });
+      const renderer = new StreamRenderer('deep');
+      const session = new ChatSession(agent, renderer, {
+        mode: 'deep',
+        model,
+        threadId: `deep-${Date.now()}`,
+      });
+      await session.start(instruction);
     } catch (error: any) {
-      log.error("Error in deep agent:");
-      log.error(error?.message || "Unknown error");
+      console.error(chalk.red("\n✗ Failed to start deep session:"), error?.message);
+      process.exit(1);
     }
   });
 
 program
   .command("orchestrate")
-  .description("🎯 Orchestrator mode — Researcher + Coder subagents with context compression")
-  .argument("<instruction>", "Technical instruction for the agent")
-  .action(async (instruction: string) => {
+  .description("🎯 Orchestrator — Researcher + Coder subagents, streaming session")
+  .argument("[instruction]", "Optional first task (session stays open after)")
+  .action(async (instruction?: string) => {
     try {
-      if (!instruction || instruction.trim().length === 0) {
-        log.error("Provide a valid instruction.");
-        return;
-      }
-
-      log.sys("Initializing Orchestrator (Researcher + Coder subagents)...");
-      const threadId = "orchestrator-session";
-      const config = { configurable: { thread_id: threadId }, recursionLimit: 100 };
-      const agent = await DeepAgentFactory.createOrchestrator({ threadId });
-
-      log.ai(`Processing (Orchestrator): "${instruction}"`);
-
-      let result = await (agent as any).invoke(
-        { messages: [{ role: "human", content: instruction }] },
-        config,
-      );
-
-      // Native HITL loop — same as deep command (createDeepAgent uses __interrupt__)
-      while (result.__interrupt__) {
-        const interrupts = result.__interrupt__[0].value;
-        const actionRequests = interrupts.actionRequests ?? [];
-        const reviewConfigs = interrupts.reviewConfigs ?? [];
-
-        console.log(chalk.yellow("\n✋ [HITL — ORCHESTRATOR PAUSED FOR APPROVAL]"));
-
-        const decisions: any[] = [];
-
-        for (let i = 0; i < actionRequests.length; i++) {
-          const action = actionRequests[i];
-          const reviewConfig = reviewConfigs[i];
-          const allowed: string[] = reviewConfig?.allowedDecisions ?? ["approve", "reject"];
-
-          console.log(chalk.white(`\n   Tool: ${chalk.bold(action.name)}`));
-          console.log(chalk.gray(`   Args: ${JSON.stringify(action.args, null, 2)}`));
-          console.log(chalk.gray(`   Allowed: ${allowed.join(", ")}`));
-
-          const confirmed = await askConfirmation("Do you approve this action?");
-
-          if (confirmed) {
-            log.sys("Approved ✅");
-            decisions.push({ type: "approve" });
-          } else {
-            log.error("Rejected ❌");
-            decisions.push({
-              type: "reject",
-              message: "User rejected this action. Do not retry. Ask the user what to do next.",
-            });
-          }
-        }
-
-        result = await (agent as any).invoke(
-          new LangGraphCommand({ resume: { decisions } }),
-          config,
-        );
-      }
-
-      // Display final response
-      const lastMessage = result.messages?.[result.messages.length - 1];
-      if (lastMessage?.content) {
-        console.log("\n" + chalk.cyan("--- 🎯 ORCHESTRATOR RESPONSE ---"));
-        console.log(lastMessage.content);
-        console.log(chalk.cyan("--------------------------------\n"));
-      }
-
-      log.sys("Task completed (Orchestrator).");
+      const model = resolveModel();
+      const agent = await DeepAgentFactory.createOrchestrator({ model });
+      const renderer = new StreamRenderer('orchestrate');
+      const session = new ChatSession(agent, renderer, {
+        mode: 'orchestrate',
+        model,
+        threadId: `orchestrate-${Date.now()}`,
+        recursionLimit: 100,
+      });
+      await session.start(instruction);
     } catch (error: any) {
-      log.error("Error in orchestrator:");
-      log.error(error?.message || "Unknown error");
+      console.error(chalk.red("\n✗ Failed to start orchestrator session:"), error?.message);
+      process.exit(1);
     }
   });
 
