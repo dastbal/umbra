@@ -23,7 +23,8 @@ const createBackup = (filePath: string) => {
 };
 
 export const safeWriteFileTool = tool(
-  async ({ filePath, content }) => {
+  async ({ file_path, content }) => {
+    const filePath = file_path;
     log.debug(`safe_write_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
@@ -55,14 +56,15 @@ export const safeWriteFileTool = tool(
     name: "safe_write_file",
     description: "WRITES code to the REAL local disk. Returns if it was created or modified.",
     schema: z.object({
-      filePath: z.string().describe("Relative path (e.g., src/app.service.ts)"),
+      file_path: z.string().describe("Relative path (e.g., src/app.service.ts)"),
       content: z.string().describe("Full file content"),
     }),
   },
 );
 
 export const safeReadFileTool = tool(
-  async ({ filePath }) => {
+  async ({ file_path }) => {
+    const filePath = file_path;
     log.debug(`safe_read_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
@@ -80,12 +82,13 @@ export const safeReadFileTool = tool(
   {
     name: "safe_read_file",
     description: "READS code from the REAL local disk.",
-    schema: z.object({ filePath: z.string() }),
+    schema: z.object({ file_path: z.string().describe("The relative path to the file to read (e.g., README.md, src/app.ts)") }),
   },
 );
 
 export const deleteFileTool = tool(
-  async ({ filePath }) => {
+  async ({ file_path }) => {
+    const filePath = file_path;
     const rootDir = process.cwd();
     const fullPath = path.resolve(rootDir, filePath);
     if (!fullPath.startsWith(rootDir)) return "❌ Error: Access denied. Cannot delete files outside the project root.";
@@ -97,6 +100,6 @@ export const deleteFileTool = tool(
   {
     name: "delete_file",
     description: "Deletes a file at the specified path.",
-    schema: z.object({ filePath: z.string().describe("The relative path to the file to delete.") }),
+    schema: z.object({ file_path: z.string().describe("The relative path to the file to delete.") }),
   },
 );
