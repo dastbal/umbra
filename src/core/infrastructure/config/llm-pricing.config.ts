@@ -1,4 +1,3 @@
-import { Injectable, Logger } from '@nestjs/common';
 import { PricingRegistry } from '../../domain/interfaces/pricing-registry';
 import { Pricing } from '../../domain/types/pricing';
 import { Money } from '../../domain/value-objects/money';
@@ -8,10 +7,13 @@ import * as path from 'path';
 /**
  * Infrastructure service that loads LLM pricing from a local JSON configuration.
  * Implements the new PricingRegistry interface.
+ *
+ * @note No `@Injectable()` \u2014 this class is instantiated directly with `new` in the
+ * CLI graph pipeline. NestJS decorators pull in reflect-metadata which crashes
+ * ts-node before the CLI boots. Plain console.warn/error replace NestJS Logger.
  */
-@Injectable()
 export class LlmPricingConfig implements PricingRegistry {
-  private readonly logger = new Logger(LlmPricingConfig.name);
+  private readonly tag = '[LlmPricingConfig]';
   private pricingData: Record<string, { inputMillion: number; outputMillion: number }> = {};
 
   constructor() {
@@ -24,13 +26,12 @@ export class LlmPricingConfig implements PricingRegistry {
       if (fs.existsSync(configPath)) {
         const fileContent = fs.readFileSync(configPath, 'utf8');
         this.pricingData = JSON.parse(fileContent);
-        // Silenced debug log as requested by user
       } else {
-        this.logger.warn(`Pricing file not found at ${configPath}. Using empty default pricing.`);
+        console.warn(`${this.tag} Pricing file not found at ${configPath}. Using empty default pricing.`);
       }
     } catch (error) {
       if (error instanceof Error) {
-        this.logger.error(`Failed to load LLM pricing: ${error.message}`);
+        console.error(`${this.tag} Failed to load LLM pricing: ${error.message}`);
       }
     }
   }

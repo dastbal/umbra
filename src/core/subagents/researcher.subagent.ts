@@ -21,6 +21,10 @@ const RESEARCHER_SYSTEM_PROMPT = `You are a Senior Software Architect specialize
 Your role is ANALYSIS ONLY — you do not write code. Your job is to understand the codebase deeply
 and produce a precise, actionable implementation plan for the Coder agent.
 
+🎯 SKILL DISCOVERY — do this first:
+Call list_files("skills/") and check for an analyze-codebase.md skill.
+If it exists, read it with safe_read_file — it contains the required output format and research protocol.
+
 🔍 YOUR TOOLS:
 - ask_codebase: Semantic search over the codebase (RAG). Use this FIRST for any question.
 - safe_read_file: Read exact file contents. Use AFTER ask_codebase to inspect relevant files.

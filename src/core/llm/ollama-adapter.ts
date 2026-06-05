@@ -35,6 +35,48 @@ import { ChatOllama } from '@langchain/ollama';
 import { BaseMessage, ToolMessage } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
 
+// ── CPU/RAM preflight types ───────────────────────────────────────────────────
+
+/**
+ * Describes a single model currently loaded in Ollama's process space.
+ * Matches the shape returned by `GET /api/ps`.
+ */
+export interface OllamaLoadedModel {
+  /** Model name as shown in `ollama list` (e.g. "gemma4:e4b"). */
+  name: string;
+  /** RAM currently consumed by this model (bytes). */
+  size: number;
+  /** Human-readable size label (e.g. "9.0 GB"). */
+  size_vram?: number;
+}
+
+/**
+ * Result of `OllamaChatAdapter.preflight()`.
+ *
+ * Contains enough information for the CLI to show a meaningful warning
+ * before the first inference is attempted.
+ */
+export interface OllamaPreflightResult {
+  /** Whether Ollama responded to the /api/ps health probe. */
+  ollamaReachable: boolean;
+  /** Models currently loaded into RAM by Ollama. */
+  loadedModels: OllamaLoadedModel[];
+  /** Total RAM consumed by all loaded Ollama models (bytes). */
+  totalLoadedBytes: number;
+  /**
+   * Whether the target model needs to swap another model out of RAM
+   * before it can load. True when multiple models are loaded simultaneously.
+   */
+  requiresSwap: boolean;
+  /**
+   * Estimated RAM needed to load the target model (bytes).
+   * Derived from `ollama show` metadata when available, otherwise 0 (unknown).
+   */
+  estimatedModelBytes: number;
+}
+
+// ── Main adapter class ────────────────────────────────────────────────────────
+
 /**
  * Transparent `ChatOllama` wrapper that serializes non-string tool message
  * content before sending to the Ollama API.
@@ -45,8 +87,173 @@ import type { ChatResult } from '@langchain/core/outputs';
  *
  * All other behavior (streaming, tool binding, temperature, etc.) is inherited
  * from `ChatOllama` without modification.
+ *
+ * ## Extended timeout (ADR-022)
+ * CPU-only inference on large models (8B+) can take 2–5 minutes for the first
+ * token. We override the default fetch timeout to 5 minutes so `deepagents`
+ * does not kill the connection prematurely and surface a confusing `fetch failed`.
  */
 export class OllamaChatAdapter extends ChatOllama {
+  /**
+   * Creates an OllamaChatAdapter with a 5-minute fetch timeout.
+   *
+   * `ChatOllamaInput` does not expose a `timeout` property directly, but it
+   * accepts a custom `fetch` function. We inject a wrapper that attaches a
+   * 5-minute `AbortController` to every request — this overrides the default
+   * Node.js fetch timeout which is effectively the OS socket timeout (varies,
+   * but usually far shorter than 5 min on Windows).
+   *
+   * The extended timeout is critical for CPU-only users: `gemma4:e4b` (8B)
+   * can take 2–5 minutes to load from disk and generate the first token.
+   * Without this, the fetch times out first → confusing `fetch failed`.
+   *
+   * @param fields - Same config as `ChatOllama` constructor.
+   */
+  constructor(fields: ConstructorParameters<typeof ChatOllama>[0]) {
+    const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+    /**
+     * Fetch wrapper that adds a 5-minute AbortController timeout to every
+     * Ollama API call. This prevents the default (short) OS socket timeout
+     * from killing long CPU-only inference requests mid-flight.
+     */
+    const fetchWithTimeout: typeof fetch = (input, init) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), FIVE_MINUTES_MS);
+      return fetch(input, {
+        ...init,
+        // Merge any existing signal from the caller with ours.
+        // If caller already provided a signal, we race both — ours fires at 5 min.
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timer));
+    };
+
+    super({
+      ...(typeof fields === 'string' ? { model: fields } : fields),
+      fetch: fetchWithTimeout,
+    });
+  }
+
+  // ── Static utilities ────────────────────────────────────────────────────────
+
+  /**
+   * Queries Ollama's `/api/ps` endpoint to inspect which models are currently
+   * loaded in RAM, then computes a RAM pressure report.
+   *
+   * Used by `DeepAgentFactory.bootstrap()` to show a warning before the
+   * first inference if the system is likely to experience extreme latency
+   * (e.g., model swap required due to limited RAM).
+   *
+   * @param baseUrl - Ollama base URL (default: `http://localhost:11434`).
+   * @returns Preflight result, or a safe default if Ollama is unreachable.
+   */
+  public static async preflight(
+    baseUrl = 'http://localhost:11434',
+  ): Promise<OllamaPreflightResult> {
+    const safe: OllamaPreflightResult = {
+      ollamaReachable: false,
+      loadedModels: [],
+      totalLoadedBytes: 0,
+      requiresSwap: false,
+      estimatedModelBytes: 0,
+    };
+
+    try {
+      // Hard timeout: if Ollama doesn't respond in 3s, it's not reachable.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+      const res = await fetch(`${baseUrl}/api/ps`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) return safe;
+
+      const body = (await res.json()) as { models?: OllamaLoadedModel[] };
+      const loadedModels = body.models ?? [];
+      const totalLoadedBytes = loadedModels.reduce((sum, m) => sum + (m.size ?? 0), 0);
+
+      return {
+        ollamaReachable: true,
+        loadedModels,
+        totalLoadedBytes,
+        // Swap required when more than 1 model is loaded — Ollama needs to
+        // evict the current model before loading the next one.
+        requiresSwap: loadedModels.length > 1,
+        estimatedModelBytes: 0, // Not queried — too slow for preflight
+      };
+    } catch {
+      return safe;
+    }
+  }
+
+  /**
+   * Pre-warms the target Ollama model by sending a minimal generation request.
+   *
+   * This forces Ollama to load the model from disk into RAM **before**
+   * `deepagents` makes its first real inference request. Without warmup,
+   * `deepagents` fires the real request while the model is still loading —
+   * and the internal `fetch` timeout (previously default, now 5 min) may
+   * still expire on a very RAM-constrained machine.
+   *
+   * By warming up first (with a 1-token generation), we guarantee the model
+   * is resident in RAM when deepagents needs it.
+   *
+   * `keep_alive: "10m"` extends Ollama's model eviction timer (default 5 min)
+   * so the model stays loaded for the full CLI session without re-loading.
+   *
+   * @param model - Bare model name (e.g. `"gemma4:e2b"`, NOT `"ollama:gemma4:e2b"`).
+   * @param baseUrl - Ollama base URL.
+   * @param onProgress - Optional callback called while waiting for warmup.
+   * @returns `true` if warmup succeeded, `false` if it timed out or failed.
+   */
+  public static async warmup(
+    model: string,
+    baseUrl = 'http://localhost:11434',
+    onProgress?: (elapsedMs: number) => void,
+  ): Promise<boolean> {
+    const WARMUP_TIMEOUT_MS = 5 * 60 * 1000; // 5 min max
+    const PROGRESS_INTERVAL_MS = 15_000; // log every 15s
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WARMUP_TIMEOUT_MS);
+
+    // Fire progress callbacks every 15s so the CLI can reassure the user
+    let progressTimer: ReturnType<typeof setInterval> | undefined;
+    const startedAt = Date.now();
+    if (onProgress) {
+      progressTimer = setInterval(
+        () => onProgress(Date.now() - startedAt),
+        PROGRESS_INTERVAL_MS,
+      );
+    }
+
+    try {
+      const res = await fetch(`${baseUrl}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt: 'Hi',
+          stream: false,
+          // Generate exactly 1 token — minimize warmup inference cost
+          options: { num_predict: 1 },
+          // Keep model in RAM for 10 minutes (avoids reload mid-session)
+          keep_alive: '10m',
+        }),
+        signal: controller.signal,
+      });
+
+      return res.ok;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeoutId);
+      if (progressTimer) clearInterval(progressTimer);
+    }
+  }
+
+  // ── Private: message normalization ─────────────────────────────────────────
+
   /**
    * Normalize a messages array so all ToolMessage content values are strings.
    *

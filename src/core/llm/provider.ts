@@ -19,8 +19,11 @@
  * @example
  * ```ts
  * // Auto-routes based on AGENT_MODEL env var
- * const chat = LLMProvider.createChatModel('gemini-2.5-flash-lite');
- * const chat = LLMProvider.createChatModel('ollama:gemma4');
+ * const chat = LLMProvider.createChatModel('gemini-3.5-flash');        // latest
+ * const chat = LLMProvider.createChatModel('gemini-3.1-flash-lite');   // cheap
+ * const chat = LLMProvider.createChatModel('gemini-3.1-pro');          // powerful
+ * const chat = LLMProvider.createChatModel('gemini-2.5-flash-lite');   // legacy
+ * const chat = LLMProvider.createChatModel('ollama:gemma4');           // local
  *
  * // Embeddings are always Vertex AI
  * const embeddings = LLMProvider.getEmbeddingsModel();

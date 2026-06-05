@@ -28,6 +28,8 @@ import { Command as LangGraphCommand } from '@langchain/langgraph';
 import { StreamRenderer } from './stream-renderer';
 import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
+import { ContextCompressor } from '../../core/agent/context-compressor';
+import { resolveSummarizerModel } from '../../core/config/model-resolver';
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -87,6 +89,15 @@ export class ChatSession {
   private isRunning = false;
   /** Currently active model string — updated when the user uses /model. */
   private currentModel: string;
+  /** Whether deep mentor mode is active for this session. */
+  private mentorModeActive = false;
+  /**
+   * Message count at the time of the last proactive compression.
+   * Used as an anti-thrash guard: compression only fires again after
+   * at least MIN_MESSAGES_BETWEEN_COMPRESSIONS new messages have been added
+   * since the last compression (ADR-024).
+   */
+  private lastCompressedMessageCount = 0;
 
   /**
    * @param agent - A compiled LangGraph agent (from createDeepAgent).
@@ -154,7 +165,13 @@ export class ChatSession {
    *
    * @param input - The user's message text.
    */
-  private async sendMessage(input: string): Promise<void> {
+  /**
+   * Maximum number of automatic retries when the model returns an empty response.
+   * @see {@link sendMessage} for the retry logic.
+   */
+  private static readonly MAX_EMPTY_OUTPUT_RETRIES = 2;
+
+  private async sendMessage(input: string, retryCount = 0): Promise<void> {
     this.renderer.showThinking();
     let thinkingCleared = false;
 
@@ -220,6 +237,27 @@ export class ChatSession {
         this.renderer.clearThinking();
       }
 
+      // ── Bug Fix: empty model output retry ──────────────────────────────
+      // Gemini (flash-lite) occasionally returns a completely empty response
+      // when the session context grows large (many tool calls + long history).
+      // deepagents surfaces this as 'model output must contain either output
+      // text or tool calls'. We auto-retry with a lightweight context-reset
+      // message that gives the model a shorter target to respond to.
+      if (
+        error?.message?.includes('model output must contain') &&
+        retryCount < ChatSession.MAX_EMPTY_OUTPUT_RETRIES
+      ) {
+        process.stdout.write(
+          `\n  ⚠️  ${this.colorMuted(`Context overflow — auto-retry ${retryCount + 1}/${ChatSession.MAX_EMPTY_OUTPUT_RETRIES}...`)}\n`,
+        );
+        // Small delay to avoid hammering the API
+        await new Promise((r) => setTimeout(r, 800));
+        return this.sendMessage(
+          'Please briefly summarize what you have done so far, then continue with the next pending step.',
+          retryCount + 1,
+        );
+      }
+
       this.renderer.showError(
         error?.message ?? 'Unknown error',
         error?.stack?.split('\n')[1]?.trim(),
@@ -228,6 +266,14 @@ export class ChatSession {
 
     this.renderer.finalizeTurn();
     this.renderer.showTurnSeparator();
+  }
+
+  /**
+   * Minimal chalk muted color helper — avoids importing theme just for this.
+   * @param text - Text to dim.
+   */
+  private colorMuted(text: string): string {
+    return chalk.dim(text);
   }
 
   // ── Private: HITL Handler ──────────────────────────────────────────────────
@@ -275,8 +321,13 @@ export class ChatSession {
 
     for await (const event of resumeStream) {
       if (event.event === 'on_chat_model_stream') {
-        const token = event.data?.chunk?.content ?? '';
-        if (typeof token === 'string' && token) this.renderer.streamToken(token);
+        // Use the same extraction logic as sendMessage() to handle Gemini
+        // array-of-parts format (chunk.content can be string or [{text:'...'}])
+        const chunk = event.data?.chunk;
+        const token = typeof chunk?.content === 'string'
+          ? chunk.content
+          : (chunk?.content?.[0]?.text ?? '');
+        if (token) this.renderer.streamToken(token);
       } else if (event.event === 'on_tool_start') {
         this.renderer.showToolStart(event.name, event.data?.input ?? {});
       } else if (event.event === 'on_tool_end') {
@@ -306,9 +357,14 @@ export class ChatSession {
       const trimmed = input.trim();
       if (!trimmed) continue;
 
-      // ── Slash command dispatcher ─────────────────────────────────────────
+      // ── Slash command dispatcher ────────────────────────────────────────────────────────
       if (trimmed === '/model') {
         await this.handleModelSwitch();
+        continue;
+      }
+
+      if (trimmed === '/mentor') {
+        await this.handleMentorToggle();
         continue;
       }
 
@@ -318,6 +374,9 @@ export class ChatSession {
       }
 
       await this.sendMessage(trimmed);
+      // Phase 2: proactive compression — check token budget after each turn.
+      // Fires silently after the agent's response is fully streamed (ADR-024).
+      await this.checkAndCompressContext();
     }
   }
 
@@ -384,16 +443,76 @@ export class ChatSession {
     process.exit(0);
   }
 
-  // ── Private: Slash Command Handlers ───────────────────────────────────────
+  // ── Private: Auto-Compression ──────────────────────────────────────────────
+
+  /**
+   * Proactively checks the context token budget after each turn and silently
+   * compresses conversation history if the budget is exceeded (ADR-024).
+   *
+   * ## How it works
+   * 1. Reads the current LangGraph state via `getState()` (ADR-021 try/catch).
+   * 2. Calls `ContextCompressor.isOverBudget()` (chars / 4 heuristic, 80k default).
+   * 3. If over budget AND enough new messages since last compression:
+   *    → compresses history and injects a silent `[CONTEXT HANDOFF]` message.
+   *
+   * ## Anti-thrash guard
+   * Tracks `lastCompressedMessageCount`. Compression only fires again after at
+   * least `MIN_MESSAGES_BETWEEN_COMPRESSIONS` new messages have been added,
+   * preventing repeated compression on every turn when hovering at the threshold.
+   *
+   * ## Graceful degradation
+   * If `getState()` is unavailable (deepagents version mismatch) or compression
+   * fails, the error is silently swallowed — the session must continue regardless.
+   */
+  private async checkAndCompressContext(): Promise<void> {
+    /** Minimum new messages since last compression before we compress again. */
+    const MIN_MESSAGES_BETWEEN_COMPRESSIONS = 10;
+
+    try {
+      const state = await this.agent.getState(this.graphConfig);
+      const messages: unknown[] = state?.values?.messages ?? [];
+
+      // Anti-thrash: skip if not enough new messages since last compression
+      const newMessagesSinceLastCompression = messages.length - this.lastCompressedMessageCount;
+      if (newMessagesSinceLastCompression < MIN_MESSAGES_BETWEEN_COMPRESSIONS) return;
+
+      if (!ContextCompressor.isOverBudget(messages)) return;
+
+      // Over budget — compress silently
+      const summarizerModel = resolveSummarizerModel();
+      const summary = await ContextCompressor.compress(messages, summarizerModel);
+
+      if (summary) {
+        this.lastCompressedMessageCount = messages.length;
+        // Inject the summary as a context handoff — no user-visible console output
+        await this.sendMessage(
+          `[CONTEXT HANDOFF — AUTO COMPRESSION]\n\n` +
+          `The conversation history has grown large and was silently compressed.\n` +
+          `The following is a technical summary of all work done so far:\n\n` +
+          `${summary}\n\n` +
+          `Acknowledge this context briefly, then wait for the next instruction.`,
+        );
+      }
+    } catch {
+      // ADR-021: getState() or compression may not be available in all contexts.
+      // Silently degrade — the session must continue regardless.
+    }
+  }
 
   /**
    * Handles the `/model` slash command.
    *
-   * Opens the interactive model selection menu. If the user selects a new model:
-   * 1. Saves it to `.env` via `ModelSwitcher`.
-   * 2. Calls `agentFactory(newModel)` to rebuild the agent.
-   * 3. Updates `this.agent` with the new instance.
-   * 4. Shows the welcome banner again with the new model.
+   * Full flow:
+   * 1. Opens the interactive model selection menu.
+   * 2. If a new model is selected, reads the current LangGraph conversation state.
+   * 3. If there is meaningful history (≥3 messages), compresses it with `ContextCompressor`.
+   * 4. Calls `agentFactory(newModel)` to rebuild the agent with the new model (hot-swap).
+   * 5. If a summary was produced, injects it as the first message in the new agent's context.
+   * 6. Shows the welcome banner with the new model.
+   *
+   * Compression is best-effort (ADR-020): if it fails, the switch still completes.
+   * `getState()` is also wrapped in its own try/catch (ADR-021): if deepagents
+   * does not expose it or its structure changes, we degrade gracefully.
    *
    * If no `agentFactory` is provided in config, shows a warning and tells
    * the user to restart manually.
@@ -420,19 +539,101 @@ export class ChatSession {
     }
 
     try {
-      // Rebuild the agent with the new model
+      // ── Step 1: Read current conversation history ─────────────────────────
+      let contextSummary: string | null = null;
+      try {
+        const state = await this.agent.getState(this.graphConfig);
+        const messages: unknown[] = state?.values?.messages ?? [];
+
+        if (messages.length >= 3) {
+          const summarizerModel = resolveSummarizerModel();
+          process.stdout.write(
+            colors.muted(`\n  ⏳ Compressing context with ${summarizerModel}...\n`),
+          );
+          contextSummary = await ContextCompressor.compress(messages, summarizerModel);
+          if (contextSummary) {
+            process.stdout.write(colors.accent('  ✅ Context compressed.\n\n'));
+          } else {
+            process.stdout.write(
+              colors.muted('  ℹ️  Compression skipped — new model will start fresh.\n\n'),
+            );
+          }
+        }
+      } catch {
+        // ADR-021: getState() may not be available in all deepagents versions.
+        // Degrade gracefully — the model switch must still complete.
+        process.stdout.write(
+          colors.muted('  ℹ️  Context read unavailable — new model will start fresh.\n\n'),
+        );
+      }
+
+      // ── Step 2: Hot-swap the agent ────────────────────────────────────────
+      // Sync process.env so resolveModel() inside agentFactory picks up the
+      // new model. Without this, resolveModel() would return the STARTUP value
+      // of AGENT_MODEL (env vars are read once at boot — dotenv doesn't re-read
+      // the file). The .env file on disk was already updated by showModelMenu().
+      process.env.AGENT_MODEL = result.model;
       const newAgent = await this.config.agentFactory(result.model);
-      // Hot-swap the agent reference
       this.agent = newAgent;
       this.currentModel = result.model;
 
-      // Show banner with updated model info
+      // ── Step 3: Inject context summary as first message ───────────────────
+      if (contextSummary) {
+        await this.sendMessage(
+          `[CONTEXT HANDOFF]\n\n` +
+          `You have been switched to model: ${result.model}.\n` +
+          `The following is a summary of the conversation so far:\n\n` +
+          `${contextSummary}\n\n` +
+          `Acknowledge this context briefly, then wait for the next instruction.`,
+        );
+      }
+
+      // ── Step 4: Show the updated welcome banner ───────────────────────────
       process.stdout.write(
         buildWelcomeBanner(this.config.mode, result.model, this.config.sessionName),
       );
     } catch (err: unknown) {
       const message = (err as Error)?.message ?? String(err);
-      console.log(colors.danger(`  ✗ Failed to restart agent: ${message}\n`));
+      console.log(colors.danger(`  ✗ Failed to switch model: ${message}\n`));
+    }
+  }
+
+  /**
+   * Handles the `/mentor` slash command.
+   *
+   * Toggles deep mentor mode on or off for the current session.
+   *
+   * When activated:
+   * - Sends an activation message to the agent so it gets stored in the
+   *   SQLite checkpoint history (persists for the rest of the session).
+   * - The agent loads `skills/mentor-mode.md` and applies the Forced Output
+   *   Contract: root cause + rationale + trade-off on every response.
+   *
+   * When deactivated:
+   * - Sends a deactivation message to the agent.
+   * - The lightweight always-on mentor in the base prompt still applies.
+   */
+  private async handleMentorToggle(): Promise<void> {
+    this.mentorModeActive = !this.mentorModeActive;
+
+    if (this.mentorModeActive) {
+      process.stdout.write(
+        '\n' + colors.accent.bold('  🎓 Mentor Mode ON') +
+        colors.muted(' — deep explanations, trade-offs, Socratic gates activated\n\n'),
+      );
+      // Activation message persisted in SQLite so the agent remembers this for the session
+      await this.sendMessage(
+        'MENTOR MODE ACTIVATED. Load skills/mentor-mode.md and apply it to all responses ' +
+        'for the rest of this session. Confirm activation with a brief acknowledgment.',
+      );
+    } else {
+      process.stdout.write(
+        '\n' + colors.muted('  Mentor Mode OFF — returned to standard mode\n\n'),
+      );
+      await this.sendMessage(
+        'MENTOR MODE DEACTIVATED. Return to standard mode. The lightweight mentor ' +
+        'in the base prompt (root cause + trade-off format) still applies.',
+      );
     }
   }
 
@@ -440,11 +641,15 @@ export class ChatSession {
    * Displays the list of available slash commands.
    */
   private showHelp(): void {
+    const mentorStatus = this.mentorModeActive
+      ? colors.accent.bold(' [ON]')
+      : colors.muted(' [OFF]');
     console.log('');
     console.log(colors.secondary.bold('  Available slash commands:'));
-    console.log(`  ${colors.primary.bold('/model')}  — Switch the active LLM model (Ollama / Vertex AI)`);
-    console.log(`  ${colors.primary.bold('/help')}   — Show this help message`);
-    console.log(`  ${colors.muted('Ctrl+C')}  — Exit the session`);
+    console.log(`  ${colors.primary.bold('/model')}   — Switch the active LLM model (Ollama / Vertex AI)`);
+    console.log(`  ${colors.primary.bold('/mentor')}${mentorStatus}  — Toggle deep mentor mode (trade-offs, root causes, Socratic gates)`);
+    console.log(`  ${colors.primary.bold('/help')}    — Show this help message`);
+    console.log(`  ${colors.muted('Ctrl+C')}   — Exit the session`);
     console.log('');
   }
 }

@@ -37,17 +37,36 @@ export const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 /**
  * Model tier shortcuts for ergonomic selection without memorizing full model names.
  * Maps a tier to the recommended model string for that use case.
+ *
+ * Tier aliases point to the **latest stable** generation by default.
+ * Use the versioned aliases (e.g., `"2.5-flash"`) to pin to a specific family.
  */
 export const MODEL_TIERS: Record<string, string> = {
-  // ── Vertex AI / Gemini Cloud ──────────────────────────────────────────────
-  /** Quick tasks, cheap. Best for: simple file edits, Q&A. */
-  lite: 'gemini-2.5-flash-lite',
-  /** Balanced. Best for: most coding tasks. */
-  flash: 'gemini-2.5-flash',
+  // ── Tier shortcuts (always point to latest recommended) ──────────────────
+  /** Quick tasks, cheap. Best for: classification, routing, intent detection. */
+  lite:  'gemini-3.1-flash-lite',
+  /** Balanced. Best for: most coding tasks and agentic workflows. */
+  flash: 'gemini-3.5-flash',
   /** Most capable cloud model. Best for: architecture, complex refactors. */
-  pro: 'gemini-2.5-pro',
-  /** Maximum quality. Best for: code review, critical logic. */
-  claude: 'anthropic:claude-opus-4-7',
+  pro:   'gemini-3.1-pro',
+  // TODO: Phase N — Add Anthropic support via @langchain/anthropic + ANTHROPIC_API_KEY.
+  // 'claude': 'anthropic:claude-opus-4-7' was removed because LLMProvider does not
+  // yet implement the Anthropic provider. Returning a broken model string silently
+  // crashed the agent with "Unsupported provider" at runtime (ADR-023).
+
+  // ── Versioned Gemini shortcuts (pin to specific generation) ──────────────
+  /** Gemini 3.5 Flash — fastest, best for agentic tasks (June 2026 GA). */
+  'gemini-3.5-flash':      'gemini-3.5-flash',
+  /** Gemini 3.1 Flash Lite — cheapest, high-volume tasks. */
+  'gemini-3.1-lite':       'gemini-3.1-flash-lite',
+  /** Gemini 3.1 Pro — complex reasoning, multimodal. */
+  'gemini-3.1-pro':        'gemini-3.1-pro',
+  /** Gemini 2.5 Flash Lite — legacy fast/cheap. */
+  '2.5-lite':              'gemini-2.5-flash-lite',
+  /** Gemini 2.5 Flash — legacy balanced. */
+  '2.5-flash':             'gemini-2.5-flash',
+  /** Gemini 2.5 Pro — legacy most capable. */
+  '2.5-pro':               'gemini-2.5-pro',
 
   // ── Ollama / Local (free, no API key required) ───────────────────────────
   /** Local inference. Best for: offline development, no API costs. */
@@ -76,7 +95,12 @@ export const MODEL_TIERS: Record<string, string> = {
  * @returns The resolved model string ready to pass to `createDeepAgent`.
  */
 export function resolveModel(override?: string): string {
-  return process.env.AGENT_MODEL ?? override ?? DEFAULT_MODEL;
+  const raw = process.env.AGENT_MODEL ?? override ?? DEFAULT_MODEL;
+  // Expand tier shortcuts (e.g. "flash" → "gemini-3.5-flash") via MODEL_TIERS.
+  // If the raw value is not a known tier, pass it through as-is (it is already
+  // a full model name like "gemini-2.5-flash-lite" or "ollama:gemma4").
+  // ADR-022: MODEL_TIERS was previously decoration — resolveModel() never used it.
+  return MODEL_TIERS[raw] ?? raw;
 }
 
 /**
@@ -126,6 +150,12 @@ export function isOllamaModel(model: string): boolean {
  *
  * @param model - The resolved model string.
  * @returns True if the model is an Anthropic model.
+ *
+ * @internal
+ * @todo Phase N — Anthropic is not yet supported by `LLMProvider`.
+ *   To implement: install `@langchain/anthropic`, add `ANTHROPIC_API_KEY` to `.env`,
+ *   and extend `LLMProvider.createChatModel()` with an `isAnthropicModel` branch.
+ *   This function is kept so the guard can be wired in without touching the resolver.
  */
 export function isAnthropicModel(model: string): boolean {
   return model.toLowerCase().startsWith('anthropic:');
@@ -147,4 +177,36 @@ export function isAnthropicModel(model: string): boolean {
 export function extractProvider(model: string): string | undefined {
   const colonIdx = model.indexOf(':');
   return colonIdx === -1 ? undefined : model.slice(0, colonIdx);
+}
+
+/**
+ * Default model used for on-demand context compression during `/model` switches.
+ *
+ * Should be fast and cheap — its only job is to summarize conversation history
+ * into a compact handoff message for the incoming model.
+ */
+export const DEFAULT_SUMMARIZER_MODEL = 'gemini-2.5-flash-lite';
+
+/**
+ * Resolves the model to use for context compression during model switches.
+ *
+ * Priority:
+ * 1. `CONTEXT_SUMMARIZER_MODEL` environment variable (operator override)
+ * 2. `DEFAULT_SUMMARIZER_MODEL` constant (`'gemini-2.5-flash-lite'`)
+ *
+ * The summarizer model is intentionally independent from the active `AGENT_MODEL`.
+ * This ensures compression always works even when the agent switches to a local
+ * Ollama model (which may have no internet access for cloud summarization).
+ * If Vertex is unavailable, `ContextCompressor` applies its own Ollama fallback.
+ *
+ * @returns The model string to use for context compression.
+ *
+ * @example
+ * ```bash
+ * # .env — override to use a different summarizer
+ * CONTEXT_SUMMARIZER_MODEL=gemini-2.5-pro
+ * ```
+ */
+export function resolveSummarizerModel(): string {
+  return process.env.CONTEXT_SUMMARIZER_MODEL ?? DEFAULT_SUMMARIZER_MODEL;
 }

@@ -9,15 +9,20 @@
  * the user sees beautiful formatted text instead of raw `**bold**` syntax.
  *
  * ## Supported syntax:
- * - `# H1`, `## H2`, `### H3` — bold headers with color
+ * - `# H1`, `## H2`, `### H3` — bold headers with color + blank lines around
  * - `**bold**` / `__bold__`   — bold white
  * - `*italic*` / `_italic_`   — italic dim
  * - `` `inline code` ``       — cyan monospace-style
- * - ` ```code block``` `      — indented cyan block
+ * - ` ```code block``` `      — full bordered box (╭──╮ / ╰──╯)
  * - `- item` / `* item`       — bullet list with accent dot
  * - `1. item`                 — numbered list
  * - `---`                     — dim separator line
  * - `✅ Step N done —`         — autonomous execution progress marker
+ *
+ * ## Visual conventions
+ * - 2-space left margin on ALL output lines
+ * - Blank line injected before AND after every header
+ * - Code blocks enclosed in full Unicode box borders
  *
  * @example
  * ```ts
@@ -29,6 +34,11 @@
 
 import chalk from 'chalk';
 import { colors } from './theme';
+
+/** Left margin applied to every output line. */
+const INDENT = '  ';
+/** Width of code block borders (characters). */
+const CODE_BOX_WIDTH = 56;
 
 /**
  * Renders markdown-formatted agent responses to chalk-styled terminal strings.
@@ -50,87 +60,112 @@ export class MarkdownRenderer {
    */
   public render(text: string): string {
     const lines = text.split('\n');
-    return lines.map(line => this.renderLine(line)).join('\n');
+    const rendered: string[] = [];
+
+    for (const line of lines) {
+      const result = this.renderLine(line);
+      // Headers return an array (blank + header + blank), others return a string
+      if (Array.isArray(result)) {
+        rendered.push(...result);
+      } else {
+        rendered.push(result);
+      }
+    }
+
+    return rendered.join('\n');
   }
 
   // ── Private: Line-by-line Rendering ────────────────────────────────────────
 
   /**
    * Render a single line of markdown.
+   * Returns a string array when blank padding lines need to be injected (headers).
    *
    * @param line - One line of the raw markdown text.
-   * @returns Chalk-styled string for that line.
+   * @returns Chalk-styled string (or array of strings for headers).
    */
-  private renderLine(line: string): string {
+  private renderLine(line: string): string | string[] {
     // ── Fenced code block handling ──────────────────────────────────────────
     if (line.trimStart().startsWith('```')) {
       if (this.inCodeBlock) {
-        // Closing fence
+        // Closing fence → bottom border
         this.inCodeBlock = false;
         this.codeBlockLang = '';
-        return colors.dim('   ' + '─'.repeat(44));
+        return INDENT + colors.dim('╰' + '─'.repeat(CODE_BOX_WIDTH) + '╯');
       } else {
-        // Opening fence — extract language hint
+        // Opening fence → top border with language label
         this.inCodeBlock = true;
         this.codeBlockLang = line.trim().slice(3).trim();
         const langLabel = this.codeBlockLang
-          ? colors.muted(` [${this.codeBlockLang}]`)
+          ? chalk.hex('#94A3B8')(` ${this.codeBlockLang} `)
           : '';
-        return colors.dim('   ' + '─'.repeat(44)) + langLabel;
+        const borderRight = '─'.repeat(Math.max(0, CODE_BOX_WIDTH - this.codeBlockLang.length - 2));
+        return INDENT + colors.dim('╭─') + langLabel + colors.dim(borderRight + '╮');
       }
     }
 
     if (this.inCodeBlock) {
-      // Inside a code block: indent + cyan
-      return chalk.cyan('  ' + line);
+      // Inside a code block: border + indent + cyan code
+      return INDENT + colors.dim('│ ') + chalk.cyan(line);
     }
 
     // ── Horizontal rule ─────────────────────────────────────────────────────
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
-      return colors.dim('─'.repeat(50));
+      return INDENT + colors.dim('─'.repeat(50));
     }
 
-    // ── Headers ─────────────────────────────────────────────────────────────
-    const h3 = line.match(/^### (.+)/);
-    if (h3) return chalk.white.bold(h3[1]);
+    // ── Headers (with blank lines before + after) ────────────────────────────
+    const h1 = line.match(/^# (.+)/);
+    if (h1) {
+      const styled = colors.primary.bold('  ★  ' + h1[1].toUpperCase());
+      return ['', INDENT + styled, ''];
+    }
 
     const h2 = line.match(/^## (.+)/);
-    if (h2) return colors.secondary.bold(h2[1]);
+    if (h2) {
+      const styled = colors.secondary.bold('  ◈  ' + h2[1]);
+      return ['', INDENT + styled, ''];
+    }
 
-    const h1 = line.match(/^# (.+)/);
-    if (h1) return colors.primary.bold('★  ' + h1[1]);
+    const h3 = line.match(/^### (.+)/);
+    if (h3) {
+      const styled = chalk.white.bold('  ›  ' + h3[1]);
+      return ['', INDENT + styled, ''];
+    }
 
     // ── Autonomous step markers (from our system prompt format) ─────────────
-    // Matches: "✅ Step N done — ..." or "✅ Step N..."
     if (line.startsWith('✅')) {
-      return colors.accent.bold(line);
+      return INDENT + colors.accent.bold(line);
     }
 
     // ── Bullet lists ────────────────────────────────────────────────────────
     const bullet = line.match(/^(\s*)[*\-+] (.+)/);
     if (bullet) {
-      const indent = bullet[1];
+      const extraIndent = bullet[1];
       const content = this.renderInline(bullet[2]);
-      return `${indent}${colors.accent('◆')} ${content}`;
+      return INDENT + `${extraIndent}${colors.accent('◆')} ${content}`;
     }
 
     // ── Numbered lists ───────────────────────────────────────────────────────
     const numbered = line.match(/^(\s*)(\d+)\. (.+)/);
     if (numbered) {
-      const indent = numbered[1];
+      const extraIndent = numbered[1];
       const num = colors.primary.bold(`${numbered[2]}.`);
       const content = this.renderInline(numbered[3]);
-      return `${indent}${num} ${content}`;
+      return INDENT + `${extraIndent}${num} ${content}`;
     }
 
     // ── Blockquote ───────────────────────────────────────────────────────────
     const quote = line.match(/^> (.+)/);
     if (quote) {
-      return colors.dim('│ ') + colors.muted(this.renderInline(quote[1]));
+      return INDENT + colors.dim('│ ') + colors.muted(this.renderInline(quote[1]));
     }
 
+    // ── Empty line ───────────────────────────────────────────────────────────
+    if (line.trim() === '') return '';
+
     // ── Regular paragraph line ───────────────────────────────────────────────
-    return this.renderInline(line);
+    return INDENT + this.renderInline(line);
   }
 
   /**
