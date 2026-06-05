@@ -18,6 +18,8 @@ import {
 import { researcherSubAgent } from '../subagents/researcher.subagent';
 import { coderSubAgent } from '../subagents/coder.subagent';
 import { LLMProvider } from '../llm/provider';
+import { OllamaChatAdapter } from '../llm/ollama-adapter';
+import { buildOllamaWarning } from '../../presentation/cli/theme';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -277,9 +279,23 @@ export class DeepAgentFactory {
       registerHarnessProfile('ollama', {
         excludedTools: ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'task'],
       });
+
+      // ADR-022: Preflight check + model warmup for Ollama (CPU/RAM pressure)
+      //
+      // WHY: On CPU-only machines, Ollama can take 2–5 min to swap/load an 8B
+      // model. If deepagents fires the first inference during this load, its
+      // internal fetch timeout fires first → confusing `fetch failed` error.
+      //
+      // FIX:
+      //   1. Run preflight (query /api/ps) to show a RAM warning if multiple
+      //      models are loaded (model swap will occur).
+      //   2. Run warmup (1-token generation) to force the model into RAM before
+      //      deepagents makes its real request.
+      //   3. The OllamaChatAdapter timeout is already 5 min (constructor).
+      //
+      // Both are best-effort (failures are logged, not thrown).
+      await DeepAgentFactory.runOllamaPreflight(model, interaction);
     }
-
-
 
     // 3. Sync RAG index (lazy — skips if index is fresh < 5 min)
     // NOTE: RAG embeddings always use Vertex AI (text-embedding-004), even for
@@ -326,6 +342,82 @@ export class DeepAgentFactory {
     // Replace any remaining colons with dashes
     const normalized = afterFirstColon.replaceAll(':', '-');
     return model.slice(0, colonIndex + 1) + normalized;
+  }
+
+  /**
+   * Runs the Ollama preflight check and model warmup for CPU-only environments.
+   *
+   * Execution order:
+   * 1. Calls `OllamaChatAdapter.preflight()` to query `/api/ps` for currently
+   *    loaded models and assess RAM pressure.
+   * 2. Prints a styled warning via `buildOllamaWarning()` if models are loaded
+   *    (swap will occur) or always (to set latency expectations on CPU).
+   * 3. Calls `OllamaChatAdapter.warmup()` with a progress callback that logs
+   *    a reassurance message every 15s (e.g. "Still loading... 30s elapsed").
+   *    This forces the model into RAM before deepagents makes its first call,
+   *    preventing the `fetch failed` timeout on model-swap.
+   *
+   * Both steps are **best-effort**: failures are caught and logged, never thrown.
+   * The agent startup continues regardless of preflight/warmup outcome.
+   *
+   * @param model - Full model string with `ollama:` prefix (e.g. "ollama:gemma4:e4b").
+   * @param interaction - Optional interaction service for spinner integration.
+   */
+  private static async runOllamaPreflight(
+    model: string,
+    interaction?: InteractionService,
+  ): Promise<void> {
+    const baseUrl = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
+    // Strip the "ollama:" prefix to get the bare model name Ollama expects
+    const bareModel = model.startsWith('ollama:') ? model.slice('ollama:'.length) : model;
+
+    // ── Step 1: Preflight — query /api/ps ───────────────────────────────────
+    let preflight: Awaited<ReturnType<typeof OllamaChatAdapter.preflight>>;
+    try {
+      preflight = await OllamaChatAdapter.preflight(baseUrl);
+    } catch {
+      // If preflight itself throws (shouldn't — it already handles errors), continue
+      preflight = { ollamaReachable: false, loadedModels: [], totalLoadedBytes: 0, requiresSwap: false, estimatedModelBytes: 0 };
+    }
+
+    // ── Step 2: Print RAM warning ────────────────────────────────────────────
+    process.stdout.write(
+      buildOllamaWarning({
+        model: bareModel,
+        loadedModels: preflight.loadedModels,
+        requiresSwap: preflight.requiresSwap,
+      }),
+    );
+
+    // ── Step 3: Warmup — force model into RAM ────────────────────────────────
+    const warmupTask = interaction
+      ? interaction.startTask(`Warming up ${bareModel}...`)
+      : null;
+
+    const succeeded = await OllamaChatAdapter.warmup(
+      bareModel,
+      baseUrl,
+      (elapsedMs: number) => {
+        const elapsedSec = Math.round(elapsedMs / 1000);
+        const msg = `Still loading ${bareModel}... ${elapsedSec}s elapsed (CPU mode, this is normal)`;
+        if (warmupTask) {
+          warmupTask.update(msg);
+        } else {
+          process.stdout.write(`  ⏳ ${msg}\n`);
+        }
+      },
+    );
+
+    if (warmupTask) {
+      if (succeeded) {
+        warmupTask.succeed(`${bareModel} loaded ✓ — ready for inference`);
+      } else {
+        // TaskIndicator has no .warn() — use .fail() for the non-fatal warning
+        warmupTask.fail(`Warmup timed out for ${bareModel} — first response may be slow`);
+      }
+    } else if (!succeeded) {
+      process.stdout.write(`  ⚠️  Warmup timed out for ${bareModel}. First response may be slow.\n`);
+    }
   }
 
   private static detectGeminiIncompatibleTools(): string[] {

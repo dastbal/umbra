@@ -327,14 +327,13 @@ AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
 | :--------- | :----------------------- | :--------- | :------------------------------------- |
 | `gemma`    | `ollama:gemma4`          | 🦙 Local    | Best local model for general coding    |
 | `gemma-2b` | `ollama:gemma4:e2b`      | 🦙 Local    | Fast, low RAM (~7 GB)                  |
-| `gemma-4b` | `ollama:gemma4:e4b`      | lfloor Local    | Balance speed/quality (~9.6 GB)        |
+| `gemma-4b` | `ollama:gemma4:e4b`      | 🦙 Local    | Balance speed/quality (~9.6 GB)        |
 | `gemma-26b`| `ollama:gemma4:26b`      | 🦙 Local    | Max quality (~17 GB)                   |
 | `qwen`     | `ollama:qwen3.6`         | 🦙 Local    | Strong reasoning, compact (~4 GB)      |
 | `local`    | `ollama:llama3.2`        | 🦙 Local    | General purpose offline                |
-| `lite`     | `gemini-2.5-flash-lite`  | ⚡ Cloud    | Quick edits, Q&A (default)             |
-| `flash`    | `gemini-2.5-flash`       | ⚡ Cloud    | Balanced speed + quality               |
-| `pro`      | `gemini-2.5-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
-| `claude`   | `anthropic:claude-opus-4-7` | ☁️ Cloud | Max code quality (requires Anthropic API setup) |
+| `lite`     | `gemini-3.1-flash-lite`  | ⚡ Cloud    | Quick edits, Q&A (cheapest)           |
+| `flash`    | `gemini-3.5-flash`       | ⚡ Cloud    | Balanced speed + quality (recommended) |
+| `pro`      | `gemini-3.1-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
 
 > **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This ensures a stable and high-quality codebase index even when switching between local Ollama and cloud Gemini models.
 
@@ -506,7 +505,8 @@ The library follows a clean, modular structure:
 │   │   ├── cli/
 │   │   │   ├── chat-session.ts   # Main interactive loop + slash command dispatcher
 │   │   │   ├── model-menu.ts     # Interactive model selection UI
-│   │   │   ├── stream-renderer.ts # Output formatting (tokens, tools)
+│   │   │   ├── stream-renderer.ts # Output formatting (tokens, tools, Agent header)
+│   │   │   ├── markdown-renderer.ts # Markdown → chalk styled terminal output
 │   │   │   └── theme.ts          # CLI styling and icons
 │   │   └── index.ts
 ├── skills/                       # ⭐ Agent skills — keyword-triggered, read-only
@@ -564,8 +564,16 @@ The library follows a clean, modular structure:
 |   | `/mentor` deep mode (Forced Output Contract + Socratic gates) | ✅ Done |
 |   | Structured Researcher→Coder handoff (`research-output-format.md`) | ✅ Done |
 |   | DDD layer boundary validator (`validate-architecture-boundaries.md`) | ✅ Done |
+| **v1.4.2** | **Stability & CLI Polish** | ✅ **Done** |
+|   | Bug: `MODEL_TIERS` expansion — `resolveModel()` never used tiers (silent crash) | ✅ Fixed |
+|   | Bug: Fake Anthropic — `claude` removed from tiers, honest error on unsupported provider | ✅ Fixed |
+|   | Bug: Phase 2 proactive auto-compression — `checkAndCompressContext()` after every turn | ✅ Fixed |
+|   | Bug: `reflect-metadata` CLI crash — removed dead `@Injectable()` from 3 services | ✅ Fixed |
+|   | CLI: Richer markdown renderer — code blocks with full `╭──╮` borders, header icons (`★`, `◈`, `›`), 2-space global indent | ✅ Done |
+|   | CLI: `⬡ Agent ────` header replaces plain `Agent:` label | ✅ Done |
 | **Future** | SSE HTTP API (`/agent/stream`) | ⏳ Planned |
 |   | Agent self-evolution — write new skills from patterns it discovers | ⏳ Planned |
+|   | Anthropic Claude support (`@langchain/anthropic`) | ⏳ Planned |
 |   | LangGraph state-level mentor toggle (true per-session stateful mode) | ⏳ Planned |
 
 ---

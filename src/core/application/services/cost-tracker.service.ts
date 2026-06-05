@@ -1,9 +1,12 @@
-import { Injectable } from '@nestjs/common';
 import { Money } from '../../domain/value-objects/money';
 import { TokenUsage } from '../../domain/value-objects/token-usage';
 import { PricingRegistry } from '../../domain/interfaces/pricing-registry';
 
-@Injectable()
+/**
+ * @note No `@Injectable()` — this service is instantiated directly with `new`
+ * in the CLI graph pipeline. Adding NestJS decorators pulls in reflect-metadata
+ * which crashes ts-node before the CLI boots.
+ */
 export class CostTrackerService {
     constructor(private readonly pricingRegistry: PricingRegistry) {}
 

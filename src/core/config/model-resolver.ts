@@ -49,8 +49,10 @@ export const MODEL_TIERS: Record<string, string> = {
   flash: 'gemini-3.5-flash',
   /** Most capable cloud model. Best for: architecture, complex refactors. */
   pro:   'gemini-3.1-pro',
-  /** Maximum quality. Best for: code review, critical logic. */
-  claude: 'anthropic:claude-opus-4-7',
+  // TODO: Phase N — Add Anthropic support via @langchain/anthropic + ANTHROPIC_API_KEY.
+  // 'claude': 'anthropic:claude-opus-4-7' was removed because LLMProvider does not
+  // yet implement the Anthropic provider. Returning a broken model string silently
+  // crashed the agent with "Unsupported provider" at runtime (ADR-023).
 
   // ── Versioned Gemini shortcuts (pin to specific generation) ──────────────
   /** Gemini 3.5 Flash — fastest, best for agentic tasks (June 2026 GA). */
@@ -93,7 +95,12 @@ export const MODEL_TIERS: Record<string, string> = {
  * @returns The resolved model string ready to pass to `createDeepAgent`.
  */
 export function resolveModel(override?: string): string {
-  return process.env.AGENT_MODEL ?? override ?? DEFAULT_MODEL;
+  const raw = process.env.AGENT_MODEL ?? override ?? DEFAULT_MODEL;
+  // Expand tier shortcuts (e.g. "flash" → "gemini-3.5-flash") via MODEL_TIERS.
+  // If the raw value is not a known tier, pass it through as-is (it is already
+  // a full model name like "gemini-2.5-flash-lite" or "ollama:gemma4").
+  // ADR-022: MODEL_TIERS was previously decoration — resolveModel() never used it.
+  return MODEL_TIERS[raw] ?? raw;
 }
 
 /**
@@ -143,6 +150,12 @@ export function isOllamaModel(model: string): boolean {
  *
  * @param model - The resolved model string.
  * @returns True if the model is an Anthropic model.
+ *
+ * @internal
+ * @todo Phase N — Anthropic is not yet supported by `LLMProvider`.
+ *   To implement: install `@langchain/anthropic`, add `ANTHROPIC_API_KEY` to `.env`,
+ *   and extend `LLMProvider.createChatModel()` with an `isAnthropicModel` branch.
+ *   This function is kept so the guard can be wired in without touching the resolver.
  */
 export function isAnthropicModel(model: string): boolean {
   return model.toLowerCase().startsWith('anthropic:');

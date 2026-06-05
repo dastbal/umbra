@@ -101,9 +101,10 @@ export class StreamRenderer {
   public streamToken(token: string): void {
     if (!token) return;
 
-    // Print "Agent: " prefix before the first token
+    // Print a simple Agent label — no fixed-width box (breaks on narrow terminals)
     if (!this.isStreaming && !this.hasStreamedContent) {
-      process.stdout.write('\n' + colors.secondary.bold('Agent: ') + '\n');
+      process.stdout.write('\n');
+      process.stdout.write(colors.secondary.bold('  ⬡  Agent') + colors.dim('  ─────────────────────────────') + '\n');
       this.isStreaming = true;
     }
 
@@ -219,12 +220,15 @@ export class StreamRenderer {
       const renderer = new MarkdownRenderer();
       const styled = renderer.render(this.tokenBuffer.trim());
       process.stdout.write('\n' + styled + '\n');
+
+      // Closing separator
+      process.stdout.write(colors.dim('  ──────────────────────────────────────') + '\n');
     } else if (this.isStreaming || this.hasStreamedContent) {
       process.stdout.write('\n');
     }
 
     if (this.toolCallCount > 0) {
-      process.stdout.write(colors.dim(`\n  ${this.toolCallCount} tool call${this.toolCallCount > 1 ? 's' : ''} executed\n`));
+      process.stdout.write(colors.dim(`  ┄ ${this.toolCallCount} tool call${this.toolCallCount > 1 ? 's' : ''} executed\n`));
     }
 
     // Reset state for next turn

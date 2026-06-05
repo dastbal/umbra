@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 import * as dotenv from "dotenv";
 dotenv.config({ quiet: true }); // Load .env variables silently
+
+// ── LangSmith Observability ──────────────────────────────────────────────────
+// Must be imported AFTER dotenv.config() and BEFORE any @langchain/* imports.
+// This triggers the auto-patch that hooks LangSmith into LangChain's callback system.
+// When LANGCHAIN_TRACING_V2=false or LANGCHAIN_API_KEY is missing, this is a no-op.
+import "langsmith/langchain";
+
 import { Command } from "commander";
 import chalk from "chalk";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";

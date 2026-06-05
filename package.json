@@ -40,6 +40,7 @@
     "deepagents": "^1.10.2",
     "dotenv": "^17.2.3",
     "langchain": "^1.2.16",
+    "langsmith": "^0.7.5",
     "ora": "^5.4.1",
     "sqlite3": "^5.1.7",
     "ts-morph": "^27.0.2",

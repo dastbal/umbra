@@ -37,6 +37,17 @@ import { isOllamaModel } from '../config/model-resolver';
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /**
+ * Default maximum estimated token budget before proactive compression fires.
+ *
+ * Using chars/4 as a token estimate. 80,000 tokens ≈ 320,000 characters.
+ * This is well under the gemini-2.5-flash-lite 1M token context window but
+ * aggressive enough to prevent "model output must contain" crashes (ADR-024).
+ *
+ * Override with `MAX_CONTEXT_TOKENS` environment variable.
+ */
+const DEFAULT_TOKEN_BUDGET = 80_000;
+
+/**
  * System prompt used for the one-shot compression call.
  *
  * Instructs the LLM to produce a tight, technical summary focused on
@@ -79,6 +90,58 @@ export class ContextCompressor {
   private constructor() {}
 
   // ── Public API ──────────────────────────────────────────────────────────────
+
+  /**
+   * Estimates the token count of a messages array using the `chars / 4` heuristic.
+   *
+   * Zero external dependencies. Accuracy is sufficient for a budget guard
+   * (within ~20% of the real count for English + code content).
+   *
+   * Counts text from all message types (Human, AI, Tool) to get a realistic
+   * total including tool call results, which are the main driver of context growth.
+   *
+   * @param messages - Raw messages array from agent state.
+   * @returns Estimated token count.
+   */
+  public static estimateTokens(messages: unknown[]): number {
+    if (!messages || messages.length === 0) return 0;
+
+    let totalChars = 0;
+    for (const msg of messages) {
+      // Handle both class instances and plain objects from LangGraph state
+      const content = (msg as Record<string, unknown>)?.content;
+      totalChars += ContextCompressor.extractText(content).length;
+    }
+
+    return Math.ceil(totalChars / 4);
+  }
+
+  /**
+   * Returns true when the estimated token count of a messages array exceeds
+   * the configured budget threshold.
+   *
+   * Reads `MAX_CONTEXT_TOKENS` from the environment (integer, tokens).
+   * Falls back to `DEFAULT_TOKEN_BUDGET` (80,000) if unset or invalid.
+   *
+   * Used by `ChatSession.checkAndCompressContext()` to decide whether
+   * to trigger proactive compression after each turn (ADR-024).
+   *
+   * @param messages - Raw messages array from agent state.
+   * @returns True if the estimated token budget is exceeded.
+   *
+   * @example
+   * ```ts
+   * // In .env: MAX_CONTEXT_TOKENS=50000 (trigger earlier)
+   * if (ContextCompressor.isOverBudget(messages)) {
+   *   await ContextCompressor.compress(messages, summarizerModel);
+   * }
+   * ```
+   */
+  public static isOverBudget(messages: unknown[]): boolean {
+    const budget = parseInt(process.env.MAX_CONTEXT_TOKENS ?? '', 10);
+    const threshold = Number.isFinite(budget) && budget > 0 ? budget : DEFAULT_TOKEN_BUDGET;
+    return ContextCompressor.estimateTokens(messages) > threshold;
+  }
 
   /**
    * Compresses a LangGraph conversation history into a concise summary string.

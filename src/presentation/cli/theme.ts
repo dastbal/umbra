@@ -220,3 +220,84 @@ export function buildWelcomeBanner(
     '',
   ].join('\n');
 }
+
+// ── Ollama CPU/RAM Warning ────────────────────────────────────────────────────
+
+/**
+ * Describes loaded Ollama model info for the warning display.
+ * Intentionally minimal — only what we need for the warning block.
+ */
+export interface OllamaWarningInfo {
+  /** Bare model name being loaded (e.g. "gemma4:e4b"). */
+  model: string;
+  /** Other models currently loaded in Ollama RAM. */
+  loadedModels: Array<{ name: string; size: number }>;
+  /** Whether more than one model is currently loaded (swap will occur). */
+  requiresSwap: boolean;
+}
+
+/**
+ * Builds a styled RAM/CPU warning block for Ollama models.
+ *
+ * Shown in the CLI before the first inference when Ollama is the active
+ * provider. Informs the user that:
+ * - Local models run on CPU (no dedicated GPU detected).
+ * - Other models are loaded in RAM → a model swap will happen (slow).
+ * - The first response will be slow (normal, not a bug).
+ * - `gemma4:e2b` is a faster alternative if latency is a problem.
+ *
+ * @param info - RAM pressure data from `OllamaChatAdapter.preflight()`.
+ * @returns Formatted warning block string, ready to `process.stdout.write()`.
+ */
+export function buildOllamaWarning(info: OllamaWarningInfo): string {
+  const GB = (bytes: number) => `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+
+  const lines: string[] = [
+    '',
+    colors.warning.bold('  ⚠️  Ollama / CPU Mode — Read Before You Type'),
+    '',
+  ];
+
+  if (info.requiresSwap && info.loadedModels.length > 0) {
+    lines.push(
+      colors.warning('  Models currently loaded in RAM:'),
+    );
+    for (const m of info.loadedModels) {
+      const sizeLabel = m.size > 0 ? chalk.dim(` (${GB(m.size)})`) : '';
+      lines.push(
+        colors.muted(`    • ${chalk.white(m.name)}${sizeLabel}`),
+      );
+    }
+    lines.push('');
+    lines.push(
+      colors.warning('  Ollama will need to swap models before responding.'),
+    );
+    lines.push(
+      colors.muted('  This can take 1–3 minutes on CPU. This is normal.'),
+    );
+  } else {
+    lines.push(
+      colors.muted('  Running on CPU — first response may take 1–3 minutes.'),
+    );
+  }
+
+  lines.push('');
+  lines.push(
+    colors.muted('  💡 Tip: ') +
+    chalk.white('gemma4:e2b') +
+    colors.muted(' (4B) is ~3× faster than ') +
+    chalk.white('gemma4:e4b') +
+    colors.muted(' on CPU.'),
+  );
+  lines.push(
+    colors.muted('     Use ') +
+    colors.primary('/model') +
+    colors.muted(' to switch. Don\'t cancel — let it finish.'),
+  );
+  lines.push('');
+  lines.push(colors.dim('  ' + '─'.repeat(52)));
+  lines.push('');
+
+  return lines.join('\n');
+}
+

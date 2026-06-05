@@ -1,4 +1,3 @@
-import { Injectable } from '@nestjs/common';
 import { LoggerPort } from '../domain/logger.port';
 import { SpinnerPort, TaskIndicator, TaskSuccessMetadata } from '../domain/spinner.port';
 import { ChalkLoggerAdapter } from '../infrastructure/chalk-logger.adapter';
@@ -7,8 +6,12 @@ import { OraSpinnerAdapter } from '../infrastructure/ora-spinner.adapter';
 /**
  * Service to orchestrate rich and beautiful terminal interactions.
  * Built with DDD principles to decouple the domain from chalk/ora dependencies.
+ *
+ * @note This class does NOT use `@Injectable()`. It is always instantiated directly
+ * with `new InteractionService()` — it never passes through the NestJS IoC container.
+ * Adding `@Injectable()` pulls in `@nestjs/common` → `reflect-metadata` which crashes
+ * the CLI (`ts-node`) because no entry point imports `reflect-metadata` first.
  */
-@Injectable()
 export class InteractionService {
   private readonly logger: LoggerPort;
   private readonly spinner: SpinnerPort;
