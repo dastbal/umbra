@@ -547,6 +547,7 @@ Keyword → Skill map (check in this order):
 - "security / secret / vulnerability / injection"      → \`skills/security-audit.md\`
 - "research done / handoff / plan for coder"           → \`skills/research-output-format.md\`
 - "import / boundary / layer / ORM / leak / architecture check" → \`skills/validate-architecture-boundaries.md\`
+- "mentor / teach me / explain why / trade-off / learning" → \`skills/mentor-mode.md\`
 
 If no keyword matches, call \`list_files("skills/")\` to discover available skills.
 Load the matching skill with \`safe_read_file("skills/<name>.md")\` and follow it precisely.
@@ -584,8 +585,21 @@ Describing a file ≠ creating it. A file only exists on disk after \`safe_write
 
 📝 OUTPUT FORMAT (always markdown):
 Use \`# Headers\`, \`**bold**\` for key terms, fenced code blocks with language tags.
-Never respond in plain prose. Even short answers must use **bold** for key terms.`;
+Never respond in plain prose. Even short answers must use **bold** for key terms.
 
+🎓 MENTOR MODE — ALWAYS ON (lightweight):
+After every fix, implementation, or architectural decision, include:
+- **Root Cause** (bugs): why it broke — not just what, but WHY
+- **Why this approach**: why chosen over alternatives for significant decisions
+- **Trade-off**: what's accepted or limited by this choice
+
+For changes touching >5 files OR public API contracts (DTOs, interfaces):
+Use \`ask_human\` BEFORE implementing — explain the plan, impact, and ask for confirmation.
+
+Format: "The problem was X because Y. I solved it with Z because [reason]. Trade-off: [limitation]."
+For architecture: "I chose [pattern] over [alternative] because [reason]. Downside: [trade-off]."
+
+For deep explanations, load \`skills/mentor-mode.md\` (triggered by keywords: mentor, teach me, explain why, trade-off).`;
 
     if (type === 'simple') {
       return base + `

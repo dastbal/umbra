@@ -87,6 +87,8 @@ export class ChatSession {
   private isRunning = false;
   /** Currently active model string — updated when the user uses /model. */
   private currentModel: string;
+  /** Whether deep mentor mode is active for this session. */
+  private mentorModeActive = false;
 
   /**
    * @param agent - A compiled LangGraph agent (from createDeepAgent).
@@ -341,9 +343,14 @@ export class ChatSession {
       const trimmed = input.trim();
       if (!trimmed) continue;
 
-      // ── Slash command dispatcher ─────────────────────────────────────────
+      // ── Slash command dispatcher ────────────────────────────────────────────────────────
       if (trimmed === '/model') {
         await this.handleModelSwitch();
+        continue;
+      }
+
+      if (trimmed === '/mentor') {
+        await this.handleMentorToggle();
         continue;
       }
 
@@ -472,14 +479,57 @@ export class ChatSession {
   }
 
   /**
+   * Handles the `/mentor` slash command.
+   *
+   * Toggles deep mentor mode on or off for the current session.
+   *
+   * When activated:
+   * - Sends an activation message to the agent so it gets stored in the
+   *   SQLite checkpoint history (persists for the rest of the session).
+   * - The agent loads `skills/mentor-mode.md` and applies the Forced Output
+   *   Contract: root cause + rationale + trade-off on every response.
+   *
+   * When deactivated:
+   * - Sends a deactivation message to the agent.
+   * - The lightweight always-on mentor in the base prompt still applies.
+   */
+  private async handleMentorToggle(): Promise<void> {
+    this.mentorModeActive = !this.mentorModeActive;
+
+    if (this.mentorModeActive) {
+      process.stdout.write(
+        '\n' + colors.accent.bold('  🎓 Mentor Mode ON') +
+        colors.muted(' — deep explanations, trade-offs, Socratic gates activated\n\n'),
+      );
+      // Activation message persisted in SQLite so the agent remembers this for the session
+      await this.sendMessage(
+        'MENTOR MODE ACTIVATED. Load skills/mentor-mode.md and apply it to all responses ' +
+        'for the rest of this session. Confirm activation with a brief acknowledgment.',
+      );
+    } else {
+      process.stdout.write(
+        '\n' + colors.muted('  Mentor Mode OFF — returned to standard mode\n\n'),
+      );
+      await this.sendMessage(
+        'MENTOR MODE DEACTIVATED. Return to standard mode. The lightweight mentor ' +
+        'in the base prompt (root cause + trade-off format) still applies.',
+      );
+    }
+  }
+
+  /**
    * Displays the list of available slash commands.
    */
   private showHelp(): void {
+    const mentorStatus = this.mentorModeActive
+      ? colors.accent.bold(' [ON]')
+      : colors.muted(' [OFF]');
     console.log('');
     console.log(colors.secondary.bold('  Available slash commands:'));
-    console.log(`  ${colors.primary.bold('/model')}  — Switch the active LLM model (Ollama / Vertex AI)`);
-    console.log(`  ${colors.primary.bold('/help')}   — Show this help message`);
-    console.log(`  ${colors.muted('Ctrl+C')}  — Exit the session`);
+    console.log(`  ${colors.primary.bold('/model')}   — Switch the active LLM model (Ollama / Vertex AI)`);
+    console.log(`  ${colors.primary.bold('/mentor')}${mentorStatus}  — Toggle deep mentor mode (trade-offs, root causes, Socratic gates)`);
+    console.log(`  ${colors.primary.bold('/help')}    — Show this help message`);
+    console.log(`  ${colors.muted('Ctrl+C')}   — Exit the session`);
     console.log('');
   }
 }
