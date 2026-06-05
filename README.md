@@ -1,130 +1,165 @@
 # NestJS AI Agent Lib
 
-> Built by **David Balladares** — Principal Software Engineer level autonomous agent for NestJS.
+[![NestJS AI Agent](https://img.shields.io/badge/NestJS%20AI%20Agent-Lib-blue?style=flat-square)](https://github.com/your-repo/nestjs-ai-agent-lib)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](https://opensource.org/licenses/MIT)
 
-An autonomous AI agent framework for NestJS codebases. Analyzes, plans, writes, and verifies code with specialized subagents — all via a premium streaming CLI. Runs on **Google Gemini (Vertex AI)** or **locally with Ollama** — no API key required for local models.
+> Built with ❤️ by **David Balladares** — Principal Software Engineer level autonomous agent for NestJS.
+
+An autonomous AI agent framework designed specifically for **NestJS** projects. It analyzes, plans, writes, and verifies code with specialized subagents, all accessible via a premium streaming CLI. Leverages **Google Gemini (Vertex AI)** or **local Ollama** models without requiring API keys for local inference.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Getting Started](#getting-started)
+- [Key Features](#key-features)
+- [Getting Started with NestJS](#getting-started-with-nestjs)
   - [Option A — Ollama (Local, Free, No API Key)](#option-a--ollama-local-free-no-api-key-)
   - [Option B — Google Gemini (Cloud)](#option-b--google-gemini-cloud)
 - [CLI — Interactive Streaming Sessions](#cli--interactive-streaming-sessions)
   - [Session Management](#session-management)
-  - [Switching Models — /model command](#switching-models---model-command)
+  - [Switching Models — `/model` command](#switching-models---model-command)
   - [LLM Switching via env var](#llm-switching-via-env-var)
 - [Agent Modes](#agent-modes)
+  - [Deep Agent (`deep`)](#deep-agent-deep)
+  - [Orchestrator (`orchestrate`)](#orchestrator-orchestrate)
 - [Architecture](#architecture)
 - [Core Concepts](#core-concepts)
+  - [NestJS Integration](#nestjs-integration)
+  - [Safety Features](#safety-features)
+  - [RAG X-Ray Strategy](#rag-x-ray-strategy)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
+- [License](#license)
 
 ---
 
 ## Overview
 
-This library gives your NestJS project an autonomous AI agent that can:
+This library empowers your NestJS applications with an autonomous AI agent capable of:
 
-- 📋 **Plan** — classifies task size (SMALL/MEDIUM/LARGE) and plans accordingly
-- 🔍 **Analyze** — semantic search over your codebase via RAG (X-Ray strategy)
-- 💾 **Write code** — safely, with automatic backup before every file write
-- 🧪 **Test** — runs Jest + `tsc --noEmit` and self-corrects on failures
-- 🤖 **Delegate** — spawns specialized Researcher and Coder subagents for complex tasks
-- ✋ **Ask you** — HITL approval flow for risky operations (delete, drop table, infra files)
-- 💬 **Remember** — full conversation history via SQLite, persistent across named sessions
-- 🧠 **Compress** — auto-summarizes long sessions so context never overflows
-- 🎨 **Render beautifully** — markdown responses styled with chalk (headers, code blocks, bold, bullets)
-- 🔁 **Work autonomously** — executes full plans without stopping for `yes/no` confirmation
-- 🩹 **Self-heal** — auto-recovers corrupted sessions (SQLite checkpoint corruption)
-- 🦙 **Run locally** — full Ollama support: use Gemma4, Qwen3.6, Llama3.2 and more — free, offline, no API key
+- 📋 **Intelligent Planning:** Classifies task complexity (SMALL/MEDIUM/LARGE) and plans execution accordingly.
+- 🔍 **Codebase Analysis:** Performs semantic search over your project using Retrieval-Augmented Generation (RAG) for deep understanding (X-Ray strategy).
+- 💾 **Safe Code Writing:** Writes code with automatic backups before every file modification.
+- 🧪 **Automated Testing:** Integrates with Jest and `tsc --noEmit` for TDD, self-correcting on failures.
+- 🤖 **Subagent Delegation:** Spawns specialized "Researcher" and "Coder" subagents for complex tasks.
+- ✋ **Human-in-the-Loop (HITL):** Prompts for approval on critical operations like file deletion or infrastructure changes.
+- 💬 **Persistent Memory:** Maintains full conversation history via SQLite, enabling continuation across named sessions.
+- 🧠 **Context Compression:** Automatically summarizes long conversations to prevent context overflow.
+- 🎨 **Beautiful Output:** Renders responses in markdown with rich formatting (chalk, icons, code blocks).
+- 🔁 **Autonomous Execution:** Executes full plans without requiring manual `yes/no` confirmations.
+- 🩹 **Self-Healing:** Recovers automatically from corrupted session states.
+- 🦙 **Local LLM Support:** Full integration with Ollama, allowing use of models like Gemma4, Qwen3.6, Llama3.2 locally—free, offline, and no API key needed.
 
 ---
 
-## Getting Started
+## Key Features
+
+*   **NestJS Native:** Designed from the ground up for NestJS projects.
+*   **Domain-Driven Design (DDD) Support:** Understands and can generate code following DDD principles.
+*   **Architecture Aware:** Can analyze and refactor code while respecting architectural boundaries.
+*   **TDD Workflow:** Integrates seamlessly with Jest for Test-Driven Development.
+*   **Multiple LLM Backends:** Supports Google Gemini (cloud) and Ollama (local).
+*   **Codebase Indexing (RAG):** Enables the agent to understand your project's structure and code through semantic search.
+*   **Safety First:** Robust file system safety, HITL approvals for destructive actions.
+*   **Efficient CLI:** Real-time token streaming and interactive model switching.
+*   **Skills System (v1.4):** 12 keyword-triggered skills — the agent automatically loads the right guide for every task (DDD module, tests, refactor, security audit, architecture validation, and more). Base prompt stays lean regardless of how many skills exist.
+*   **Mentor Mode (v1.4):** Always-on lightweight mentoring (root cause + trade-off on every response) plus a deep `/mentor` toggle for Socratic dialogue, Forced Output Contract, and architectural decision explanations.
+*   **AGENTS.md Context Tiering (v1.4):** Separate context files — `ANTIGRAVITY.md` for the human, `AGENTS.md` for the agent — following OpenHands Context Tiering best practice.
+
+---
+
+## Getting Started with NestJS
 
 ### Option A — Ollama (Local, Free, No API Key) 🦙
 
-The fastest way to get started — runs entirely on your machine.
+The recommended and fastest way to start, running entirely on your machine.
 
 **1. Install [Ollama](https://ollama.com) and pull a model:**
 
 ```bash
-ollama pull gemma4        # ~10 GB — best balance locally
-ollama pull gemma4:e2b    # ~7 GB — faster, less RAM
-ollama pull qwen3.6       # ~4 GB — strong reasoning, compact
+# Recommended model for a balance of quality and performance
+ollama pull gemma4        # ~10 GB
+
+# Or, for faster inference with lower RAM usage:
+ollama pull gemma4:e2b    # ~7 GB
+
+# Or, for strong reasoning with a compact model:
+ollama pull qwen3.6       # ~4 GB
 ```
 
-**2. Install dependencies:**
+**2. Install project dependencies:**
 
 ```bash
 npm install
 ```
 
-**3. Configure `.env.development`:**
+**3. Configure your environment variables:**
+
+Create a `.env.development` file in the project root:
 
 ```dotenv
 # .env.development
+
+# Use the model you pulled with Ollama
 AGENT_MODEL=ollama:gemma4
-# OLLAMA_BASE_URL=http://localhost:11434   # default — only change if Ollama runs on a different port
+
+# Optional: Only if Ollama runs on a non-default port (e.g., 11434)
+# OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-**4. Run:**
+**4. Run the agent:**
 
 ```bash
 npm run agent -- deep
 ```
 
-That's it. No Google account, no API key, no billing.
+That's it! No Google account or API key needed.
 
-> **Tip:** Inside the session, type `/model` to switch between Ollama models (or switch to Gemini cloud) interactively.
+> **Tip:** Inside the agent session, type `/model` to interactively switch between Ollama models or even to Gemini cloud models if you configure them.
 
 ---
 
 ### Option B — Google Gemini (Cloud)
 
-Gemini models run on **Google Vertex AI**. The agent uses Application Default Credentials (ADC).
+Leverages Google's powerful Vertex AI models. Requires authentication.
 
-#### Option B1 — Your personal Google account (recommended for local dev) ✅
+#### Option B1 — Your personal Google account (Recommended for local development) ✅
 
 ```bash
-# 1. Install gcloud CLI: https://cloud.google.com/sdk/docs/install
-
-# 2. Authenticate + set your GCP project:
+# 1. Install the Google Cloud SDK: https://cloud.google.com/sdk/docs/install
+# 2. Authenticate and set your GCP project:
 gcloud auth application-default login --project YOUR_GCP_PROJECT_ID
 
-# 3. Configure:
-# .env.development
+# 3. Configure your environment variables:
+# Create or update .env.development:
 # AGENT_MODEL=gemini-2.5-flash-lite
 
-# 4. Run:
+# 4. Run the agent:
 npm run agent -- deep
 ```
 
-#### Option B2 — Service Account (CI/CD, production)
+#### Option B2 — Service Account (CI/CD, Production)
 
-```bash
-# Required IAM roles:
-# - roles/aiplatform.user  ← call Vertex AI models
-```
+**Required IAM Role:**
+*   `roles/aiplatform.user` (Vertex AI User)
+
+Assign this role to your service account in the GCP Console: **IAM & Admin → IAM → Grant Access**.
 
 ```dotenv
 # .env.development
-GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
+# Path to your service account key file
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/your/service-account.json
+
+# Choose your Gemini model
 AGENT_MODEL=gemini-2.5-flash-lite
 ```
-
-> **⚠️ Important:** Service account must have `Vertex AI User` role (`roles/aiplatform.user`).
-> Assign it in GCP Console → **IAM & Admin → IAM → Grant Access**.
 
 ---
 
 ## CLI — Interactive Streaming Sessions
 
-The CLI stays open like Claude/Gemini's terminal. Tokens stream in real-time,
-tool calls show a live spinner with elapsed time, and `You:` waits for your next message.
+The agent provides an interactive CLI experience similar to other advanced chatbots, with real-time token streaming and clear status indicators for tool execution.
 
 ```
 ╭────────────────────────────────────────────────╮
@@ -137,7 +172,7 @@ tool calls show a live spinner with elapsed time, and `You:` waits for your next
 │                                                │
 ╰────────────────────────────────────────────────╯
 
-You: create a UsersModule following DDD
+You: Create a UsersModule following DDD principles.
 
   ⠋  Thinking...
 ╭─ 📋  write_todos
@@ -145,11 +180,11 @@ You: create a UsersModule following DDD
 ╰─ ✓  done in 1.2s
 
 ╭─ 🔍  ask_codebase
-│  └─ How is AuthModule structured?
+│  └─ How is AuthModule structured for DDD?
 ╰─ ✓  done in 3.4s
 
-Agent: I'll implement UsersModule following the same DDD pattern as AuthModule...
-       (tokens stream as they're generated)
+Agent: I will create a UsersModule following the same DDD pattern as AuthModule...
+       (tokens stream as they are generated)
 
 ──────────────────────────────────────────────────
 
@@ -158,32 +193,23 @@ You: ▌
 
 ### Session Management
 
-| Command | Behavior |
-|---|---|
-| `npm run agent -- deep` | **Ephemeral** — fresh thread every run |
-| `npm run agent -- deep --session auth` | **Persistent** — always reopens the `auth` context |
-| `npm run agent -- orchestrate --session big-feat` | Same, for the orchestrator |
+Manage conversation history and context using session IDs.
 
-```bash
-# Ephemeral — scratch work, quick questions
-npm run agent -- deep
-npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts"
+| Command                                 | Behavior                                                              |
+| :-------------------------------------- | :-------------------------------------------------------------------- |
+| `npm run agent -- deep`                 | **Ephemeral** — Starts a fresh session each time.                     |
+| `npm run agent -- deep --session auth`  | **Persistent** — Reopens or creates the `auth` session context.       |
+| `npm run agent -- orchestrate --session feature-x` | Same persistence for the orchestrator mode.                         |
+| `npm run agent -- deep "Your task"`     | Starts an ephemeral session with an initial human message.            |
+| `npm run agent -- deep --session session-name "Your task"` | Starts/resumes a named session with an initial message. |
 
-# Named sessions — real work you want to continue
-npm run agent -- deep --session auth-module
-npm run agent -- orchestrate --session big-feature
-
-# First message + session
-npm run agent -- deep "create a CacheModule" --session cache-work
-```
-
-> Sessions are stored in `.agent/deep_agent_history.db` and `.agent/orchestrator_history.db`.
+> **Note:** Session data is stored in `.agent/deep_agent_history.db` and `.agent/orchestrator_history.db`.
 
 ---
 
 ### Switching Models — `/model` command
 
-Inside any chat session, type `/model` to switch models interactively **without losing your session**:
+Interact with the agent and switch LLM models on-the-fly without losing your current session context.
 
 ```
 You: /model
@@ -213,259 +239,299 @@ You: /model
   🔄 Restarting agent with new model...
 ```
 
-The new model is saved to `.env` and persists across sessions.
+The selected model is automatically saved to your `.env` file for future sessions.
 
-Other slash commands:
+### Slash Commands
 
-| Command | Description |
-|---|---|
-| `/model` | Switch LLM provider and model interactively |
-| `/help` | List all available slash commands |
+| Command | Description | State |
+|---|---|---|
+| `/model` | Switch the active LLM model interactively (Ollama or Vertex AI) | — |
+| `/mentor` | Toggle deep mentor mode — Forced Output Contract, trade-off analysis, Socratic gates | `[ON]` / `[OFF]` |
+| `/help` | Show all available slash commands with their current state | — |
+| `Ctrl+C` | Exit the session cleanly | — |
+
+#### Mentor Mode in depth
+
+The agent operates with **two levels of mentoring**:
+
+**Level 1 — Always ON (built into the base prompt)**
+Every fix, implementation, or architectural decision includes:
+- **Root Cause** — why it broke (not just what)
+- **Why this approach** — rationale over alternatives for significant decisions
+- **Trade-off** — what's accepted or limited
+
+For changes touching >5 files or public API contracts, the agent pauses and uses `ask_human` before implementing.
+
+**Level 2 — `/mentor` deep mode**
+Type `/mentor` to activate the full `skills/mentor-mode.md`:
+- **Forced Output Contract** — explicit rationale + trade-offs before every code block
+- **Architectural Escalation Gate** — presents alternatives rejected and why
+- **Ask-Before HITL Gate** — confirms plan before big changes
+- **Socratic Check** — asks if you want to go deeper before implementing concepts
+- **Pattern Name Callout** — names the design pattern being applied (Repository, DDD, CQRS, etc.)
+
+Type `/mentor` again to return to standard mode. The always-on Level 1 mentor remains active.
+
+Type `mentor`, `teach me`, `explain why`, or `trade-off` naturally in a message to auto-trigger mentor mode via Progressive Disclosure.
 
 ---
 
 ### LLM Switching via env var
 
-You can also switch models at startup via `AGENT_MODEL`:
+Alternatively, set the `AGENT_MODEL` environment variable before running the agent.
 
 ```powershell
 # Windows PowerShell
 
 # ── Ollama (local, free) ──────────────────────────────────────
-$env:AGENT_MODEL="ollama:gemma4";       npm run agent -- deep   # balanced local
-$env:AGENT_MODEL="ollama:gemma4:e2b";   npm run agent -- deep   # fast, low RAM
-$env:AGENT_MODEL="ollama:gemma4:26b";   npm run agent -- deep   # high quality
-$env:AGENT_MODEL="ollama:qwen3.6";      npm run agent -- deep   # strong reasoning
-$env:AGENT_MODEL="ollama:llama3.2";     npm run agent -- deep   # general purpose
+# Balanced quality/performance
+$env:AGENT_MODEL="ollama:gemma4";       npm run agent -- deep
+
+# Fast, low RAM
+$env:AGENT_MODEL="ollama:gemma4:e2b";   npm run agent -- deep
+
+# High quality (large download)
+$env:AGENT_MODEL="ollama:gemma4:26b";   npm run agent -- deep
+
+# Strong reasoning, compact
+$env:AGENT_MODEL="ollama:qwen3.6";      npm run agent -- deep
+
+# General purpose offline
+$env:AGENT_MODEL="ollama:llama3.2";     npm run agent -- deep
 
 # ── Vertex AI (cloud) ─────────────────────────────────────────
-$env:AGENT_MODEL="gemini-2.5-flash-lite"; npm run agent -- deep    # fast & cheap (default)
-$env:AGENT_MODEL="gemini-2.5-flash";      npm run agent -- deep    # more capable
-$env:AGENT_MODEL="gemini-2.5-pro";        npm run agent -- orchestrate  # architecture tasks
+# Fast & cheap (default if no GOOGLE_APPLICATION_CREDENTIALS)
+$env:AGENT_MODEL="gemini-2.5-flash-lite"; npm run agent -- deep
+
+# Balanced speed + quality
+$env:AGENT_MODEL="gemini-2.5-flash";      npm run agent -- deep
+
+# Max capability (architecture, complex refactors)
+$env:AGENT_MODEL="gemini-2.5-pro";        npm run agent -- orchestrate
 ```
 
 ```bash
 # Linux / macOS
+# Ollama examples
 AGENT_MODEL=ollama:gemma4 npm run agent -- deep
+AGENT_MODEL=ollama:qwen3.6 npm run agent -- deep
+
+# Gemini examples
+AGENT_MODEL=gemini-2.5-flash-lite npm run agent -- deep
 AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
 ```
 
-**All model tiers:**
+**Available Model Tiers:**
 
-| Tier alias | Model string | Provider | Best for |
-|---|---|---|---|
-| `gemma` | `ollama:gemma4` | 🦙 Local | Best local model for coding |
-| `gemma-2b` | `ollama:gemma4:e2b` | 🦙 Local | Fast, low RAM (~7 GB) |
-| `gemma-4b` | `ollama:gemma4:e4b` | 🦙 Local | Balance speed/quality |
-| `gemma-26b` | `ollama:gemma4:26b` | 🦙 Local | High quality (~17 GB) |
-| `qwen` | `ollama:qwen3.6` | 🦙 Local | Strong reasoning, compact |
-| `local` | `ollama:llama3.2` | 🦙 Local | General purpose offline |
-| `lite` | `gemini-2.5-flash-lite` | ⚡ Cloud | Quick edits, Q&A (default) |
-| `flash` | `gemini-2.5-flash` | ⚡ Cloud | Balanced speed + quality |
-| `pro` | `gemini-2.5-pro` | ⚡ Cloud | Architecture, complex refactors |
-| `claude` | `anthropic:claude-opus-4-7` | ☁️ Cloud | Maximum code quality |
+| Tier Alias | Model String             | Provider   | Best For                               |
+| :--------- | :----------------------- | :--------- | :------------------------------------- |
+| `gemma`    | `ollama:gemma4`          | 🦙 Local    | Best local model for general coding    |
+| `gemma-2b` | `ollama:gemma4:e2b`      | 🦙 Local    | Fast, low RAM (~7 GB)                  |
+| `gemma-4b` | `ollama:gemma4:e4b`      | lfloor Local    | Balance speed/quality (~9.6 GB)        |
+| `gemma-26b`| `ollama:gemma4:26b`      | 🦙 Local    | Max quality (~17 GB)                   |
+| `qwen`     | `ollama:qwen3.6`         | 🦙 Local    | Strong reasoning, compact (~4 GB)      |
+| `local`    | `ollama:llama3.2`        | 🦙 Local    | General purpose offline                |
+| `lite`     | `gemini-2.5-flash-lite`  | ⚡ Cloud    | Quick edits, Q&A (default)             |
+| `flash`    | `gemini-2.5-flash`       | ⚡ Cloud    | Balanced speed + quality               |
+| `pro`      | `gemini-2.5-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
+| `claude`   | `anthropic:claude-opus-4-7` | ☁️ Cloud | Max code quality (requires Anthropic API setup) |
 
-> **Embeddings are always Vertex AI** (`text-embedding-004`) regardless of the chat model.
-> This keeps the RAG index stable when switching between Ollama and Gemini.
+> **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This ensures a stable and high-quality codebase index even when switching between local Ollama and cloud Gemini models.
 
 ---
 
 ## Agent Modes
 
-### `deep` — Single Autonomous Agent
+### Deep Agent (`deep`) — Single Autonomous Agent
 
-Best for: most tasks — debugging, analysis, single-file changes, quick Q&A, medium complexity.
+Ideal for most day-to-day tasks: debugging, code analysis, single-file modifications, quick questions, and medium-complexity features.
 
 ```bash
+# Start an ephemeral session
 npm run agent -- deep
-npm run agent -- deep --session my-session
+
+# Start a persistent session named "my-feature"
+npm run agent -- deep --session my-feature
+
+# Ask a specific question about a file
 npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts"
 ```
 
-**Task sizing — the agent auto-classifies before acting:**
-- `SMALL` (1-2 files, obvious change) → reads → writes → done. Max 3 tool calls.
-- `MEDIUM` (3+ files, new feature) → brief `write_todos` → executes.
-- `LARGE` (full module, major refactor) → full protocol with step-by-step todos.
+**Task Sizing:** The agent automatically classifies tasks before execution:
+*   **SMALL:** (1-2 files, straightforward changes) → Executes directly (Read → Write → Done). Max 3 tool calls.
+*   **MEDIUM:** (3+ files, new feature) → Creates a brief `write_todos` plan and executes it.
+*   **LARGE:** (Entire module, major refactor) → Follows a detailed, step-by-step plan using `write_todos`.
 
-**Built-in tools:**
-
-| Tool | Purpose |
-|---|---|
-| `write_todos` | Create a plan before acting (MEDIUM/LARGE tasks only) |
-| `list_files` | List directory contents |
-| `safe_read_file` | Read files (path-validated, sandboxed to project root) |
-| `safe_write_file` | Write files (auto-backup to `.agent/backups/`) |
-| `ask_codebase` | Semantic search over your codebase (RAG) |
-| `refresh_project_index` | Rebuild the RAG index after bulk writes |
-| `run_integrity_check` | `tsc --noEmit` — zero TypeScript errors required |
-| `run_tests` | Run Jest (full suite or specific file) |
+**Core Tools:**
+*   `write_todos`: Plans and tracks multi-step tasks.
+*   `list_files`: Lists directory contents.
+*   `safe_read_file`: Reads file content safely.
+*   `safe_write_file`: Writes to files with automatic backups.
+*   `ask_codebase`: Performs semantic search over your codebase using RAG.
+*   `refresh_project_index`: Rebuilds the RAG index (e.g., after bulk file writes).
+*   `run_integrity_check`: Runs `tsc --noEmit` to ensure type safety.
+*   `run_tests`: Executes Jest test suites.
 
 ---
 
-### `orchestrate` — Multi-Subagent Coordinator
+### Orchestrator (`orchestrate`) — Multi-SubAgent Coordinator
 
-Best for: complex features, full modules, large refactors touching many files.
+Best suited for complex, large-scale tasks such as implementing entire modules, significant refactoring efforts, or adding major features that span multiple files and components.
 
 ```bash
+# Start an ephemeral orchestrator session
 npm run agent -- orchestrate
+
+# Start a persistent session for a major refactor
 npm run agent -- orchestrate --session big-refactor
 ```
 
-**Mandatory flow (enforced by system prompt):**
+**Mandatory Workflow:** The orchestrator strictly follows a predefined protocol to ensure thoroughness and quality:
+1.  **`write_todos`:** Creates a comprehensive plan covering analysis, implementation, and verification.
+2.  **`task(researcher)`:** Delegates analysis to the `researcher` subagent, which examines the codebase and produces a detailed implementation plan.
+3.  **`task(coder)`:** Delegates implementation to the `coder` subagent, which follows the researcher's plan, adheres to Test-Driven Development (TDD), and writes tests *before* implementation.
+4.  **`run_integrity_check`:** Verifies that the entire project is free of TypeScript errors after the `coder` finishes.
 
-```
-1. write_todos         → create step-by-step plan
-2. task(researcher)    → analyze codebase, return structured implementation plan
-3. task(coder)         → implement with TDD (spec first, then implementation)
-4. run_integrity_check → verify zero TypeScript errors
-```
-
-**Researcher subagent** — read-only analyst:
-- Tools: `ask_codebase`, `safe_read_file`, `list_files`
-- Never writes. Returns a structured implementation plan.
-
-**Coder subagent** — TDD implementer:
-- Tools: `safe_write_file`, `safe_read_file`, `run_tests`, `run_integrity_check`
-- Writes `.spec.ts` BEFORE implementation.
-- Self-corrects up to 3 times on test failures.
-
----
-
-### Legacy modes (museum 🏛️)
-
-```bash
-npm run agent -- classic "task"   # original ReAct agent (AgentFactory)
-npm run agent -- "task"           # original StateGraph (GraphAgentFactory)
-```
-
-Kept for historical reference. Not recommended for new work.
+**Subagents:**
+*   **Researcher:** A read-only analyst. Uses tools like `ask_codebase` and `safe_read_file` to understand the project and generate structured plans.
+*   **Coder:** An implementation specialist. Uses `safe_write_file`, `run_tests`, and `run_integrity_check`. Writes `.spec.ts` files first, then implements the corresponding code. Self-corrects up to 3 times upon test failures.
 
 ---
 
 ## Architecture
 
-```
-CLI (interactive streaming)
-    │
-    ├── /model slash command
-    │       ├── ModelSwitcher.detectOllamaModels()  ← runs 'ollama list'
-    │       ├── Two-level menu: provider → model
-    │       └── ModelSwitcher.saveModelToEnv()      ← persists to .env
-    │
-    ├── deep      → DeepAgentFactory.create()
-    │                  LLMProvider.createChatModel(model)  ← for Ollama
-    │                  │   └── OllamaChatAdapter           ← serializes tool content
-    │                  createDeepAgent (deepagents lib)
-    │                  + Lazy RAG indexing (skips if index < 5 min old)
-    │                  + SafeFilesystemBackend (auto-backup on every write)
-    │                  + SqliteSaver (SQLite history — ephemeral or named)
-    │                  + Task sizing system prompt (SMALL/MEDIUM/LARGE)
-    │
-    └── orchestrate → DeepAgentFactory.createOrchestrator()
-                         createDeepAgent with subagents:
-                              ├── researcher (read-only analyst)
-                              └── coder (TDD-focused implementer)
-```
+\`\`\`mermaid
+graph TD
+    subgraph CLI Interface
+        A[Interactive Stream]:::cli --> B(Session Management);
+        B --> C[/model Command];
+        B --> D[Model Switching Logic];
+        B --> E[Agent Mode Selection];
+    end
 
-### Provider Routing
+    subgraph Agent Core
+        E --> F(DeepAgentFactory);
+        F --> G[LLMProvider];
+        G -- Ollama --> H(OllamaChatAdapter);
+        G -- Gemini --> I(ChatVertexAI);
+        F -- Simple Agent --> J(createDeepAgent);
+        F -- Orchestrator --> K(createDeepAgent);
+        K --> L[Researcher Subagent];
+        K --> M[Coder Subagent];
+    end
 
-```
-AGENT_MODEL env var
-       │
-       ├── "ollama:*"       → OllamaChatAdapter (ChatOllama + content serialization)
-       │                        baseUrl: OLLAMA_BASE_URL ?? "http://localhost:11434"
-       │
-       └── "gemini-*" / bare name → ChatVertexAI (Google Vertex AI)
-                                       requires GOOGLE_APPLICATION_CREDENTIALS or gcloud login
-```
+    subgraph Services & Tools
+        J --> N(Core Tools);
+        K --> N;
+        N --> O(SafeFilesystemBackend);
+        N --> P(RAG IndexerService);
+        N --> Q(Checkpointer SqliteSaver);
+        J --> Q;
+        K --> Q;
+    end
 
-> **Embeddings:** Always Vertex AI (`text-embedding-004`) — even when the chat model is Ollama.
-> Rationale: Ollama embedding models have lower quality and would force a full RAG re-index
-> on every provider switch. Using a stable cloud embeddings model keeps the index consistent.
+    classDef cli fill:#4CAF50,stroke:#333,stroke-width:2px;
+    classDef session fill:#FFC107,stroke:#333,stroke-width:2px;
+    classDef modelcmd fill:#2196F3,stroke:#333,stroke-width:2px;
+    classDef mode fill:#FF9800,stroke:#333,stroke-width:2px;
+    classDef factory fill:#9C27B0,stroke:#333,stroke-width:2px;
+    classDef subagent fill:#00BCD4,stroke:#333,stroke-width:2px;
+
+    class A cli;
+    class B session;
+    class C modelcmd;
+    class E mode;
+    class F factory;
+    class L,M subagent;
+\`\`\`
+
+*   **CLI:** Handles user interaction, model switching (`/model`), and session management.
+*   **Agent Core:** `DeepAgentFactory` orchestrates agent creation, routing requests to either a simple `DeepAgent` or a multi-subagent `Orchestrator`.
+*   **LLM Integration:** `LLMProvider` routes requests to `OllamaChatAdapter` for local models or `ChatVertexAI` for cloud models.
+*   **Services & Tools:** Provides core functionalities like safe file operations, RAG indexing, conversation persistence (SQLite), and the underlying LLM tooling.
 
 ---
 
 ## Core Concepts
 
-### Ephemeral vs. Named Sessions
+### NestJS Integration
 
-| Mode | threadId | SQLite | Behavior |
-|---|---|---|---|
-| No `--session` | `deep-ephemeral-{timestamp}` | Temporary | Fresh every run |
-| `--session auth` | `deep-auth` | Permanent | Remembers everything |
+This library is built with NestJS in mind. It understands NestJS conventions for project structure, modules, services, controllers, and DDD. When you ask the agent to perform tasks like "create a user module" or "add authentication to this service," it leverages its knowledge of NestJS patterns to generate appropriate, idiomatic code.
 
-### SafeFilesystemBackend
-Every `safe_write_file` call creates a timestamped backup in `.agent/backups/` before writing.
-If the agent writes bad code, the original is always recoverable. The agent is sandboxed
-to the project root — it cannot read or write outside it.
+### Safety Features
+
+*   **`safe_write_file`:** Before writing any file, the agent creates a timestamped backup in `.agent/backups/`. This ensures you can always revert to the previous version if the agent's changes are not as expected.
+*   **Project Root Sandboxing:** The agent operates strictly within the project's root directory. It cannot access or modify files outside this scope.
+*   **Human-in-the-Loop (HITL):** For potentially destructive operations (e.g., deleting files/directories, dropping database tables, modifying infrastructure files like `docker-compose.yml` or `.env.production`), the agent will pause and explicitly ask for your approval.
 
 ### RAG X-Ray Strategy
-1. `IndexerService` scans `src/` on startup (lazy — skips if index is fresh < 5 min)
-2. `ask_codebase` performs vector similarity search to find relevant code chunks
-3. Results include file content + dependency context → LLM gets deep structural understanding
 
-> When using Ollama (no Vertex AI credentials), RAG indexing is gracefully skipped.
-> The agent still works — it just won't have semantic search over your codebase.
+The agent uses Retrieval-Augmented Generation (RAG) to understand your codebase:
+1.  **Indexing:** The `IndexerService` scans your `src/` directory on startup. This index is lazily updated—it only rebuilds if it's older than 5 minutes, ensuring fast agent startup times.
+2.  **Semantic Search:** When you ask questions about your code, the `ask_codebase` tool performs a vector similarity search against the index.
+3.  **Contextual Understanding:** The search results provide relevant code snippets and dependency information, giving the LLM a deep understanding of your project's structure and logic.
 
-### OllamaChatAdapter
-Ollama's API only accepts `string` content in messages. LangChain's `ToolMessage` can hold
-objects or arrays (e.g., when `read_file` returns structured data). `OllamaChatAdapter`
-transparently serializes any non-string tool message content to JSON before the API call,
-preventing the `"Non string tool message content is not supported"` crash.
-
-### HITL (Human-in-the-Loop)
-For operations flagged as risky, the agent pauses with an approval prompt:
-```
-  ✋  APPROVAL REQUIRED
-  └─ Tool: 💾 safe_write_file
-  └─ Args: { "file_path": "src/auth/auth.service.ts", ... }
-  Approve? [approve/reject]
-```
-
-### Auto-Recovery
-If a named session is corrupted (e.g., interrupted during a streaming tool call),
-the agent automatically detects and clears only the corrupted checkpoint, then retries
-the session without losing other history.
+*   **Ollama Mode:** If you're using Ollama without Google Cloud credentials, RAG indexing is gracefully skipped. The agent will still function but without the codebase-aware semantic search capabilities.
 
 ---
 
 ## Project Structure
 
+The library follows a clean, modular structure:
+
 ```
-src/
-├── bin/
-│   └── cli.ts                         # CLI entry — deep, orchestrate, classic
-├── core/
-│   ├── agent/
-│   │   ├── factory.ts                 # 🏛️ museum — classic ReAct
-│   │   ├── graph-factory.ts           # 🏛️ museum — StateGraph
-│   │   ├── deep-agent-factory.ts      # ⭐ active — createDeepAgent
-│   │   └── safe-backend.ts            # auto-backup filesystem
-│   ├── config/
-│   │   ├── model-resolver.ts          # AGENT_MODEL env → LLM string + provider detection
-│   │   └── model-switcher.ts          # detectOllamaModels(), saveModelToEnv()
-│   ├── llm/
-│   │   ├── provider.ts                # LLMProvider — routes to Vertex AI or Ollama
-│   │   └── ollama-adapter.ts          # OllamaChatAdapter — serializes tool content
-│   ├── subagents/
-│   │   ├── researcher.subagent.ts     # read-only analyst
-│   │   └── coder.subagent.ts          # TDD implementer
-│   ├── rag/
-│   │   └── indexer.ts                 # X-Ray codebase indexer (lazy)
-│   └── tools/
-│       └── index.ts                   # all custom tools
-├── presentation/
-│   └── cli/
-│       ├── theme.ts                   # design system (colors, icons, box chars)
-│       ├── stream-renderer.ts         # token/tool event → terminal output
-│       ├── chat-session.ts            # interactive loop + HITL + /model + /help
-│       ├── model-menu.ts              # interactive provider/model selector UI
-│       └── index.ts                   # barrel export
-.agent/
-├── deep_agent_history.db              # deep mode SQLite (named sessions)
-├── orchestrator_history.db            # orchestrate mode SQLite (named sessions)
-├── index.meta.json                    # RAG index freshness timestamp
-└── backups/                           # timestamped backups before every write
+/nestjs-ai-agent-lib
+├── src/
+│   ├── bin/                      # CLI entry points (deep, orchestrate)
+│   │   └── cli.ts
+│   ├── core/                     # Core agent logic & services
+│   │   ├── agent/                # Agent factories (DeepAgentFactory)
+│   │   │   ├── factory.ts        # Legacy ReAct agent
+│   │   │   ├── graph-factory.ts  # Legacy StateGraph agent
+│   │   │   └── deep-agent-factory.ts  # ⭐ Active: Creates DeepAgent & Orchestrator
+│   │   ├── config/               # Configuration loading (env vars, model resolution)
+│   │   │   ├── model-resolver.ts
+│   │   │   └── model-switcher.ts
+│   │   ├── llm/                  # LLM provider routing & adapters
+│   │   │   ├── provider.ts
+│   │   │   └── ollama-adapter.ts # Handles Ollama's specific API requirements
+│   │   ├── subagents/            # Specialized agents for orchestration
+│   │   │   ├── coder.subagent.ts
+│   │   │   └── researcher.subagent.ts
+│   │   ├── rag/                  # Retrieval-Augmented Generation
+│   │   │   └── indexer.ts        # Codebase indexing service
+│   │   └── tools/                # Custom tool implementations (safe file ops, etc.)
+│   │       └── index.ts
+│   ├── presentation/             # CLI UI and presentation logic
+│   │   ├── cli/
+│   │   │   ├── chat-session.ts   # Main interactive loop + slash command dispatcher
+│   │   │   ├── model-menu.ts     # Interactive model selection UI
+│   │   │   ├── stream-renderer.ts # Output formatting (tokens, tools)
+│   │   │   └── theme.ts          # CLI styling and icons
+│   │   └── index.ts
+├── skills/                       # ⭐ Agent skills — keyword-triggered, read-only
+│   ├── create-ddd-module.md      # DDD module creation protocol
+│   ├── write-tests.md            # TDD & Jest spec templates
+│   ├── refactor-safely.md        # Inside-out refactor, find callers first
+│   ├── create-endpoint.md        # REST endpoint + DTO + Swagger
+│   ├── debug-typescript.md       # TS error lookup table & fix protocol
+│   ├── analyze-codebase.md       # Read-only RAG analysis mode
+│   ├── evaluate-own-work.md      # Self-review checklist before "done"
+│   ├── git-workflow.md           # Conventional commits & version branching
+│   ├── security-audit.md         # OWASP API Top 10 for NestJS
+│   ├── research-output-format.md # Structured Researcher→Coder handoff (MetaGPT SOP)
+│   ├── validate-architecture-boundaries.md  # DDD forbidden import detector
+│   └── mentor-mode.md            # Deep mentor: Forced Output Contract + Socratic gates
+├── AGENTS.md                     # ⭐ Project context for AI agents (read-only)
+├── ANTIGRAVITY.md                # ADR log & work history for the human developer
+├── .agent/                       # Agent runtime data
+│   ├── deep_agent_history.db     # SQLite DB for named deep agent sessions
+│   ├── orchestrator_history.db   # SQLite DB for named orchestrator sessions
+│   ├── index.meta.json           # Timestamp for RAG index freshness
+│   └── backups/                  # Timestamped backups before each file write
+├── .env.development              # Example environment file
+├── package.json
+└── tsconfig.json
 ```
 
 ---
@@ -474,25 +540,36 @@ src/
 
 | Phase | Feature | Status |
 |---|---|---|
-| 0 | DeepAgentFactory base | ✅ Done |
-| 1 | LLM switching (`AGENT_MODEL` env) | ✅ Done |
-| 2 | Researcher subagent | ✅ Done |
-| 3 | Coder subagent (TDD) | ✅ Done |
-| 4 | Orchestrator (Researcher + Coder) | ✅ Done |
-| CLI | Premium streaming sessions | ✅ Done |
-| Sessions | Ephemeral by default / `--session` for persistence | ✅ Done |
-| Perf | Lazy RAG indexing (skip if fresh < 5 min) | ✅ Done |
-| UX | Task sizing (SMALL/MEDIUM/LARGE auto-classification) | ✅ Done |
-| Safety | Auto-recovery for corrupted checkpoints | ✅ Done |
-| **v1.3.0** | **Ollama local inference — full multi-provider support** | ✅ **Done** |
-| | `/model` interactive switcher inside chat session | ✅ Done |
-| | OllamaChatAdapter — serializes non-string tool content | ✅ Done |
-| | All gemma4 variants + qwen3.6 model tiers | ✅ Done |
-| 6 | SSE HTTP API (`/agent/stream`) | ⏳ Planned |
-| 7 | Skills system (`SKILL.md` reusable strategies) | ⏳ Planned |
+| **v1.0** | Foundational Deep Agent (`deep` mode) | ✅ Done |
+|   | Basic LLM switching (env var) | ✅ Done |
+|   | Core tools (filesystem, RAG basic) | ✅ Done |
+| **v1.1** | Orchestrator (`orchestrate` mode) | ✅ Done |
+|   | Researcher & Coder subagents | ✅ Done |
+|   | TDD workflow enforcement | ✅ Done |
+| **v1.2** | Advanced CLI Features | ✅ Done |
+|   | Interactive `/model` switching | ✅ Done |
+|   | Session persistence & management | ✅ Done |
+|   | Context compression | ✅ Done |
+|   | Safety: Auto-recovery, HITL | ✅ Done |
+| **v1.3** | **Ollama Local Inference Support** | ✅ **Done** |
+|   | Full multi-provider routing | ✅ Done |
+|   | `OllamaChatAdapter` for compatibility | ✅ Done |
+|   | Support for `gemma4`, `qwen3.6`, `llama3.2` | ✅ Done |
+| **v1.4** | **Skills System & Mentor Mode** | ✅ **Done** |
+|   | 12 keyword-triggered skills (`skills/*.md`) | ✅ Done |
+|   | Progressive Disclosure — keyword map in base prompt | ✅ Done |
+|   | FILE PROTECTION LAW (skills + ANTIGRAVITY + AGENTS.md) | ✅ Done |
+|   | `AGENTS.md` Context Tiering (agent vs. human save state) | ✅ Done |
+|   | Always-on lightweight mentor (base prompt invariant) | ✅ Done |
+|   | `/mentor` deep mode (Forced Output Contract + Socratic gates) | ✅ Done |
+|   | Structured Researcher→Coder handoff (`research-output-format.md`) | ✅ Done |
+|   | DDD layer boundary validator (`validate-architecture-boundaries.md`) | ✅ Done |
+| **Future** | SSE HTTP API (`/agent/stream`) | ⏳ Planned |
+|   | Agent self-evolution — write new skills from patterns it discovers | ⏳ Planned |
+|   | LangGraph state-level mentor toggle (true per-session stateful mode) | ⏳ Planned |
 
 ---
 
 ## License
 
-MIT — David Balladares
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
