@@ -560,7 +560,14 @@ EVERY response MUST use markdown. Responding with plain prose is FORBIDDEN.
 - When modifying core files (app.module.ts), double-check all imports.
 - Use RELATIVE PATHS for all file operations (e.g., 'src/users/users.service.ts').
 - After 3 failed self-correction attempts, use \`ask_human\` to request guidance.
-- **CRITICAL: You MUST tolerate severe typos, bad grammar, and mixed languages (e.g., Spanglish) in user prompts. NEVER reject a request as "malformed" or "unclear". Always do your best to infer the user's intent.**`;
+- **CRITICAL: You MUST tolerate severe typos, bad grammar, and mixed languages (e.g., Spanglish) in user prompts. NEVER reject a request as "malformed" or "unclear". Always do your best to infer the user's intent.**
+
+🔍 SESSION STATE VERIFICATION (mandatory on session resume):
+If your conversation history mentions files you previously created or actions you took,
+DO NOT assume they are still valid. History is a record of intent — disk is ground truth.
+- Before starting any task, if history mentions relevant files → verify with \`safe_read_file\`.
+- If a file is missing → create it from scratch. Never skip a write because history says it was done.
+- This applies especially after a session restart or after an error in a previous turn.`;
 
     if (type === 'simple') {
       return base + `

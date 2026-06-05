@@ -154,7 +154,13 @@ export class ChatSession {
    *
    * @param input - The user's message text.
    */
-  private async sendMessage(input: string): Promise<void> {
+  /**
+   * Maximum number of automatic retries when the model returns an empty response.
+   * @see {@link sendMessage} for the retry logic.
+   */
+  private static readonly MAX_EMPTY_OUTPUT_RETRIES = 2;
+
+  private async sendMessage(input: string, retryCount = 0): Promise<void> {
     this.renderer.showThinking();
     let thinkingCleared = false;
 
@@ -220,6 +226,27 @@ export class ChatSession {
         this.renderer.clearThinking();
       }
 
+      // ── Bug Fix: empty model output retry ──────────────────────────────
+      // Gemini (flash-lite) occasionally returns a completely empty response
+      // when the session context grows large (many tool calls + long history).
+      // deepagents surfaces this as 'model output must contain either output
+      // text or tool calls'. We auto-retry with a lightweight context-reset
+      // message that gives the model a shorter target to respond to.
+      if (
+        error?.message?.includes('model output must contain') &&
+        retryCount < ChatSession.MAX_EMPTY_OUTPUT_RETRIES
+      ) {
+        process.stdout.write(
+          `\n  ⚠️  ${this.colorMuted(`Context overflow — auto-retry ${retryCount + 1}/${ChatSession.MAX_EMPTY_OUTPUT_RETRIES}...`)}\n`,
+        );
+        // Small delay to avoid hammering the API
+        await new Promise((r) => setTimeout(r, 800));
+        return this.sendMessage(
+          'Please briefly summarize what you have done so far, then continue with the next pending step.',
+          retryCount + 1,
+        );
+      }
+
       this.renderer.showError(
         error?.message ?? 'Unknown error',
         error?.stack?.split('\n')[1]?.trim(),
@@ -228,6 +255,14 @@ export class ChatSession {
 
     this.renderer.finalizeTurn();
     this.renderer.showTurnSeparator();
+  }
+
+  /**
+   * Minimal chalk muted color helper — avoids importing theme just for this.
+   * @param text - Text to dim.
+   */
+  private colorMuted(text: string): string {
+    return chalk.dim(text);
   }
 
   // ── Private: HITL Handler ──────────────────────────────────────────────────
