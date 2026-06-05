@@ -28,6 +28,8 @@ import { Command as LangGraphCommand } from '@langchain/langgraph';
 import { StreamRenderer } from './stream-renderer';
 import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
+import { ContextCompressor } from '../../core/agent/context-compressor';
+import { resolveSummarizerModel } from '../../core/config/model-resolver';
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -312,8 +314,13 @@ export class ChatSession {
 
     for await (const event of resumeStream) {
       if (event.event === 'on_chat_model_stream') {
-        const token = event.data?.chunk?.content ?? '';
-        if (typeof token === 'string' && token) this.renderer.streamToken(token);
+        // Use the same extraction logic as sendMessage() to handle Gemini
+        // array-of-parts format (chunk.content can be string or [{text:'...'}])
+        const chunk = event.data?.chunk;
+        const token = typeof chunk?.content === 'string'
+          ? chunk.content
+          : (chunk?.content?.[0]?.text ?? '');
+        if (token) this.renderer.streamToken(token);
       } else if (event.event === 'on_tool_start') {
         this.renderer.showToolStart(event.name, event.data?.input ?? {});
       } else if (event.event === 'on_tool_end') {
@@ -431,11 +438,17 @@ export class ChatSession {
   /**
    * Handles the `/model` slash command.
    *
-   * Opens the interactive model selection menu. If the user selects a new model:
-   * 1. Saves it to `.env` via `ModelSwitcher`.
-   * 2. Calls `agentFactory(newModel)` to rebuild the agent.
-   * 3. Updates `this.agent` with the new instance.
-   * 4. Shows the welcome banner again with the new model.
+   * Full flow:
+   * 1. Opens the interactive model selection menu.
+   * 2. If a new model is selected, reads the current LangGraph conversation state.
+   * 3. If there is meaningful history (≥3 messages), compresses it with `ContextCompressor`.
+   * 4. Calls `agentFactory(newModel)` to rebuild the agent with the new model (hot-swap).
+   * 5. If a summary was produced, injects it as the first message in the new agent's context.
+   * 6. Shows the welcome banner with the new model.
+   *
+   * Compression is best-effort (ADR-020): if it fails, the switch still completes.
+   * `getState()` is also wrapped in its own try/catch (ADR-021): if deepagents
+   * does not expose it or its structure changes, we degrade gracefully.
    *
    * If no `agentFactory` is provided in config, shows a warning and tells
    * the user to restart manually.
@@ -462,19 +475,57 @@ export class ChatSession {
     }
 
     try {
-      // Rebuild the agent with the new model
+      // ── Step 1: Read current conversation history ─────────────────────────
+      let contextSummary: string | null = null;
+      try {
+        const state = await this.agent.getState(this.graphConfig);
+        const messages: unknown[] = state?.values?.messages ?? [];
+
+        if (messages.length >= 3) {
+          const summarizerModel = resolveSummarizerModel();
+          process.stdout.write(
+            colors.muted(`\n  ⏳ Compressing context with ${summarizerModel}...\n`),
+          );
+          contextSummary = await ContextCompressor.compress(messages, summarizerModel);
+          if (contextSummary) {
+            process.stdout.write(colors.accent('  ✅ Context compressed.\n\n'));
+          } else {
+            process.stdout.write(
+              colors.muted('  ℹ️  Compression skipped — new model will start fresh.\n\n'),
+            );
+          }
+        }
+      } catch {
+        // ADR-021: getState() may not be available in all deepagents versions.
+        // Degrade gracefully — the model switch must still complete.
+        process.stdout.write(
+          colors.muted('  ℹ️  Context read unavailable — new model will start fresh.\n\n'),
+        );
+      }
+
+      // ── Step 2: Hot-swap the agent ────────────────────────────────────────
       const newAgent = await this.config.agentFactory(result.model);
-      // Hot-swap the agent reference
       this.agent = newAgent;
       this.currentModel = result.model;
 
-      // Show banner with updated model info
+      // ── Step 3: Inject context summary as first message ───────────────────
+      if (contextSummary) {
+        await this.sendMessage(
+          `[CONTEXT HANDOFF]\n\n` +
+          `You have been switched to model: ${result.model}.\n` +
+          `The following is a summary of the conversation so far:\n\n` +
+          `${contextSummary}\n\n` +
+          `Acknowledge this context briefly, then wait for the next instruction.`,
+        );
+      }
+
+      // ── Step 4: Show the updated welcome banner ───────────────────────────
       process.stdout.write(
         buildWelcomeBanner(this.config.mode, result.model, this.config.sessionName),
       );
     } catch (err: unknown) {
       const message = (err as Error)?.message ?? String(err);
-      console.log(colors.danger(`  ✗ Failed to restart agent: ${message}\n`));
+      console.log(colors.danger(`  ✗ Failed to switch model: ${message}\n`));
     }
   }
 

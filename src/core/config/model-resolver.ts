@@ -165,3 +165,35 @@ export function extractProvider(model: string): string | undefined {
   const colonIdx = model.indexOf(':');
   return colonIdx === -1 ? undefined : model.slice(0, colonIdx);
 }
+
+/**
+ * Default model used for on-demand context compression during `/model` switches.
+ *
+ * Should be fast and cheap — its only job is to summarize conversation history
+ * into a compact handoff message for the incoming model.
+ */
+export const DEFAULT_SUMMARIZER_MODEL = 'gemini-2.5-flash-lite';
+
+/**
+ * Resolves the model to use for context compression during model switches.
+ *
+ * Priority:
+ * 1. `CONTEXT_SUMMARIZER_MODEL` environment variable (operator override)
+ * 2. `DEFAULT_SUMMARIZER_MODEL` constant (`'gemini-2.5-flash-lite'`)
+ *
+ * The summarizer model is intentionally independent from the active `AGENT_MODEL`.
+ * This ensures compression always works even when the agent switches to a local
+ * Ollama model (which may have no internet access for cloud summarization).
+ * If Vertex is unavailable, `ContextCompressor` applies its own Ollama fallback.
+ *
+ * @returns The model string to use for context compression.
+ *
+ * @example
+ * ```bash
+ * # .env — override to use a different summarizer
+ * CONTEXT_SUMMARIZER_MODEL=gemini-2.5-pro
+ * ```
+ */
+export function resolveSummarizerModel(): string {
+  return process.env.CONTEXT_SUMMARIZER_MODEL ?? DEFAULT_SUMMARIZER_MODEL;
+}
