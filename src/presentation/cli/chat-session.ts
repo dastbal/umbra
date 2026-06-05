@@ -504,6 +504,11 @@ export class ChatSession {
       }
 
       // ── Step 2: Hot-swap the agent ────────────────────────────────────────
+      // Sync process.env so resolveModel() inside agentFactory picks up the
+      // new model. Without this, resolveModel() would return the STARTUP value
+      // of AGENT_MODEL (env vars are read once at boot — dotenv doesn't re-read
+      // the file). The .env file on disk was already updated by showModelMenu().
+      process.env.AGENT_MODEL = result.model;
       const newAgent = await this.config.agentFactory(result.model);
       this.agent = newAgent;
       this.currentModel = result.model;
