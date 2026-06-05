@@ -99,6 +99,10 @@ export async function showModelMenu(
 /**
  * Shows the Vertex AI model submenu with curated Gemini presets.
  *
+ * Entries from `getVertexModels()` with an empty `label` are treated as visual
+ * family separators (e.g., "── Gemini 3.5 ──") and are displayed without a
+ * selection number. Only real model entries are numbered and selectable.
+ *
  * @param currentModel - Currently active model (for "active" highlighting).
  * @param envFilePath - Path to `.env` file for persistence.
  * @returns The selected model result, or `null` if cancelled.
@@ -107,22 +111,38 @@ async function showVertexModelMenu(
   currentModel: string,
   envFilePath?: string,
 ): Promise<ModelMenuResult | null> {
-  const models = ModelSwitcher.getVertexModels();
+  const allEntries = ModelSwitcher.getVertexModels();
+
+  // Split into selectable models and separators so we can number correctly.
+  const selectableModels = allEntries.filter((m) => m.label !== '');
 
   printSection('Select Gemini Model');
-  models.forEach((m: { name: string; label: string }, i: number) => {
-    const isActive = m.name === currentModel;
-    const activeTag = isActive ? colors.accent(' ← active') : '';
-    console.log(`  ${colors.primary.bold(`${i + 1}.`)} ${chalk.white(m.label)}${activeTag}`);
-  });
 
-  const choice = await askNumber('  Model: ', 0, models.length);
+  // Track selectable index separately so separators don't consume numbers.
+  let selectableIdx = 0;
+  for (const entry of allEntries) {
+    if (entry.label === '') {
+      // Separator / family header — print without a number
+      console.log('');
+      console.log(colors.secondary(`  ${entry.name}`));
+    } else {
+      selectableIdx++;
+      const isActive = entry.name === currentModel;
+      const activeTag = isActive ? colors.accent(' ← active') : '';
+      console.log(
+        `  ${colors.primary.bold(`${selectableIdx}.`)} ${chalk.white(entry.label)}${activeTag}`,
+      );
+    }
+  }
+  console.log('');
+
+  const choice = await askNumber('  Model: ', 0, selectableModels.length);
   if (choice === null || choice === 0) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selected = models[choice - 1];
+  const selected = selectableModels[choice - 1];
   return applyModelSelection(selected.name, envFilePath);
 }
 

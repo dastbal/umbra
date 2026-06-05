@@ -37,17 +37,34 @@ export const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 /**
  * Model tier shortcuts for ergonomic selection without memorizing full model names.
  * Maps a tier to the recommended model string for that use case.
+ *
+ * Tier aliases point to the **latest stable** generation by default.
+ * Use the versioned aliases (e.g., `"2.5-flash"`) to pin to a specific family.
  */
 export const MODEL_TIERS: Record<string, string> = {
-  // ── Vertex AI / Gemini Cloud ──────────────────────────────────────────────
-  /** Quick tasks, cheap. Best for: simple file edits, Q&A. */
-  lite: 'gemini-2.5-flash-lite',
-  /** Balanced. Best for: most coding tasks. */
-  flash: 'gemini-2.5-flash',
+  // ── Tier shortcuts (always point to latest recommended) ──────────────────
+  /** Quick tasks, cheap. Best for: classification, routing, intent detection. */
+  lite:  'gemini-3.1-flash-lite',
+  /** Balanced. Best for: most coding tasks and agentic workflows. */
+  flash: 'gemini-3.5-flash',
   /** Most capable cloud model. Best for: architecture, complex refactors. */
-  pro: 'gemini-2.5-pro',
+  pro:   'gemini-3.1-pro',
   /** Maximum quality. Best for: code review, critical logic. */
   claude: 'anthropic:claude-opus-4-7',
+
+  // ── Versioned Gemini shortcuts (pin to specific generation) ──────────────
+  /** Gemini 3.5 Flash — fastest, best for agentic tasks (June 2026 GA). */
+  'gemini-3.5-flash':      'gemini-3.5-flash',
+  /** Gemini 3.1 Flash Lite — cheapest, high-volume tasks. */
+  'gemini-3.1-lite':       'gemini-3.1-flash-lite',
+  /** Gemini 3.1 Pro — complex reasoning, multimodal. */
+  'gemini-3.1-pro':        'gemini-3.1-pro',
+  /** Gemini 2.5 Flash Lite — legacy fast/cheap. */
+  '2.5-lite':              'gemini-2.5-flash-lite',
+  /** Gemini 2.5 Flash — legacy balanced. */
+  '2.5-flash':             'gemini-2.5-flash',
+  /** Gemini 2.5 Pro — legacy most capable. */
+  '2.5-pro':               'gemini-2.5-pro',
 
   // ── Ollama / Local (free, no API key required) ───────────────────────────
   /** Local inference. Best for: offline development, no API costs. */

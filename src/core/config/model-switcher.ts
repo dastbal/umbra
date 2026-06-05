@@ -181,16 +181,30 @@ export class ModelSwitcher {
   /**
    * Returns the list of Vertex AI / Gemini cloud models available as presets.
    *
+   * Curated list organized by model family (newest first).
+   * Entries with an empty name (`''`) are visual separators between families.
+   *
    * These are not auto-detected (no cloud API call needed) — they are curated
-   * based on the `MODEL_TIERS` defined in `model-resolver.ts`.
+   * and kept in sync with the `MODEL_TIERS` defined in `model-resolver.ts`.
    *
    * @returns Array of Vertex AI model presets with display metadata.
    */
   public static getVertexModels(): Array<{ name: string; label: string }> {
     return [
-      { name: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite  (fast & cheap)' },
-      { name: 'gemini-2.5-flash',      label: 'Gemini 2.5 Flash       (balanced)' },
-      { name: 'gemini-2.5-pro',        label: 'Gemini 2.5 Pro         (most capable)' },
+      // ── Gemini 3.5 (latest) ───────────────────────────────────────────────
+      { name: '── Gemini 3.5 ──',       label: '' },
+      { name: 'gemini-3.5-flash',       label: 'Gemini 3.5 Flash      ⭐ (fastest, agentic)' },
+
+      // ── Gemini 3.1 ────────────────────────────────────────────────────────
+      { name: '── Gemini 3.1 ──',       label: '' },
+      { name: 'gemini-3.1-flash-lite',  label: 'Gemini 3.1 Flash Lite   (cheap, high-volume)' },
+      { name: 'gemini-3.1-pro',         label: 'Gemini 3.1 Pro          (complex reasoning)' },
+
+      // ── Gemini 2.5 ────────────────────────────────────────────────────────
+      { name: '── Gemini 2.5 ──',       label: '' },
+      { name: 'gemini-2.5-flash-lite',  label: 'Gemini 2.5 Flash Lite   (fast & cheap)' },
+      { name: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash        (balanced)' },
+      { name: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro          (most capable 2.5)' },
     ];
   }
 }

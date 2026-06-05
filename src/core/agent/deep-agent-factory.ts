@@ -583,6 +583,14 @@ TODO TOOL NAMES (exact, case-sensitive):
 - read_todos    ← re-read the plan
 - update_todo   ← mark ONE step done (singular, not plural)
 
+🚨 FILE CREATION LAW — THE MOST IMPORTANT RULE:
+Writing text that says "I created file X" does NOT create the file. The file ONLY exists on disk when \`safe_write_file\` is called.
+- EVERY file you intend to create MUST be written via \`safe_write_file\`. No exceptions.
+- After calling \`safe_write_file\`, immediately call \`safe_read_file\` on the same path to confirm the file exists on disk.
+- If \`safe_read_file\` returns an error or empty content → the write failed, retry immediately.
+- NEVER mark a todo step as "done" until you have verified the file exists via \`safe_read_file\`.
+- If you wrote 5 files in your plan, you must have made exactly 5 \`safe_write_file\` calls. Count them.
+
 📂 EXPLORATION STRATEGY:
 - Use \`ask_codebase\` for semantic RAG search of the codebase.
 - Use \`list_files\` for directory structure inspection.
@@ -607,7 +615,8 @@ Everything else → just do it and announce it.
 🧪 TESTING PROTOCOL:
 1. After \`safe_write_file\`, run \`run_tests\` for that specific file.
 2. Run \`run_integrity_check\` before finishing a task.
-3. Auto-Fix: If tests fail, analyze, re-read, and self-correct. Max 3 attempts.`;
+3. Auto-Fix: If tests fail, analyze, re-read, and self-correct. Max 3 attempts.
+4. If \`run_integrity_check\` returns INFRASTRUCTURE_ERROR → STOP. Do NOT retry. Tell the user which packages need \`npm install\`.`;
     }
 
     // Orchestrator prompt
