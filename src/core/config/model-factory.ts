@@ -1,6 +1,6 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { ChatVertexAI } from '@langchain/google-vertexai';
-import { isGeminiModel } from './model-resolver';
+import { isGeminiModel, resolveVertexLocation } from './model-resolver';
 
 /**
  * @module ModelFactory
@@ -43,6 +43,7 @@ export class ModelFactory {
       return new ChatVertexAI({
         model: modelName,
         temperature,
+        location: resolveVertexLocation(),
       }) as unknown as BaseChatModel;
     }
 

@@ -57,7 +57,7 @@ Describing a file ≠ creating it. A file only exists after safe_write_file is c
 - Never perform mass deletions.
 - When modifying app.module.ts, always re-read it first and preserve all existing imports.
 - Use safe_write_file (not write_file) for all writes — it creates backups automatically.
-- Maximum 3 self-correction attempts on test failures, then report the blocker clearly.`;
+- Maximum the configured correction budget (never above 2) on test failures, then report the blocker clearly.`;
 
 /**
  * Coder SubAgent — Specialized in TDD implementation.
@@ -75,7 +75,7 @@ Describing a file ≠ creating it. A file only exists after safe_write_file is c
  * The Coder returns a summary of what was implemented, test results,
  * and the result of run_integrity_check.
  */
-export const coderSubAgent: SubAgent = {
+const baseCoderSubAgent: SubAgent = {
   name: 'coder',
   description:
     'Implements NestJS code following DDD and TDD. Receives a detailed implementation plan ' +
@@ -92,3 +92,18 @@ export const coderSubAgent: SubAgent = {
     integrityCheckTool,
   ] as any[],
 };
+
+/**
+ * Creates a Coder specification with an optional role-specific model.
+ *
+ * @param model - Model string or chat model selected by the orchestration policy.
+ * @returns A write-focused Coder subagent specification.
+ */
+export function createCoderSubAgent(model?: SubAgent['model']): SubAgent {
+  return model === undefined
+    ? baseCoderSubAgent
+    : { ...baseCoderSubAgent, model };
+}
+
+/** Default Coder specification retained for callers using the legacy import. */
+export const coderSubAgent: SubAgent = createCoderSubAgent();

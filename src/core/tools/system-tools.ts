@@ -5,6 +5,7 @@ import { promisify } from "util";
 import * as fs from "fs";
 import * as path from "path";
 import { log } from "./utils/logger";
+import { buildAdrIndex, formatAdrIndex } from "./adr-index";
 
 const execAsync = promisify(exec);
 
@@ -26,6 +27,34 @@ export const listFilesTool = tool(
     name: "list_files",
     description: "Lists files and directories in a specific path.",
     schema: z.object({ dirPath: z.string().optional().default(".") }),
+  },
+);
+
+/**
+ * Lists compact ADR metadata so an agent can choose one decision record to read.
+ *
+ * This avoids injecting or repeatedly reading the full ADR history during
+ * ordinary coding tasks. The persistent catalog remains local to `.agent/`.
+ */
+export const listAdrsTool = tool(
+  async ({ refresh }) => {
+    try {
+      const index = buildAdrIndex(process.cwd(), refresh);
+      log.sys(`ADR catalog ${index.status}: ${index.entries.length} decisions`);
+      return formatAdrIndex(index);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `âŒ Error indexing ADR files: ${message}`;
+    }
+  },
+  {
+    name: "list_adrs",
+    description:
+      "Lists ADR paths, titles, status, and compact context without returning ADR bodies. " +
+      "Use only when architecture history is relevant; then read the selected ADR with safe_read_file.",
+    schema: z.object({
+      refresh: z.boolean().optional().default(false).describe("Rebuild the local ADR catalog."),
+    }),
   },
 );
 

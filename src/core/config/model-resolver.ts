@@ -3,10 +3,10 @@
  *
  * Centralized LLM model resolution for the nestjs-ai-agent-lib.
  *
- * Resolution priority:
- * 1. `AGENT_MODEL` environment variable (highest — runtime switch)
- * 2. `override` parameter passed programmatically
- * 3. `DEFAULT_MODEL` constant (lowest — safe fallback)
+ * Primary-session resolution priority:
+ * 1. Explicit CLI/programmatic override (highest — deliberate task choice)
+ * 2. `AGENT_MODEL` environment variable (runtime switch)
+ * 3. Role profile or `DEFAULT_MODEL` (safe fallback)
  *
  * Supported model string formats:
  * - Bare model name:      "gemini-2.5-flash-lite"   → Google Vertex AI / GenAI
@@ -25,9 +25,8 @@
  *
  * @example
  * ```ts
- * const model = resolveModel();                    // reads AGENT_MODEL env
- * const model = resolveModel('gemini-2.5-pro');    // override for orchestrator
- * const model = resolveModel(undefined, 'lite');    // tier-based selection
+ * const model = resolveModel(); // reads AGENT_MODEL env
+ * const model = resolveModelForSession('gemini-2.5-pro', 'pro');
  * ```
  */
 
@@ -47,8 +46,8 @@ export const MODEL_TIERS: Record<string, string> = {
   lite:  'gemini-3.1-flash-lite',
   /** Balanced. Best for: most coding tasks and agentic workflows. */
   flash: 'gemini-3.5-flash',
-  /** Most capable cloud model. Best for: architecture, complex refactors. */
-  pro:   'gemini-3.1-pro',
+  /** Most capable stable cloud model. Best for: architecture, complex refactors. */
+  pro:   'gemini-2.5-pro',
   // TODO: Phase N — Add Anthropic support via @langchain/anthropic + ANTHROPIC_API_KEY.
   // 'claude': 'anthropic:claude-opus-4-7' was removed because LLMProvider does not
   // yet implement the Anthropic provider. Returning a broken model string silently
@@ -57,10 +56,10 @@ export const MODEL_TIERS: Record<string, string> = {
   // ── Versioned Gemini shortcuts (pin to specific generation) ──────────────
   /** Gemini 3.5 Flash — fastest, best for agentic tasks (June 2026 GA). */
   'gemini-3.5-flash':      'gemini-3.5-flash',
+  /** Gemini 3.5 Flash Lite — fast, high-volume tasks. */
+  'gemini-3.5-lite':       'gemini-3.5-flash-lite',
   /** Gemini 3.1 Flash Lite — cheapest, high-volume tasks. */
   'gemini-3.1-lite':       'gemini-3.1-flash-lite',
-  /** Gemini 3.1 Pro — complex reasoning, multimodal. */
-  'gemini-3.1-pro':        'gemini-3.1-pro',
   /** Gemini 2.5 Flash Lite — legacy fast/cheap. */
   '2.5-lite':              'gemini-2.5-flash-lite',
   /** Gemini 2.5 Flash — legacy balanced. */
@@ -85,22 +84,63 @@ export const MODEL_TIERS: Record<string, string> = {
 
 
 /**
- * Resolve the active LLM model string.
+ * Expands a model tier or returns an already concrete model identifier.
  *
- * Checks `AGENT_MODEL` env var first, then the programmatic override,
- * then falls back to `DEFAULT_MODEL`.
+ * This function deliberately does not read environment variables. It is used
+ * for role profiles so an interactive `AGENT_MODEL` switch does not silently
+ * flatten Researcher, Coder, and Verifier onto the same cheap model.
  *
- * @param override - Optional model string override (takes priority over default,
- *   but NOT over the env variable — the env variable always wins for runtime control).
+ * @param model - Tier alias or concrete model identifier.
+ * @returns A concrete model identifier ready for provider routing.
+ */
+export function resolveConfiguredModel(model: string): string {
+  return MODEL_TIERS[model] ?? model;
+}
+
+/**
+ * Resolves the Vertex AI region used for Gemini chat requests.
+ *
+ * Gemini 3.5 is available from the global Vertex AI endpoint. Operators can
+ * override this with a supported regional endpoint through GOOGLE_CLOUD_LOCATION.
+ *
+ * @param configuredLocation - Optional region override, primarily for testing.
+ * @returns A Vertex AI endpoint location.
+ */
+export function resolveVertexLocation(configuredLocation = process.env.GOOGLE_CLOUD_LOCATION): string {
+  return configuredLocation?.trim() || 'global';
+}
+
+/**
+ * Resolve the active LLM model string from the environment and fallback.
+ *
+ * Checks `AGENT_MODEL` first, then the fallback value, then `DEFAULT_MODEL`.
+ * Use `resolveModelForSession()` whenever an explicit user override is present.
+ *
+ * @param fallback - Optional profile model used when no environment override exists.
  * @returns The resolved model string ready to pass to `createDeepAgent`.
  */
-export function resolveModel(override?: string): string {
-  const raw = process.env.AGENT_MODEL ?? override ?? DEFAULT_MODEL;
-  // Expand tier shortcuts (e.g. "flash" → "gemini-3.5-flash") via MODEL_TIERS.
-  // If the raw value is not a known tier, pass it through as-is (it is already
-  // a full model name like "gemini-2.5-flash-lite" or "ollama:gemma4").
-  // ADR-022: MODEL_TIERS was previously decoration — resolveModel() never used it.
-  return MODEL_TIERS[raw] ?? raw;
+export function resolveModel(fallback?: string): string {
+  return resolveConfiguredModel(process.env.AGENT_MODEL ?? fallback ?? DEFAULT_MODEL);
+}
+
+/**
+ * Resolves the primary model for one CLI or API session.
+ *
+ * An explicit override is intentionally stronger than `AGENT_MODEL`: a user
+ * choosing `--model gemini-2.5-pro` for a single architecture review should
+ * not have to edit their cost-efficient global default first.
+ *
+ * @param profileModel - Model selected by the project role profile.
+ * @param explicitModel - Optional per-session CLI or API override.
+ * @returns A concrete model identifier.
+ */
+export function resolveModelForSession(
+  profileModel: string,
+  explicitModel?: string,
+): string {
+  return explicitModel === undefined
+    ? resolveModel(profileModel)
+    : resolveConfiguredModel(explicitModel);
 }
 
 /**

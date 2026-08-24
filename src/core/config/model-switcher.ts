@@ -194,11 +194,11 @@ export class ModelSwitcher {
       // ── Gemini 3.5 (latest) ───────────────────────────────────────────────
       { name: '── Gemini 3.5 ──',       label: '' },
       { name: 'gemini-3.5-flash',       label: 'Gemini 3.5 Flash      ⭐ (fastest, agentic)' },
+      { name: 'gemini-3.5-flash-lite',  label: 'Gemini 3.5 Flash Lite (fast, high-volume)' },
 
       // ── Gemini 3.1 ────────────────────────────────────────────────────────
       { name: '── Gemini 3.1 ──',       label: '' },
       { name: 'gemini-3.1-flash-lite',  label: 'Gemini 3.1 Flash Lite   (cheap, high-volume)' },
-      { name: 'gemini-3.1-pro',         label: 'Gemini 3.1 Pro          (complex reasoning)' },
 
       // ── Gemini 2.5 ────────────────────────────────────────────────────────
       { name: '── Gemini 2.5 ──',       label: '' },

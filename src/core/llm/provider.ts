@@ -21,7 +21,7 @@
  * // Auto-routes based on AGENT_MODEL env var
  * const chat = LLMProvider.createChatModel('gemini-3.5-flash');        // latest
  * const chat = LLMProvider.createChatModel('gemini-3.1-flash-lite');   // cheap
- * const chat = LLMProvider.createChatModel('gemini-3.1-pro');          // powerful
+ * const chat = LLMProvider.createChatModel('gemini-2.5-pro');          // powerful
  * const chat = LLMProvider.createChatModel('gemini-2.5-flash-lite');   // legacy
  * const chat = LLMProvider.createChatModel('ollama:gemma4');           // local
  *
@@ -32,7 +32,12 @@
 
 import { ChatVertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
 import { OllamaChatAdapter } from './ollama-adapter';
-import { isOllamaModel, isGeminiModel } from '../config/model-resolver';
+import { VertexChatAdapter } from './vertex-chat-adapter';
+import {
+  isOllamaModel,
+  isGeminiModel,
+  resolveVertexLocation,
+} from '../config/model-resolver';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -127,9 +132,10 @@ export class LLMProvider {
    */
   public static getModel(): ChatVertexAI {
     LLMProvider.ensureVertexCredentials();
-    return new ChatVertexAI({
+    return new VertexChatAdapter({
       model: process.env.GOOGLE_CLOUD_MODEL_NAME ?? 'gemini-2.5-flash-lite',
       temperature: 0,
+      location: resolveVertexLocation(),
     });
   }
 
@@ -142,9 +148,10 @@ export class LLMProvider {
     temperature?: number;
   }): ChatVertexAI {
     LLMProvider.ensureVertexCredentials();
-    return new ChatVertexAI({
+    return new VertexChatAdapter({
       model: config?.modelName ?? process.env.GOOGLE_CLOUD_MODEL_NAME ?? 'gemini-2.5-flash-lite',
       temperature: config?.temperature ?? 0,
+      location: resolveVertexLocation(),
     });
   }
 
@@ -201,7 +208,11 @@ export class LLMProvider {
    */
   private static createVertexModel(model: string, temperature: number): ChatVertexAI {
     LLMProvider.ensureVertexCredentials();
-    return new ChatVertexAI({ model, temperature });
+    return new VertexChatAdapter({
+      model,
+      temperature,
+      location: resolveVertexLocation(),
+    });
   }
 
   /**

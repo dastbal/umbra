@@ -5,7 +5,12 @@ import {
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import { InteractionService } from '../interaction';
 import { IndexerService } from '../rag/indexer';
-import { resolveModel, isGeminiModel, isOllamaModel } from '../config/model-resolver';
+import {
+  resolveConfiguredModel,
+  resolveModelForSession,
+  isGeminiModel,
+  isOllamaModel,
+} from '../config/model-resolver';
 import {
   askCodebaseTool,
   executeTestsTool,
@@ -14,12 +19,24 @@ import {
   safeWriteFileTool,
   safeReadFileTool,
   listFilesTool,
+  listAdrsTool,
 } from '../tools';
-import { researcherSubAgent } from '../subagents/researcher.subagent';
-import { coderSubAgent } from '../subagents/coder.subagent';
+import { createResearcherSubAgent } from '../subagents/researcher.subagent';
+import { createCoderSubAgent } from '../subagents/coder.subagent';
+import { createVerifierSubAgent } from '../subagents/verifier.subagent';
+import {
+  AgentConfig,
+  AgentConfigInput,
+  loadAgentConfig,
+  parseAgentConfig,
+} from '../config/agent-config';
+import { buildEvidenceProtocolPrompt } from './evidence-protocol';
+import { groundedAnalysisSchema } from './evidence-protocol';
+import { collectWorkspaceEvidence, formatWorkspaceEvidence } from './workspace-evidence';
 import { LLMProvider } from '../llm/provider';
 import { OllamaChatAdapter } from '../llm/ollama-adapter';
 import { buildOllamaWarning } from '../../presentation/cli/theme';
+import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -56,7 +73,7 @@ export interface DeepAgentFactoryConfig {
 
   /**
    * The LLM model string to use.
-   * Resolution priority: AGENT_MODEL env var > this value > DEFAULT_MODEL.
+   * Resolution priority: this explicit value > AGENT_MODEL env var > role profile.
    * Examples: "gemini-2.5-flash-lite", "gemini-2.5-pro", "ollama:llama3.2"
    * @see src/core/config/model-resolver.ts
    * @default "gemini-2.5-flash-lite"
@@ -77,6 +94,12 @@ export interface DeepAgentFactoryConfig {
    * @default true for orchestrator, false for simple deep agent
    */
   enableContextCompression?: boolean;
+
+  /**
+   * Optional project policy override. When omitted, `.agent/agent.config.json`
+   * is loaded; when both are absent, safe defaults are used.
+   */
+  agentConfig?: AgentConfigInput;
 }
 
 /**
@@ -134,21 +157,15 @@ export class DeepAgentFactory {
     interaction?: InteractionService,
   ): Promise<any> {
     const rootDir = config.rootDir ?? process.cwd();
-    const model = resolveModel(config.model);
+    const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
+    const model = resolveModelForSession(agentConfig.models.supervisor, config.model);
 
     await DeepAgentFactory.bootstrap(rootDir, model, interaction);
 
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir);
-    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'simple');
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'simple', agentConfig);
 
-    // For Ollama models, pass a pre-built BaseChatModel instance instead of the
-    // model string. This ensures deepagents uses our OllamaChatAdapter (which
-    // serializes non-string ToolMessage content) rather than creating a raw
-    // ChatOllama via initChatModel. Vertex AI models continue to use the string
-    // path — deepagents' initChatModel handles them correctly.
-    const modelParam = isOllamaModel(model)
-      ? LLMProvider.createChatModel(model)
-      : model;
+    const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
 
     return createDeepAgent({
       model: modelParam as any,
@@ -158,11 +175,58 @@ export class DeepAgentFactory {
         safeWriteFileTool,
         safeReadFileTool,
         listFilesTool,
+        listAdrsTool,
         askCodebaseTool,
         refreshIndexTool,
         integrityCheckTool,
         executeTestsTool,
       ] as any[],
+    });
+  }
+
+  /**
+   * Creates a one-shot, read-only analysis agent with structured output.
+   *
+   * Unlike the conversational `create()` mode, this mode injects a bounded
+   * machine-collected evidence manifest and requires every finding to carry a
+   * project-relative citation. It is intended for architecture reviews,
+   * project audits, performance assessments, and the `/analyze` CLI command.
+   *
+   * @param config - Optional model, project, and policy overrides.
+   * @param interaction - Optional interaction service for CLI task indicators.
+   * @returns A compiled read-only DeepAgent with grounded structured output.
+   */
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  public static async createAnalysis(
+    config: DeepAgentFactoryConfig = {},
+    interaction?: InteractionService,
+  ): Promise<any> {
+    const rootDir = config.rootDir ?? process.cwd();
+    const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
+    const model = resolveModelForSession(agentConfig.models.researcher, config.model);
+
+    await DeepAgentFactory.bootstrap(rootDir, model, interaction);
+
+    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'analysis');
+    const evidence = formatWorkspaceEvidence(collectWorkspaceEvidence(rootDir));
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(
+      rootDir,
+      'analysis',
+      agentConfig,
+      evidence,
+    );
+    const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
+
+    return createDeepAgent({
+      model: modelParam as any,
+      systemPrompt,
+      responseFormat: groundedAnalysisSchema as any, // ADR-002: dual Zod package boundary
+      checkpointer: checkpointer as any, // ADR-002
+      // Analysis is intentionally manifest-only: small models otherwise keep
+      // rereading files already represented in the bounded evidence, consuming
+      // turns and polluting the one-shot context. Regular deep/orchestrator
+      // modes retain focused reads and RAG for interactive work.
+      tools: [] as any[],
     });
   }
 
@@ -191,25 +255,29 @@ export class DeepAgentFactory {
     interaction?: InteractionService,
   ): Promise<any> {
     const rootDir = config.rootDir ?? process.cwd();
-    const model = resolveModel(config.model);
+    const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
+    const model = resolveModelForSession(agentConfig.models.supervisor, config.model);
     const enableCompression = config.enableContextCompression ?? true;
 
     await DeepAgentFactory.bootstrap(rootDir, model, interaction);
 
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
-    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator');
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator', agentConfig);
 
     // Same Ollama adapter pattern as create() — pass BaseChatModel for Ollama,
     // string for Vertex AI.
-    const modelParam = isOllamaModel(model)
-      ? LLMProvider.createChatModel(model)
-      : model;
+    const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
 
     return createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      subagents: [researcherSubAgent, coderSubAgent],
+      middleware: [createOrchestrationGuard(agentConfig.limits.maxRetries)] as any[],
+      subagents: [
+        createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
+        createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
+        createVerifierSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
+      ],
       tools: [                           // ADR-002
         askCodebaseTool,
         refreshIndexTool,
@@ -249,11 +317,7 @@ export class DeepAgentFactory {
     // We also exclude `grep`, `glob` on Ollama because they cause issues
     // on Windows paths — our `safe_read_file` / `list_files` are safer.
     if (isGeminiModel(model)) {
-      // ADR-003: Dynamic tool exclusion for Gemini compatibility.
-      // Auto-scan detects any new deepagents tools with Zod union types.
-      const unsafeTools = DeepAgentFactory.detectGeminiIncompatibleTools();
-      const simpleAgentExcluded = [...new Set([...unsafeTools, 'task'])];
-      registerHarnessProfile(model, { excludedTools: simpleAgentExcluded });
+      DeepAgentFactory.registerGeminiHarnessProfile(model);
     } else if (isOllamaModel(model)) {
       // ADR-009: Register the Ollama harness profile under the bare "ollama"
       // provider key (not a model-specific key). This is intentional.
@@ -302,6 +366,59 @@ export class DeepAgentFactory {
     // Ollama chat models. If Vertex credentials are missing, indexing is skipped
     // gracefully — the agent can still function without semantic search.
     await DeepAgentFactory.maybeReindex(rootDir, interaction);
+  }
+
+  /**
+   * Resolves the project policy from an explicit override or local runtime file.
+   *
+   * @param rootDir - Project root used to locate `.agent/agent.config.json`.
+   * @param input - Optional programmatic policy override.
+   * @returns A fully defaulted and validated policy.
+   */
+  private static resolveAgentConfig(
+    rootDir: string,
+    input?: AgentConfigInput,
+  ): AgentConfig {
+    return input === undefined ? loadAgentConfig(rootDir) : parseAgentConfig(input);
+  }
+
+  /**
+   * Creates the runtime model instance used by deepagents.
+   *
+   * Routing every provider through LLMProvider is required so Gemini receives
+   * the configured Vertex location instead of a deepagents implicit default.
+   *
+   * @param model - Resolved model identifier.
+   * @returns A configured LangChain chat model.
+   */
+  private static resolveRuntimeModel(model: string) {
+    return LLMProvider.createChatModel(model);
+  }
+
+  /**
+   * Resolves a role model without applying the global AGENT_MODEL override.
+   *
+   * @param configuredModel - Model configured for the role.
+   * @returns A configured LangChain chat model.
+   */
+  private static resolveRoleModel(configuredModel: string) {
+    return DeepAgentFactory.resolveRuntimeModel(
+      resolveConfiguredModel(configuredModel),
+    );
+  }
+
+  /**
+   * Registers Gemini exclusions for string and pre-built Vertex model paths.
+   *
+   * @param model - Resolved Gemini model identifier.
+   * @returns Nothing.
+   */
+  private static registerGeminiHarnessProfile(model: string): void {
+    const unsafeTools = DeepAgentFactory.detectGeminiIncompatibleTools();
+    const excludedTools = [...new Set([...unsafeTools, 'task'])];
+
+    registerHarnessProfile(model, { excludedTools });
+    registerHarnessProfile(`google:${model}`, { excludedTools });
   }
 
   /**
@@ -466,14 +583,15 @@ export class DeepAgentFactory {
   }
 
   /**
-   * Clears the last (corrupted) checkpoint for a given thread.
+   * Clears the persisted checkpoints for a corrupted thread.
    *
    * When Vertex AI returns "must include at least one parts field", it means the
    * SQLite checkpoint contains a message with empty content — usually from a tool
    * call that was interrupted mid-flight (e.g., Ctrl+C during a streaming tool call).
    *
-   * This method deletes ONLY the most recent checkpoint entry for the thread, allowing
-   * the session to continue from the previous stable state rather than starting fresh.
+   * LangGraph does not expose a safe partial rollback for a terminal tool result.
+   * Resetting the named thread prevents the invalid tool-only history from being
+   * combined with a later human message.
    *
    * @param rootDir - Project root directory (where `.agent/` lives).
    * @param threadId - The LangGraph thread ID of the corrupted session.
@@ -602,10 +720,14 @@ export class DeepAgentFactory {
    */
   private static buildCheckpointer(
     rootDir: string,
-    type: 'simple' | 'orchestrator' = 'simple',
+    type: 'simple' | 'orchestrator' | 'analysis' = 'simple',
   ): SqliteSaver {
     const agentDir = path.join(rootDir, '.agent');
-    const dbFile = type === 'orchestrator' ? 'orchestrator_history.db' : 'deep_agent_history.db';
+    const dbFile = type === 'orchestrator'
+      ? 'orchestrator_history.db'
+      : type === 'analysis'
+        ? 'analysis_history.db'
+        : 'deep_agent_history.db';
     const dbPath = path.join(agentDir, dbFile);
     return SqliteSaver.fromConnString(dbPath);
   }
@@ -614,14 +736,22 @@ export class DeepAgentFactory {
    * Builds the system prompt for the given agent type.
    *
    * @param rootDir - The project root directory (injected into prompt for context).
-   * @param type - The agent type ('simple' | 'orchestrator').
+   * @param type - The agent type ('simple' | 'orchestrator' | 'analysis').
+   * @param agentConfig - Validated project execution policy.
+   * @param evidenceManifest - Optional bounded workspace evidence for analysis mode.
    * @returns The system prompt string.
    */
   private static buildSystemPrompt(
     rootDir: string,
-    type: 'simple' | 'orchestrator',
+    type: 'simple' | 'orchestrator' | 'analysis',
+    agentConfig: AgentConfig = parseAgentConfig({}),
+    evidenceManifest = '',
   ): string {
-    const base = `You are a Principal Software Engineer specialized in NestJS (Node.js).
+    const evidenceProtocol = buildEvidenceProtocolPrompt(
+      type === 'analysis' ? 'preloaded-manifest' : 'tool-research',
+    );
+    const base = `${evidenceProtocol}
+You are a Principal Software Engineer specialized in NestJS (Node.js).
 You operate directly on the local file system of a live, real-world project at: ${rootDir}
 
 🎯 SKILL DISCOVERY — mandatory before every task:
@@ -644,6 +774,12 @@ Keyword → Skill map (check in this order):
 If no keyword matches, call \`list_files("skills/")\` to discover available skills.
 Load the matching skill with \`safe_read_file("skills/<name>.md")\` and follow it precisely.
 If \`skills/\` does not exist, proceed with your best NestJS/DDD judgment.
+
+ARCHITECTURE DECISION INDEX:
+- Do not scan or read ADR files during ordinary coding tasks.
+- Only when a prior architecture decision, model policy, safety boundary, or project history is relevant,
+  call \`list_adrs\` first. It returns only paths, title, status, and compact context.
+- Then use \`safe_read_file\` on the one ADR that is relevant to the task; never load all ADRs.
 
 🔒 FILE PROTECTION LAW:
 These files are NEVER to be modified by the agent under any circumstances:
@@ -673,7 +809,7 @@ Describing a file ≠ creating it. A file only exists on disk after \`safe_write
 - Never write outside the project root. Use RELATIVE PATHS only.
 - Read-Before-Write: always \`safe_read_file\` before overwriting any existing file.
 - Tolerate typos, bad grammar, Spanglish — always infer intent, never reject a request.
-- After 3 failed self-correction attempts → use \`ask_human\` for guidance.
+- After the configured correction cycles → use \`ask_human\` for guidance.
 
 📝 OUTPUT FORMAT (always markdown):
 Use \`# Headers\`, \`**bold**\` for key terms, fenced code blocks with language tags.
@@ -693,8 +829,19 @@ For architecture: "I chose [pattern] over [alternative] because [reason]. Downsi
 
 For deep explanations, load \`skills/mentor-mode.md\` (triggered by keywords: mentor, teach me, explain why, trade-off).`;
 
+    const policy = `
+
+🔐 EXECUTION POLICY (validated project configuration):
+- Role models: supervisor=${agentConfig.models.supervisor}, researcher=${agentConfig.models.researcher}, coder=${agentConfig.models.coder}, verifier=${agentConfig.models.verifier}.
+- Maximum automatic correction cycles: ${agentConfig.limits.maxRetries}.
+- Delegation depth is limited to ${agentConfig.limits.maxDelegationDepth}; do not spawn nested subagents.
+- Only the Coder may write during delegated work: ${agentConfig.permissions.singleWriter}.
+- Safe edits may proceed automatically: ${agentConfig.permissions.autoApproveSafeEdits}.
+- External, destructive, secret, infrastructure, Git push, and deployment actions require approval: ${agentConfig.permissions.requireApprovalForExternalActions}.
+Keep handoffs compact; never copy full subagent transcripts into your working context.`;
+
     if (type === 'simple') {
-      return base + `
+      return base + policy + `
 
 ⚡ TASK SIZING — classify before acting:
 - **SMALL** (1-2 files, obvious change): No \`write_todos\`. Read → Write → Done. Max 3 tool calls.
@@ -716,33 +863,72 @@ Once you have a plan, execute ALL steps without stopping.
 - Deleting files or directories
 - Dropping database tables or migrations
 - Modifying infra files (docker-compose, CI/CD, .env.production)
-- After 3 failed self-correction attempts
+- After the configured correction cycles
 Everything else → execute autonomously.`;
+    }
+
+    if (type === 'analysis') {
+      return base + policy + `
+
+🎯 YOUR ROLE: EVIDENCE-GATED ANALYST
+This is a read-only one-shot audit. Never write, delete, execute, or propose an
+unverified repository fact. The response schema requires:
+- summary: concise purpose and conclusion;
+- findings: claims, each with confidence (high/medium/low) and at least one direct
+  or retrieved citation containing a real relative path;
+- unknowns: explicit "No verificado" items when the manifest or tools do not prove a claim;
+- filesReferenced: every path used as evidence.
+
+ONE-SHOT ANALYSIS OVERRIDE:
+This override takes precedence over generic workflow instructions intended for interactive
+agents. Do not call list_files, safe_read_file, ask_codebase, write_todos, or task.
+Do not load a skill. The bounded manifest below replaces discovery for this report.
+Return the structured answer directly after evaluating the supplied evidence.
+
+The machine-collected manifest below is the complete evidence set for this one-shot
+run. Do not request more files or tools: mark facts absent from it as "No verificado".
+This mode intentionally does not use semantic RAG so broad audits remain stable,
+low-cost, and bounded; do not invent evidence that is absent from the manifest.
+
+${evidenceManifest}`;
     }
 
 
     // Orchestrator prompt
-    return base + `
+    return base + policy + `
 
 🎯 YOUR ROLE: ORCHESTRATOR
 You coordinate specialized subagents to complete complex tasks.
 You do NOT implement code yourself — you delegate to the right specialist.
 
 📋 MANDATORY ORCHESTRATION PROTOCOL:
-For EVERY task, follow this exact sequence:
+Every interactive request carries a trusted \`[ORCHESTRATION_ROUTE ...]\` envelope generated
+before it enters this graph. Obey it exactly:
+- When \`implementation=false\`, do not call a subagent or write. Answer using read-only tools.
+- When \`implementation=true\`, follow the required route in its exact order. The Coder is the
+  only writer and uses its quality-oriented model profile.
+- Call the registered task identifiers exactly as \`researcher\`, \`coder\`, and \`verifier\`
+  (all lowercase). If a task result contains \`"status":"blocked"\` from the orchestration
+  guard, STOP immediately: report its reason and do not draft code, simulate tests, or claim a
+  change was made.
+
+For implementation tasks, follow this exact sequence:
 1. Call \`write_todos\` with the full plan (Analysis → Implementation → Verification).
 2. Call \`task\` with subagent "researcher":
    - Provide full context: what to build, existing patterns to follow, constraints.
-   - The researcher returns a detailed implementation plan.
+   - The researcher returns a compact JSON handoff.
 3. Call \`task\` with subagent "coder":
-   - Pass the COMPLETE output from the researcher.
+   - Pass the COMPLETE compact handoff from the researcher.
    - The coder implements, tests, and returns results.
-4. Call \`run_integrity_check\` to verify zero TypeScript errors.
-5. Report to the user: what was built, test results, any issues.
+4. Call \`task\` with subagent "verifier" after the Coder finishes.
+   - The verifier is read-only and runs focused tests plus the TypeScript integrity check.
+5. If verification fails, allow at most the configured correction cycles, then call the verifier again.
+6. Report to the user: what was built, decisions and trade-offs, changed files, evidence, risks, and next steps.
 
 🤖 AVAILABLE SUBAGENTS:
 - **researcher**: Analyzes codebase, reads files, returns implementation plan. Use FIRST.
-- **coder**: Implements code with TDD. Receives the researcher's plan. Use SECOND.
+- **coder**: Implements code with TDD. Receives the researcher's handoff. Use SECOND.
+- **verifier**: Runs tests and type-checks without write access. Use LAST.
 
 📂 ORCHESTRATOR TOOLS:
 - \`ask_codebase\`: For quick questions you can answer yourself without delegating.

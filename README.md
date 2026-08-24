@@ -333,13 +333,66 @@ AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
 | `local`    | `ollama:llama3.2`        | 🦙 Local    | General purpose offline                |
 | `lite`     | `gemini-3.1-flash-lite`  | ⚡ Cloud    | Quick edits, Q&A (cheapest)           |
 | `flash`    | `gemini-3.5-flash`       | ⚡ Cloud    | Balanced speed + quality (recommended) |
-| `pro`      | `gemini-3.1-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
+| `pro`      | `gemini-2.5-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
+| `3.5-lite` | `gemini-3.5-flash-lite`  | ⚡ Cloud    | Fast, high-volume workloads            |
 
 > **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This ensures a stable and high-quality codebase index even when switching between local Ollama and cloud Gemini models.
 
 ---
 
 ## Agent Modes
+
+### Project initialization and policy
+
+Run this once inside the project you want the agent to operate on:
+
+```bash
+npm run agent -- init
+```
+
+The command is idempotent and creates `.agent/agent.config.json` only when it is
+missing. The file is local runtime state (and remains ignored by Git), so each
+project can choose its own model routing and safety limits. The first iteration
+keeps one delegation level and one writer: Researcher is read-only, Coder is the
+only writer, and Verifier is read-only and runs tests plus the TypeScript check.
+Handoffs are compact structured artifacts rather than full transcripts.
+
+For architecture reviews, audits, and performance questions use the dedicated
+evidence-gated mode. It is one-shot, read-only, injects a bounded workspace
+manifest, and requires cited paths in the structured response:
+
+```bash
+npm run agent -- analyze "Evalúa el propósito, flujo, memoria y cuellos de botella del proyecto"
+```
+
+To keep this audit predictable and cheap, `analyze` answers only from its
+machine-collected, path-and-line manifest; it does not launch RAG searches or
+re-read files. Missing evidence is reported as `No verificado`. Use `deep` or
+`orchestrate` when the task needs an interactive investigation beyond that
+bounded report.
+
+### Model routing: cost first, quality where it matters
+
+`AGENT_MODEL` selects the primary model for the current `deep` or
+`orchestrate` session. It does **not** overwrite the specialized models inside
+the orchestrator: the project policy keeps the Researcher, Coder, and Verifier
+on their own profiles. By default, the Coder uses `gemini-2.5-pro` while the
+other roles use `gemini-2.5-flash-lite` to preserve cost efficiency.
+
+For a single quality-sensitive review, leave your economical `.env` unchanged
+and pass an explicit model just for that run:
+
+```powershell
+# A high-quality, read-only architecture or performance review
+npm run agent -- analyze --model gemini-2.5-pro "Evaluate the project purpose, flow, memory, and performance bottlenecks"
+
+# A stronger Supervisor for one complex implementation session
+npm run agent -- orchestrate --model gemini-2.5-pro --session architecture-review
+```
+
+The precedence is: explicit `--model` > `AGENT_MODEL` > project role profile.
+The role profiles and safety limits are visible and editable in
+`.agent/agent.config.json`; `agent init` never overwrites an existing file.
 
 ### Deep Agent (`deep`) — Single Autonomous Agent
 
@@ -364,6 +417,7 @@ npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts"
 **Core Tools:**
 *   `write_todos`: Plans and tracks multi-step tasks.
 *   `list_files`: Lists directory contents.
+*   `list_adrs`: Returns a cached catalog of ADR paths, status, and context; the agent reads only the ADR selected for a decision-history task.
 *   `safe_read_file`: Reads file content safely.
 *   `safe_write_file`: Writes to files with automatic backups.
 *   `ask_codebase`: Performs semantic search over your codebase using RAG.
@@ -388,12 +442,14 @@ npm run agent -- orchestrate --session big-refactor
 **Mandatory Workflow:** The orchestrator strictly follows a predefined protocol to ensure thoroughness and quality:
 1.  **`write_todos`:** Creates a comprehensive plan covering analysis, implementation, and verification.
 2.  **`task(researcher)`:** Delegates analysis to the `researcher` subagent, which examines the codebase and produces a detailed implementation plan.
-3.  **`task(coder)`:** Delegates implementation to the `coder` subagent, which follows the researcher's plan, adheres to Test-Driven Development (TDD), and writes tests *before* implementation.
-4.  **`run_integrity_check`:** Verifies that the entire project is free of TypeScript errors after the `coder` finishes.
+3.  **`task(coder)`:** Delegates implementation to the `coder` subagent, which follows the researcher's handoff, adheres to Test-Driven Development (TDD), and writes tests *before* implementation.
+4.  **`task(verifier)`:** Runs focused tests and the TypeScript integrity check without write access.
+5.  **Correction loop:** Allows at most the configured `maxRetries` automatic correction cycles before reporting a blocker.
 
 **Subagents:**
 *   **Researcher:** A read-only analyst. Uses tools like `ask_codebase` and `safe_read_file` to understand the project and generate structured plans.
-*   **Coder:** An implementation specialist. Uses `safe_write_file`, `run_tests`, and `run_integrity_check`. Writes `.spec.ts` files first, then implements the corresponding code. Self-corrects up to 3 times upon test failures.
+*   **Coder:** An implementation specialist. Uses `safe_write_file`, `run_tests`, and `run_integrity_check`. Writes `.spec.ts` files first, then implements the corresponding code. Self-corrects up to the configured `maxRetries` upon test failures.
+*   **Verifier:** A read-only quality gate. Runs tests and type-checks, then returns compact evidence and remaining issues.
 
 ---
 

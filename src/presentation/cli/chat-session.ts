@@ -30,6 +30,11 @@ import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
 import { ContextCompressor } from '../../core/agent/context-compressor';
 import { resolveSummarizerModel } from '../../core/config/model-resolver';
+import {
+  classifyOrchestrationTask,
+  formatOrchestrationRoute,
+} from '../../core/agent/task-classifier';
+import { shouldRetryEmptyTurn } from './empty-turn-retry';
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -165,20 +170,19 @@ export class ChatSession {
    *
    * @param input - The user's message text.
    */
-  /**
-   * Maximum number of automatic retries when the model returns an empty response.
-   * @see {@link sendMessage} for the retry logic.
-   */
-  private static readonly MAX_EMPTY_OUTPUT_RETRIES = 2;
-
   private async sendMessage(input: string, retryCount = 0): Promise<void> {
     this.renderer.showThinking();
     let thinkingCleared = false;
+    let hasTextOutput = false;
+    let hasToolActivity = false;
+    const routedInput = this.config.mode === 'orchestrate'
+      ? formatOrchestrationRoute(classifyOrchestrationTask(input), input)
+      : input;
 
     try {
       // LangGraph streaming: streamEvents gives us fine-grained events
       const eventStream = this.agent.streamEvents(
-        { messages: [{ role: 'human', content: input }] },
+        { messages: [{ role: 'human', content: routedInput }] },
         { ...this.graphConfig, version: 'v2' },
       );
 
@@ -199,12 +203,16 @@ export class ChatSession {
             const token = typeof chunk?.content === 'string'
               ? chunk.content
               : (chunk?.content?.[0]?.text ?? '');
-            if (token) this.renderer.streamToken(token);
+            if (token) {
+              hasTextOutput = true;
+              this.renderer.streamToken(token);
+            }
             break;
           }
 
           // ── Tool call started ────────────────────────────────────────────
           case 'on_tool_start': {
+            hasToolActivity = true;
             const toolName = event.name ?? 'unknown';
             const toolInput = event.data?.input ?? {};
             toolStartTimes.set(toolName, Date.now());
@@ -230,6 +238,16 @@ export class ChatSession {
           }
         }
       }
+
+      if (shouldRetryEmptyTurn({ hasTextOutput, hasToolActivity, retryCount })) {
+        this.renderer.clearThinking();
+        this.renderer.finalizeTurn();
+        this.renderer.showTurnSeparator();
+        process.stdout.write(
+          `\n  ⚠️  ${this.colorMuted('Empty response — retrying once...')}\n`,
+        );
+        return this.sendMessage(input, retryCount + 1);
+      }
     } catch (err: unknown) {
       const error = err as Error;
 
@@ -245,10 +263,10 @@ export class ChatSession {
       // message that gives the model a shorter target to respond to.
       if (
         error?.message?.includes('model output must contain') &&
-        retryCount < ChatSession.MAX_EMPTY_OUTPUT_RETRIES
+        retryCount < 1
       ) {
         process.stdout.write(
-          `\n  ⚠️  ${this.colorMuted(`Context overflow — auto-retry ${retryCount + 1}/${ChatSession.MAX_EMPTY_OUTPUT_RETRIES}...`)}\n`,
+          `\n  ⚠️  ${this.colorMuted(`Context overflow — auto-retry ${retryCount + 1}/1...`)}\n`,
         );
         // Small delay to avoid hammering the API
         await new Promise((r) => setTimeout(r, 800));

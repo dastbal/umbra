@@ -12,13 +12,16 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import * as readline from "readline";
+import * as path from "path";
 import { AgentFactory } from "../core/agent/factory";
 import { GraphAgentFactory } from "../core/agent/graph-factory";
 import { DeepAgentFactory } from "../core/agent/deep-agent-factory";
 import { StreamRenderer, ChatSession } from "../presentation/cli";
-import { resolveModel } from "../core/config/model-resolver";
+import { resolveModelForSession } from "../core/config/model-resolver";
 import { Command as LangGraphCommand } from "@langchain/langgraph";
 import { AgentDB } from "../core/state/db";
+import { ensureAgentConfig, loadAgentConfig } from "../core/config/agent-config";
+import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
 
 const program = new Command();
 
@@ -58,6 +61,53 @@ const askConfirmation = (query: string): Promise<boolean> => {
     });
   });
 };
+
+/**
+ * Resets a named Deep session only when its checkpoint stopped after a tool
+ * result and therefore cannot accept a new human message safely.
+ *
+ * @param agent - The newly created Deep agent for the requested session.
+ * @param threadId - Persistent LangGraph thread identifier.
+ * @param model - Optional explicit model override for the recreated agent.
+ * @returns The original agent when its checkpoint is complete, otherwise a
+ * fresh agent bound to the reset session.
+ */
+async function recoverIncompleteDeepSession(
+  agent: any,
+  threadId: string,
+  model?: string,
+): Promise<any> {
+  try {
+    const state = await agent.getState({ configurable: { thread_id: threadId } });
+    const messages: unknown[] = state?.values?.messages ?? [];
+
+    if (!hasIncompleteToolTurn(messages)) {
+      return agent;
+    }
+
+    const cleared = DeepAgentFactory.clearCorruptedCheckpoint(
+      process.cwd(),
+      threadId,
+      'simple',
+    );
+
+    if (!cleared) {
+      return agent;
+    }
+
+    process.stderr.write(
+      chalk.yellow(
+        `\n⚠️  Session "${threadId.replace(/^deep-/, '')}" stopped after a tool result. ` +
+        'Its incomplete checkpoint was cleared before accepting a new message.\n',
+      ),
+    );
+    return DeepAgentFactory.create({ model, threadId });
+  } catch {
+    // Checkpoint inspection is best effort. A healthy session must still start
+    // when an older deepagents version does not expose getState().
+    return agent;
+  }
+}
 
 program
   .name("agent")
@@ -174,6 +224,62 @@ program
     } catch (error: any) {
       log.error("Error in graph agent:");
       log.error(error?.message || "Unknown error");
+    }
+  });
+
+program
+  .command("init")
+  .description("Create the idempotent project-local multi-agent policy")
+  .action(() => {
+    try {
+      const result = ensureAgentConfig(process.cwd());
+      const state = result.created ? "created" : "already exists";
+      log.sys(`Agent policy ${state}: ${result.path}`);
+      log.sys(
+        `Roles: supervisor=${result.config.models.supervisor}, ` +
+          `researcher=${result.config.models.researcher}, ` +
+          `coder=${result.config.models.coder}, verifier=${result.config.models.verifier}`,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(`Could not initialize agent policy: ${message}`);
+    }
+  });
+
+program
+  .command("analyze")
+  .description("Evidence-gated, read-only project analysis with cited paths")
+  .argument("<instruction>", "Question or audit to answer from the current repository")
+  .option("-s, --session <name>", "Optional analysis session name")
+  .option("-m, --model <model>", "Explicit model for this analysis only (for example: gemini-2.5-pro)")
+  .action(async (instruction: string, options: { session?: string; model?: string }) => {
+    try {
+      const policy = loadAgentConfig(process.cwd());
+      const model = resolveModelForSession(policy.models.researcher, options.model);
+      const threadId = options.session
+        ? `analysis-${options.session}`
+        : `analysis-ephemeral-${Date.now()}`;
+      const agent = await DeepAgentFactory.createAnalysis({ model: options.model, threadId });
+      const result = await agent.invoke(
+        { messages: [new HumanMessage(instruction)] },
+        { configurable: { thread_id: threadId }, recursionLimit: policy.limits.maxAgentTurns },
+      );
+      const structured: unknown = result?.structuredResponse;
+      console.log("\n" + chalk.cyan("--- EVIDENCE-GATED ANALYSIS ---"));
+      console.log(
+        typeof structured === "string"
+          ? structured
+          : JSON.stringify(
+              structured ?? result?.messages?.[result.messages.length - 1]?.content ?? null,
+              null,
+              2,
+            ),
+      );
+      console.log(chalk.cyan("--------------------------------\n"));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(`Analysis failed: ${message}`);
+      process.exitCode = 1;
     }
   });
 
@@ -330,22 +436,28 @@ program
   .description("⭐ Deep Agent — streaming session, stays open like Claude/Gemini CLI")
   .argument("[instruction]", "Optional first task (session stays open after)")
   .option("-s, --session <name>", "Named session to persist and reopen across runs")
-  .action(async (instruction: string | undefined, options: { session?: string }) => {
+  .option("-m, --model <model>", "Explicit model for this session only")
+  .action(async (instruction: string | undefined, options: { session?: string; model?: string }) => {
     try {
-      const model = resolveModel();
+      const agentConfig = loadAgentConfig(process.cwd());
+      const model = resolveModelForSession(agentConfig.models.supervisor, options.model);
       // With --session <name>: always reopens the same named context (persistent).
       // Without --session: ephemeral — fresh thread every run, nothing accumulates.
       const threadId = options.session
         ? `deep-${options.session}`
         : `deep-ephemeral-${Date.now()}`;
-      const agent = await DeepAgentFactory.create({ model, threadId });
+      let agent = await DeepAgentFactory.create({ model: options.model, threadId });
+      if (options.session) {
+        agent = await recoverIncompleteDeepSession(agent, threadId, options.model);
+      }
       const renderer = new StreamRenderer('deep');
       const session = new ChatSession(agent, renderer, {
         mode: 'deep',
         model,
         threadId,
         sessionName: options.session,
-        envFilePath: require('path').join(process.cwd(), '.env'),
+        recursionLimit: agentConfig.limits.maxAgentTurns,
+        envFilePath: path.join(process.cwd(), '.env'),
         // agentFactory: called by /model to hot-swap the agent without losing session
         agentFactory: async (newModel: string) =>
           DeepAgentFactory.create({ model: newModel, threadId }),
@@ -365,11 +477,13 @@ program
         const cleared = DeepAgentFactory.clearCorruptedCheckpoint(process.cwd(), threadId, 'simple');
         if (cleared) {
           try {
-            const model = resolveModel();
-            const agent = await DeepAgentFactory.create({ model, threadId });
+            const recoveryConfig = loadAgentConfig(process.cwd());
+            const model = resolveModelForSession(recoveryConfig.models.supervisor, options.model);
+            const agent = await DeepAgentFactory.create({ model: options.model, threadId });
             const renderer = new StreamRenderer('deep');
             const session = new ChatSession(agent, renderer, {
               mode: 'deep', model, threadId, sessionName: options.session,
+              recursionLimit: loadAgentConfig(process.cwd()).limits.maxAgentTurns,
             });
             process.stderr.write(chalk.green('   ✅ Session recovered. Starting fresh for this session.\n\n'));
             await session.start(instruction);
@@ -387,26 +501,28 @@ program
 
 program
   .command("orchestrate")
-  .description("🎯 Orchestrator — Researcher + Coder subagents, streaming session")
+  .description("🎯 Orchestrator — Researcher + Coder + Verifier subagents, streaming session")
   .argument("[instruction]", "Optional first task (session stays open after)")
   .option("-s, --session <name>", "Named session to persist and reopen across runs")
-  .action(async (instruction: string | undefined, options: { session?: string }) => {
+  .option("-m, --model <model>", "Explicit Supervisor model for this session only")
+  .action(async (instruction: string | undefined, options: { session?: string; model?: string }) => {
     try {
-      const model = resolveModel();
+      const agentConfig = loadAgentConfig(process.cwd());
+      const model = resolveModelForSession(agentConfig.models.supervisor, options.model);
       // With --session <name>: always reopens the same named context (persistent).
       // Without --session: ephemeral — fresh thread every run, nothing accumulates.
       const threadId = options.session
         ? `orchestrate-${options.session}`
         : `orchestrate-ephemeral-${Date.now()}`;
-      const agent = await DeepAgentFactory.createOrchestrator({ model, threadId });
+      const agent = await DeepAgentFactory.createOrchestrator({ model: options.model, threadId });
       const renderer = new StreamRenderer('orchestrate');
       const session = new ChatSession(agent, renderer, {
         mode: 'orchestrate',
         model,
         threadId,
         sessionName: options.session,
-        recursionLimit: 100,
-        envFilePath: require('path').join(process.cwd(), '.env'),
+        recursionLimit: agentConfig.limits.maxAgentTurns,
+        envFilePath: path.join(process.cwd(), '.env'),
         // agentFactory: called by /model to hot-swap the orchestrator agent
         agentFactory: async (newModel: string) =>
           DeepAgentFactory.createOrchestrator({ model: newModel, threadId }),
