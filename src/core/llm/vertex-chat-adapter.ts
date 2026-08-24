@@ -26,6 +26,11 @@ export class VertexChatAdapter extends ChatVertexAI {
       ? { ...(params ?? {}), model: modelOrFields }
       : modelOrFields;
     super(fields);
+    // Gemini requires the exact thought signature from a function-call turn
+    // when its tool result is sent back. The current LangChain streaming path
+    // loses that association while aggregating chunks. BaseChatModel therefore
+    // falls back to invoke() even when a caller consumes streamEvents().
+    this.disableStreaming = true;
     this.normalizeToolResponseRoles();
   }
 

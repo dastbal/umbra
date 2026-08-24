@@ -20,6 +20,7 @@ describe('VertexChatAdapter', () => {
     });
 
     expect(model.getName()).toBe('ChatGoogleGenerativeAI');
+    expect(model.disableStreaming).toBe(true);
   });
 
   it('serializes tool responses with the user role required by Gemini 3.5', async () => {
