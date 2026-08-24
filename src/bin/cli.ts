@@ -461,6 +461,9 @@ program
         // agentFactory: called by /model to hot-swap the agent without losing session
         agentFactory: async (newModel: string) =>
           DeepAgentFactory.create({ model: newModel, threadId }),
+        sessionRecovery: options.session
+          ? async () => DeepAgentFactory.clearCorruptedCheckpoint(process.cwd(), threadId, 'simple')
+          : undefined,
       });
       await session.start(instruction);
     } catch (error: any) {

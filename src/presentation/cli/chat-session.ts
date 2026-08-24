@@ -35,6 +35,7 @@ import {
   formatOrchestrationRoute,
 } from '../../core/agent/task-classifier';
 import { shouldRetryEmptyTurn } from './empty-turn-retry';
+import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -64,6 +65,8 @@ export interface ChatSessionConfig {
    * Called with the new model string after the user selects it.
    */
   agentFactory?: (newModel: string) => Promise<any>;
+  /** Clears only this named session when a completed tool cycle corrupts it. */
+  sessionRecovery?: () => Promise<boolean>;
 }
 
 /**
@@ -89,6 +92,7 @@ export class ChatSession {
     recursionLimit: number;
     envFilePath?: string;
     agentFactory?: (newModel: string) => Promise<any>;
+    sessionRecovery?: () => Promise<boolean>;
   };
   private readonly graphConfig: { configurable: { thread_id: string }; recursionLimit: number };
   private isRunning = false;
@@ -255,6 +259,12 @@ export class ChatSession {
         this.renderer.clearThinking();
       }
 
+      if (await this.recoverToolCycle(error, hasToolActivity)) {
+        this.renderer.finalizeTurn();
+        this.renderer.showTurnSeparator();
+        return;
+      }
+
       // ── Bug Fix: empty model output retry ──────────────────────────────
       // Gemini (flash-lite) occasionally returns a completely empty response
       // when the session context grows large (many tool calls + long history).
@@ -292,6 +302,43 @@ export class ChatSession {
    */
   private colorMuted(text: string): string {
     return chalk.dim(text);
+  }
+
+  /**
+   * Repairs a named session after Vertex rejects the response that follows a
+   * completed tool call. The original task is not replayed because tools may
+   * have already changed external state.
+   *
+   * @param error - Provider error from the current streamed turn.
+   * @param hasToolActivity - Whether a tool finished before the error.
+   * @returns Whether a scoped session recovery completed.
+   */
+  private async recoverToolCycle(error: Error, hasToolActivity: boolean): Promise<boolean> {
+    if (!shouldRecoverToolCycle({
+      errorMessage: error.message,
+      hasToolActivity,
+      canRecoverSession: Boolean(this.config.sessionRecovery && this.config.agentFactory),
+    })) {
+      return false;
+    }
+
+    const reset = await this.config.sessionRecovery?.();
+    if (!reset) {
+      return false;
+    }
+
+    try {
+      this.agent = await this.config.agentFactory!(this.currentModel);
+      process.stdout.write(
+        colors.warning(
+          '\n  ⚠️  The provider rejected a completed tool cycle. ' +
+          'This session was safely reset and is ready for your next instruction.\n',
+        ),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // ── Private: HITL Handler ──────────────────────────────────────────────────
