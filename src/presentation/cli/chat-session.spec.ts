@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { ChatSession } from './chat-session';
 
 interface ChatSessionInternals {
@@ -6,6 +9,7 @@ interface ChatSessionInternals {
 
 describe('ChatSession tool-cycle recovery', () => {
   it('resets only the active named session after a Vertex 400 follows a tool', async () => {
+    const auditRootDir = mkdtempSync(join(tmpdir(), 'nestjs-agent-chat-session-'));
     const recoveredAgent = { streamEvents: jest.fn() };
     const sessionRecovery = jest.fn().mockResolvedValue(true);
     const agentFactory = jest.fn().mockResolvedValue(recoveredAgent);
@@ -26,19 +30,24 @@ describe('ChatSession tool-cycle recovery', () => {
         throw new Error('Google request failed with status code 400');
       },
     };
-    const session = new ChatSession(failingAgent, renderer as never, {
-      mode: 'deep',
-      model: 'gemini-3.5-flash',
-      threadId: 'deep-test',
-      sessionName: 'test',
-      sessionRecovery,
-      agentFactory,
-    });
+    try {
+      const session = new ChatSession(failingAgent, renderer as never, {
+        mode: 'deep',
+        model: 'gemini-3.5-flash',
+        threadId: 'deep-test',
+        sessionName: 'test',
+        sessionRecovery,
+        agentFactory,
+        auditRootDir,
+      });
 
-    await (session as unknown as ChatSessionInternals).sendMessage('hello');
+      await (session as unknown as ChatSessionInternals).sendMessage('hello');
 
-    expect(sessionRecovery).toHaveBeenCalledTimes(1);
-    expect(agentFactory).toHaveBeenCalledWith('gemini-3.5-flash');
-    expect(showError).not.toHaveBeenCalled();
+      expect(sessionRecovery).toHaveBeenCalledTimes(1);
+      expect(agentFactory).toHaveBeenCalledWith('gemini-3.5-flash');
+      expect(showError).not.toHaveBeenCalled();
+    } finally {
+      rmSync(auditRootDir, { recursive: true, force: true });
+    }
   });
 });

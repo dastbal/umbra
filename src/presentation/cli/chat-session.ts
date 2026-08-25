@@ -36,6 +36,7 @@ import {
 } from '../../core/agent/task-classifier';
 import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
+import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -67,6 +68,8 @@ export interface ChatSessionConfig {
   agentFactory?: (newModel: string) => Promise<any>;
   /** Clears only this named session when a completed tool cycle corrupts it. */
   sessionRecovery?: () => Promise<boolean>;
+  /** Root used for local, privacy-safe performance records. @default process.cwd() */
+  auditRootDir?: string;
 }
 
 /**
@@ -93,6 +96,7 @@ export class ChatSession {
     envFilePath?: string;
     agentFactory?: (newModel: string) => Promise<any>;
     sessionRecovery?: () => Promise<boolean>;
+    auditRootDir: string;
   };
   private readonly graphConfig: { configurable: { thread_id: string }; recursionLimit: number };
   private isRunning = false;
@@ -121,6 +125,7 @@ export class ChatSession {
   ) {
     this.config = {
       recursionLimit: 100,
+      auditRootDir: process.cwd(),
       ...config,
     };
     this.currentModel = config.model;
@@ -176,6 +181,13 @@ export class ChatSession {
    */
   private async sendMessage(input: string, retryCount = 0): Promise<void> {
     this.renderer.showThinking();
+    const audit = new TurnAudit({
+      rootDir: this.config.auditRootDir,
+      mode: this.config.mode,
+      model: this.currentModel,
+      threadId: this.config.threadId,
+      recursionLimit: this.config.recursionLimit,
+    });
     let thinkingCleared = false;
     let hasTextOutput = false;
     let hasToolActivity = false;
@@ -187,7 +199,7 @@ export class ChatSession {
       // LangGraph streaming: streamEvents gives us fine-grained events
       const eventStream = this.agent.streamEvents(
         { messages: [{ role: 'human', content: routedInput }] },
-        { ...this.graphConfig, version: 'v2' },
+        this.createStreamConfig(audit.getTraceMetadata()),
       );
 
       // Track active tool name for pairing start/end events
@@ -209,6 +221,7 @@ export class ChatSession {
               : (chunk?.content?.[0]?.text ?? '');
             if (token) {
               hasTextOutput = true;
+              audit.markTextOutput();
               this.renderer.streamToken(token);
             }
             break;
@@ -220,6 +233,7 @@ export class ChatSession {
             const toolName = event.name ?? 'unknown';
             const toolInput = event.data?.input ?? {};
             toolStartTimes.set(toolName, Date.now());
+            audit.recordToolStart(toolName);
             this.renderer.showToolStart(toolName, toolInput);
             break;
           }
@@ -229,6 +243,7 @@ export class ChatSession {
             const toolName = event.name ?? 'unknown';
             this.renderer.showToolEnd(toolName);
             toolStartTimes.delete(toolName);
+            audit.recordToolEnd(toolName);
             break;
           }
 
@@ -244,6 +259,7 @@ export class ChatSession {
       }
 
       if (shouldRetryEmptyTurn({ hasTextOutput, hasToolActivity, retryCount })) {
+        audit.record('empty_response_retry');
         this.renderer.clearThinking();
         this.renderer.finalizeTurn();
         this.renderer.showTurnSeparator();
@@ -260,6 +276,7 @@ export class ChatSession {
       }
 
       if (await this.recoverToolCycle(error, hasToolActivity)) {
+        audit.record('provider_400_recovered', error.message);
         this.renderer.finalizeTurn();
         this.renderer.showTurnSeparator();
         return;
@@ -275,6 +292,7 @@ export class ChatSession {
         error?.message?.includes('model output must contain') &&
         retryCount < 1
       ) {
+        audit.record('empty_model_retry', error.message);
         process.stdout.write(
           `\n  ⚠️  ${this.colorMuted(`Context overflow — auto-retry ${retryCount + 1}/1...`)}\n`,
         );
@@ -290,10 +308,34 @@ export class ChatSession {
         error?.message ?? 'Unknown error',
         error?.stack?.split('\n')[1]?.trim(),
       );
+      audit.record(
+        error.message.includes('Recursion limit') ? 'recursion_limit' : 'error',
+        error.message,
+      );
+      this.renderer.finalizeTurn();
+      this.renderer.showTurnSeparator();
+      return;
     }
 
+    audit.record('completed');
     this.renderer.finalizeTurn();
     this.renderer.showTurnSeparator();
+  }
+
+  /** Builds a LangChain config carrying trace-safe, per-turn audit metadata. */
+  private createStreamConfig(metadata: TurnTraceMetadata): {
+    configurable: { thread_id: string };
+    recursionLimit: number;
+    version: 'v2';
+    metadata: TurnTraceMetadata;
+    tags: string[];
+  } {
+    return {
+      ...this.graphConfig,
+      version: 'v2',
+      metadata,
+      tags: [`agent:${this.config.mode}`, 'telemetry:interactive-turn'],
+    };
   }
 
   /**

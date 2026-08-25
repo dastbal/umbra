@@ -357,6 +357,15 @@ keeps one delegation level and one writer: Researcher is read-only, Coder is the
 only writer, and Verifier is read-only and runs tests plus the TypeScript check.
 Handoffs are compact structured artifacts rather than full transcripts.
 
+For interactive `deep` work, the default recursion budget is 50 graph
+transitions (hard maximum 60). A per-turn middleware allows at most eight tool
+attempts; after that it removes tools from the next model call so the model must
+synthesize the evidence already collected. Each interactive turn also appends
+privacy-safe metrics to `.agent/telemetry/interactive-turns.jsonl` and adds its
+audit ID, model, mode, and budgets to the matching LangSmith trace. The local
+record never stores prompts, tool arguments, response content, credentials, or
+raw provider errors.
+
 For architecture reviews, audits, and performance questions use the dedicated
 evidence-gated mode. It is one-shot, read-only, injects a bounded workspace
 manifest, and requires cited paths in the structured response:

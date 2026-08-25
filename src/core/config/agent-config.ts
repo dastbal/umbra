@@ -25,8 +25,12 @@ const limitsSchema = z
     maxRetries: z.number().int().min(0).max(2).default(2),
     /** Nested delegation is intentionally disabled in the first iteration. */
     maxDelegationDepth: z.literal(1).default(1),
-    /** Prevents an agent from running indefinitely. */
-    maxAgentTurns: z.number().int().min(1).max(100).default(30),
+    /**
+     * Caps LangGraph transitions for a single request. Fifty permits a
+     * grounded investigation to reach a final answer while sixty remains a
+     * hard stop for repeated tool cycles.
+     */
+    maxAgentTurns: z.number().int().min(1).max(60).default(50),
     /** Optional budget cap; omitted means pricing is observed but not enforced. */
     maxCostUsd: z.number().positive().optional(),
   })
@@ -34,7 +38,7 @@ const limitsSchema = z
   .default({
     maxRetries: 2,
     maxDelegationDepth: 1,
-    maxAgentTurns: 30,
+    maxAgentTurns: 50,
   });
 
 const permissionsSchema = z

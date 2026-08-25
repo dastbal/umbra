@@ -37,6 +37,7 @@ import { LLMProvider } from '../llm/provider';
 import { OllamaChatAdapter } from '../llm/ollama-adapter';
 import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
+import { createIterationBudgetMiddleware } from './iteration-budget.middleware';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -171,6 +172,7 @@ export class DeepAgentFactory {
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
+      middleware: [createIterationBudgetMiddleware()],
       tools: [                           // ADR-002
         safeWriteFileTool,
         safeReadFileTool,
@@ -847,6 +849,11 @@ Keep handoffs compact; never copy full subagent transcripts into your working co
 - **SMALL** (1-2 files, obvious change): No \`write_todos\`. Read → Write → Done. Max 3 tool calls.
 - **MEDIUM** (3+ files, new feature): Use \`write_todos\` with 3-5 steps.
 - **LARGE** (full module, major refactor): Full \`write_todos\` plan before starting.
+
+⏱️ INTERACTIVE INVESTIGATION BUDGET:
+- Prefer direct evidence reads over repeated semantic searches. Do not repeat an equivalent tool query.
+- Aim to complete a read-only investigation within 8 tool calls. When enough evidence exists, stop exploring and answer with the paths already verified.
+- If the available evidence is insufficient, state the uncertainty and the next exact file to inspect; do not spend the remaining budget searching broadly.
 
 📋 PLANNING TOOL NAMES (exact, case-sensitive):
 - \`write_todos\`  ← create the plan

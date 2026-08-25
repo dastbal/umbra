@@ -10,6 +10,7 @@ describe('parseAgentConfig', () => {
     expect(config.models.researcher).toBe('gemini-2.5-flash-lite');
     expect(config.limits.maxRetries).toBe(2);
     expect(config.limits.maxDelegationDepth).toBe(1);
+    expect(config.limits.maxAgentTurns).toBe(50);
     expect(config.permissions.singleWriter).toBe(true);
   });
 
@@ -34,6 +35,7 @@ describe('parseAgentConfig', () => {
     expect(() =>
       parseAgentConfig({ limits: { maxDelegationDepth: 2 } }),
     ).toThrow();
+    expect(() => parseAgentConfig({ limits: { maxAgentTurns: 61 } })).toThrow();
   });
 
   it('loads a project-local config and keeps a missing file on safe defaults', () => {
