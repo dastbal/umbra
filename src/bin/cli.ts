@@ -113,11 +113,28 @@ async function recoverIncompleteDeepSession(
   }
 }
 
-program
-  .name("umbra")
-  .description("Secure autonomous engineering orchestrator for NestJS")
-  .argument("<instruction>", "Technical instruction for the agent")
-  .action(async (instruction: string) => {
+/**
+ * Prints a one-line deprecation notice for a legacy execution mode.
+ *
+ * @param mode - The command the user invoked.
+ * @param replacement - The supported command to use instead.
+ */
+function warnDeprecatedMode(mode: string, replacement: string): void {
+  console.log(
+    chalk.yellow(`⚠️  '${mode}' is deprecated and will not receive new hardening. Use '${replacement}'.`),
+  );
+}
+
+/**
+ * Runs the legacy LangGraph pipeline for a single instruction.
+ *
+ * @deprecated Superseded by the Deep Agent (`umbra deep`), which is the mode the
+ * README documents and the only one covered by the current security policy work.
+ * Kept reachable through `umbra graph` because v2.0.0 shipped with it.
+ *
+ * @param instruction - The technical instruction for the agent.
+ */
+async function runGraphMode(instruction: string): Promise<void> {
     try {
       if (!instruction || instruction.trim().length === 0) {
         log.error("Provide a valid instruction.");
@@ -229,6 +246,17 @@ program
       log.error("Error in graph agent:");
       log.error(error?.message || "Unknown error");
     }
+}
+
+program
+  .name("umbra")
+  .description("Secure autonomous engineering orchestrator for NestJS")
+  .argument("<instruction>", "Technical instruction for the agent")
+  .action(async (instruction: string) => {
+    // The bare invocation routes to the Deep Agent: it is what the README
+    // documents and the mode the security policy is built around. The legacy
+    // graph pipeline stays reachable through `umbra graph`.
+    program.parse([process.argv[0], process.argv[1], 'deep', instruction]);
   });
 
 program
@@ -382,6 +410,7 @@ program
         log.error("Provide a valid instruction.");
         return;
       }
+      warnDeprecatedMode('umbra classic', 'umbra deep');
       log.sys("Initializing Agent in CLI mode (Classic)...");
       const threadId = "cli-user";
       const agent = await AgentFactory.create(threadId);
@@ -405,16 +434,23 @@ program
 
 program
   .command("graph")
-  .description("Same as default: use the Graph-based agent")
+  .description("Legacy graph pipeline (deprecated — use 'deep')")
   .argument("<instruction>", "Technical instruction for the agent")
   .action(async (instruction: string) => {
-    program.parse([process.argv[0], process.argv[1], instruction]);
+    // Calls the moved implementation directly: delegating back to the root
+    // command would now reach the Deep Agent and make this mode unreachable.
+    warnDeprecatedMode('umbra graph', 'umbra deep');
+    await runGraphMode(instruction);
   });
 
-program
-  .command("chat")
-  .description("Inicia un chat interactivo continuo con el agente")
-  .action(async () => {
+/**
+ * Runs the legacy graph-based interactive chat loop.
+ *
+ * @deprecated Superseded by the Deep Agent streaming session (`umbra deep`),
+ * which `umbra chat` now routes to. Kept reachable through `umbra chat --legacy`
+ * because v2.0.0 shipped this behaviour.
+ */
+async function runGraphChat(): Promise<void> {
     try {
       log.sys("Initializing Agent in GRAPH mode (Interactive Chat)...");
       const threadId = "cli-user-chat";
@@ -517,6 +553,19 @@ program
       log.error("Error starting chat:");
       log.error(error?.message || "Unknown error");
     }
+}
+
+program
+  .command("chat")
+  .description("Interactive session (routes to the Deep Agent)")
+  .option("--legacy", "Use the deprecated graph-based chat loop instead")
+  .action(async (options: { legacy?: boolean }) => {
+    if (options.legacy) {
+      warnDeprecatedMode('umbra chat --legacy', 'umbra deep');
+      await runGraphChat();
+      return;
+    }
+    program.parse([process.argv[0], process.argv[1], 'deep']);
   });
 
 

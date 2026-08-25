@@ -13,13 +13,27 @@ history.db-journal
 /memories/
 
 # --- Seguridad y Privacidad ---
-# Bloqueamos el archivo de variables donde están tus credenciales de Google
+# Antes había un '*.json' de arrastre acá. Bloqueaba las credenciales, pero
+# también bloqueaba llm-pricing.json, y el cost tracker lo leía como "no hay
+# precios" y reportaba costo cero en silencio en cualquier clon (ver ADR-011).
+# Ahora la lista es explícita: si agregás un archivo sensible nuevo, agregá su
+# patrón acá.
 .env
-*.json
-# Pero permitimos que se suban los archivos de configuración esenciales
-!package.json
-!package-lock.json
-!tsconfig.json
+.env.*
+credentials*.json
+*-credentials.json
+service-account*.json
+*.key.json
+.debug_*.json
+
+# Payload de prueba de ACORD 25: lleva razón social, número de póliza y
+# direcciones. No va al repo.
+src/bin/jf.json
+
+# Override local de precios. Los valores por defecto viajan en
+# src/core/infrastructure/config/default-pricing.ts; este archivo solo pisa
+# modelos puntuales en una máquina.
+llm-pricing.json
 
 # --- AI Orchestration (no va al repo público) ---
 ANTIGRAVITY.md
@@ -29,3 +43,12 @@ ANTIGRAVITY.md
 npm-debug.log*
 yarn-debug.log*
 .DS_Store
+*.log
+agent_output*.txt
+type_errors.txt
+validation.log
+error.txt
+__pycache__/
+tmp/
+output/
+tsconfig.tsbuildinfo

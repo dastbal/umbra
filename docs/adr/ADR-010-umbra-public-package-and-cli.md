@@ -63,3 +63,34 @@ artifact.
 - `src/core/llm/provider.ts` — `LLMProvider.hasVertexCredentials`, `ensureVertexCredentials`.
 - `tsconfig.build.json` — production artifact exclusions.
 - `docs/MIGRATING-TO-UMBRA.md` — package and command migration guide.
+
+---
+
+## Amendment — 2026-08-25
+
+Two facts about the CLI surface described here changed on the same day, as part of
+[ADR-011](./ADR-011-path-containment-and-real-approval.md).
+
+**1. The root command no longer runs the graph pipeline.** `umbra "<instruction>"`
+and `umbra chat` built `GraphAgentFactory`, while this ADR and the README present
+`umbra deep`, `umbra orchestrate`, and `umbra analyze` as the product surface. The
+undocumented default therefore routed a new user's first command into the legacy
+path — the same path that contained the unguarded `analyzeCodeStructureTool` read.
+Both now route to `DeepAgentFactory` with `ChatSession`.
+
+The legacy modes are **not** removed, because v2.0.0 published them: `umbra graph`,
+`umbra classic`, and the new `umbra chat --legacy` reach them, each printing a
+deprecation notice through `warnDeprecatedMode`. `umbra graph` previously
+delegated to the root command and now calls `runGraphMode` directly — delegating
+would have silently sent it to the Deep Agent.
+
+**2. `tsconfig.build.json` was never versioned.** This ADR states the publish
+build uses it, and it does — but the repository's `.gitignore` excluded it with a
+blanket `*.json` rule, so `npm run build` could not work in a fresh clone. The
+rule is now an explicit list of sensitive patterns. The file itself still needs to
+be committed; see ADR-011.
+
+Related files added by the amendment:
+
+- `src/bin/cli.ts` — `runGraphMode`, `runGraphChat`, `warnDeprecatedMode`.
+- `.gitignore` — explicit patterns replacing the blanket `*.json` rule.

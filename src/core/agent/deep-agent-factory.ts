@@ -18,6 +18,7 @@ import {
   refreshIndexTool,
   safeWriteFileTool,
   safeReadFileTool,
+  deleteFileTool,
   listFilesTool,
   listAdrsTool,
 } from '../tools';
@@ -176,6 +177,9 @@ export class DeepAgentFactory {
       tools: [                           // ADR-002
         safeWriteFileTool,
         safeReadFileTool,
+        // Gated by the security policy: every delete raises a HITL interrupt
+        // that ChatSession renders for the operator (ADR-011).
+        deleteFileTool,
         listFilesTool,
         listAdrsTool,
         askCodebaseTool,

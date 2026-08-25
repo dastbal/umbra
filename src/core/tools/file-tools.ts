@@ -4,18 +4,12 @@ import * as fs from "fs";
 import * as path from "path";
 import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
-import { AgentSecurityPolicy, resolveWorkspacePath, type AgentActionKind } from '../security';
+import { resolveWorkspacePath } from '../security';
+import { authorizeFileAction, evaluateFileAction, formatAuthorizationFailure } from './utils/authorize';
+import { requestApproval, rethrowIfSuspension } from './utils/approval';
+import { wrapUntrustedFileContent, stripUntrustedFrame } from './utils/untrusted-content';
 
 let indexTimer: NodeJS.Timeout | null = null;
-const securityPolicy = new AgentSecurityPolicy();
-
-/** Evaluates a filesystem tool request and formats a non-sensitive denial. */
-function authorizeFileAction(kind: AgentActionKind, rootDir: string, filePath: string): string | undefined {
-  const evaluation = securityPolicy.evaluate({ kind, rootDir, targetPath: filePath });
-  if (evaluation.decision === 'allow') return undefined;
-  const prefix = evaluation.decision === 'deny' ? 'DENIED' : 'APPROVAL_REQUIRED';
-  return `❌ ${prefix}: ${evaluation.reason}`;
-}
 
 const createBackup = (filePath: string) => {
   log.debug(`Starting backup process for file: ${filePath}`);
@@ -38,15 +32,31 @@ export const safeWriteFileTool = tool(
     log.debug(`safe_write_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
-      const authorization = authorizeFileAction('write_file', rootDir, filePath);
-      if (authorization) return authorization;
+      const evaluation = evaluateFileAction('write_file', rootDir, filePath);
+      if (evaluation.decision === 'deny') return formatAuthorizationFailure(evaluation);
+      // Everything below is the side effect: it must stay after the approval
+      // gate, because a resume re-runs this body from the top.
+      if (
+        evaluation.decision === 'require_approval' &&
+        !requestApproval('safe_write_file', { file_path: filePath, bytes: content.length }, evaluation.reason)
+      ) {
+        log.tool(`Write rejected by operator: ${filePath}`);
+        return `❌ REJECTED: The operator did not approve writing ${filePath}. Do not retry; ask what to do next.`;
+      }
       const targetPath = resolveWorkspacePath(rootDir, filePath);
       if (!targetPath) return '❌ DENIED: The target cannot be resolved safely.';
       const exists = fs.existsSync(targetPath);
       const dir = path.dirname(targetPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      createBackup(filePath); 
-      fs.writeFileSync(targetPath, content, "utf-8");
+      createBackup(filePath);
+      // A model that read this file may echo the read frame back as content.
+      // Stripping it here is what actually prevents the corruption; the notice
+      // inside the frame only asks.
+      const sanitized = stripUntrustedFrame(content);
+      if (sanitized !== content) {
+        log.tool(`Stripped read-frame markers echoed back into ${filePath}.`);
+      }
+      fs.writeFileSync(targetPath, sanitized, "utf-8");
       const action = exists ? "modified" : "created";
       log.sys(`File ${action} on REAL DISK: ${filePath}`);
       
@@ -60,6 +70,9 @@ export const safeWriteFileTool = tool(
 
       return `✅ SUCCESS: File ${action} at ${filePath}. [METADATA: {"path": "${filePath}", "action": "${action}"}]`;
     } catch (error: any) {
+      // The approval interrupt travels as a thrown value; swallowing it here
+      // would silently write the file without ever asking anyone.
+      rethrowIfSuspension(error);
       log.error(`Failed to write file ${filePath}: ${error.message}`);
       return `❌ Error writing file: ${error.message}`;
     }
@@ -87,7 +100,7 @@ export const safeReadFileTool = tool(
       if (!fs.existsSync(targetPath)) return `❌ File not found: ${filePath}`;
       const content = fs.readFileSync(targetPath, "utf-8");
       log.sys(`File read successfully: ${filePath}`);
-      return content;
+      return wrapUntrustedFileContent(filePath, content);
     } catch (e: any) {
       log.error(`Failed to read file ${filePath}: ${e.message}`);
       return `❌ Error reading file: ${e.message}`;
@@ -104,8 +117,16 @@ export const deleteFileTool = tool(
   async ({ file_path }) => {
     const filePath = file_path;
     const rootDir = process.cwd();
-    const authorization = authorizeFileAction('delete_file', rootDir, filePath);
-    if (authorization) return authorization;
+    const evaluation = evaluateFileAction('delete_file', rootDir, filePath);
+    if (evaluation.decision === 'deny') return formatAuthorizationFailure(evaluation);
+    // The unlink below must stay after the gate: a resume re-runs this body.
+    if (
+      evaluation.decision === 'require_approval' &&
+      !requestApproval('delete_file', { file_path: filePath }, evaluation.reason)
+    ) {
+      log.tool(`Delete rejected by operator: ${filePath}`);
+      return `❌ REJECTED: The operator did not approve deleting ${filePath}. Do not retry; ask what to do next.`;
+    }
     const fullPath = resolveWorkspacePath(rootDir, filePath);
     if (!fullPath) return '❌ DENIED: The target cannot be resolved safely.';
     if (!fs.existsSync(fullPath)) return `❌ ERROR: File ${filePath} does not exist.`;

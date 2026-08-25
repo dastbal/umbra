@@ -44,3 +44,40 @@ global `npm` or `npx`.
   `deleteFileTool`.
 - `src/core/tools/testing-tools.ts` — `executeTestsTool`, `integrityCheckTool`.
 - `src/core/tools/system-tools.ts` — `executeCommandTool`.
+
+---
+
+## Amendment — 2026-08-25
+
+An audit the same day found that two statements above described the intent of
+this decision rather than its implementation. Both are corrected by
+[ADR-011](./ADR-011-path-containment-and-real-approval.md); the original text is
+kept as written, because what was believed at the time is the point of the
+record.
+
+**1. "Path authorization uses `relative` plus real-path checks for existing
+parents."** Accurate, and that was the gap: only the *parent* was resolved. A
+link in the final component (`src/notes.txt -> ../../.env`) kept a legitimate
+parent and was followed. The Context above claims protection "from sensitive
+files or symlink escapes" — that held for a link in parent position, not in final
+position. Additionally `analyzeCodeStructureTool` called no policy at all, so the
+claim that the policy "evaluates every filesystem and verification action" was
+not true of that tool.
+
+**2. "it requires approval for deletes and configuration changes"** — the verdict
+was produced but never consumed. Every tool rendered `require_approval` as an
+error string, so `deleteFileTool` could not succeed under any circumstance and
+writes outside `src|test|docs` always failed. The human channel
+(`ChatSession#handleHITL`) existed independently and was never wired to this
+policy.
+
+That this policy was written before its approval channel existed is the reason
+the gap survived a release: the verdict looked implemented because the enum had
+three members. ADR-011 supplies `requestApproval` as the consumer.
+
+Related files added by the amendment:
+
+- `src/core/tools/utils/authorize.ts` — `evaluateFileAction`,
+  `formatAuthorizationFailure`, `authorizeFileAction`.
+- `src/core/tools/utils/approval.ts` — `requestApproval`.
+- `src/core/tools/analysis-tools.ts` — `analyzeCodeStructureTool`.

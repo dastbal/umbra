@@ -75,6 +75,9 @@ export class AgentSecurityPolicy {
     if (workspaceRoot === undefined) {
       return { decision: 'deny', reason: 'The workspace root cannot be resolved safely.' };
     }
+    // Segments come from the REAL path returned above, never from the requested
+    // one: otherwise a link named `notes.txt` pointing at `.env` would clear the
+    // protected-name check on its own harmless name.
     const relative = path.relative(workspaceRoot, target);
     const segments = relative.split(path.sep).filter(Boolean);
     if (segments.some((segment) => isProtectedSegment(segment))) {
@@ -103,25 +106,59 @@ export class AgentSecurityPolicy {
   }
 }
 
-/** Resolves an untrusted relative path only when it remains inside the real workspace. */
+/**
+ * Resolves an untrusted relative path only when it remains inside the real workspace.
+ *
+ * The returned value is the *real* path, not the requested one: callers must
+ * perform their side effect on the location the policy actually inspected, or a
+ * link in the requested path would send the write somewhere else.
+ *
+ * @param rootDir - The workspace root that bounds every agent action.
+ * @param targetPath - The untrusted path requested by a tool.
+ * @returns The real, contained path, or `undefined` when it escapes.
+ */
 export function resolveWorkspacePath(rootDir: string, targetPath: string): string | undefined {
   const resolvedRoot = resolveExistingPath(path.resolve(rootDir));
   if (resolvedRoot === undefined) return undefined;
   const candidate = path.resolve(resolvedRoot, targetPath);
-  const relative = path.relative(resolvedRoot, candidate);
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    return undefined;
-  }
+  if (!isInsideRoot(resolvedRoot, candidate)) return undefined;
 
   const existingParent = nearestExistingParent(candidate);
   if (existingParent === undefined) return undefined;
   const realParent = resolveExistingPath(existingParent);
   if (realParent === undefined) return undefined;
-  const parentRelative = path.relative(resolvedRoot, realParent);
-  if (parentRelative === '..' || parentRelative.startsWith(`..${path.sep}`) || path.isAbsolute(parentRelative)) {
-    return undefined;
+  if (!isInsideRoot(resolvedRoot, realParent)) return undefined;
+
+  // The parent check cannot see a link in the FINAL component: when the candidate
+  // exists and resolves to a file, `nearestExistingParent` returns the containing
+  // directory, so `src/notes.txt -> ../../.env` keeps a legitimate parent while
+  // the read follows the link out of the workspace. Resolve the candidate itself.
+  if (!pathExistsWithoutFollowing(candidate)) return candidate;
+  const realCandidate = resolveExistingPath(candidate);
+  if (realCandidate === undefined) return undefined;
+  return isInsideRoot(resolvedRoot, realCandidate) ? realCandidate : undefined;
+}
+
+/** Reports whether a resolved path stays inside the workspace root. */
+function isInsideRoot(resolvedRoot: string, candidate: string): boolean {
+  const relative = path.relative(resolvedRoot, candidate);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/**
+ * Reports whether a path exists without following a final symlink.
+ *
+ * `fs.existsSync` follows links, so a dangling link reads as "absent" and would
+ * be treated as a file to create — writing through it lands outside the
+ * workspace. `lstat` sees the link itself.
+ */
+function pathExistsWithoutFollowing(candidate: string): boolean {
+  try {
+    fs.lstatSync(candidate);
+    return true;
+  } catch {
+    return false;
   }
-  return candidate;
 }
 
 /** Returns the nearest existing directory for a prospective filesystem target. */
