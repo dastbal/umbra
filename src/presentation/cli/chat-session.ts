@@ -188,7 +188,6 @@ export class ChatSession {
       threadId: this.config.threadId,
       recursionLimit: this.config.recursionLimit,
     });
-    let thinkingCleared = false;
     let hasTextOutput = false;
     let hasToolActivity = false;
     const routedInput = this.config.mode === 'orchestrate'
@@ -206,12 +205,10 @@ export class ChatSession {
       const toolStartTimes = new Map<string, number>();
 
       for await (const event of eventStream) {
-        // Clear "Thinking..." on first real event
-        if (!thinkingCleared) {
-          this.renderer.clearThinking();
-          thinkingCleared = true;
-        }
-
+        // The wait indicator is no longer torn down on the first event: the
+        // renderer owns its own transitions (tool box -> writing -> done), so
+        // it keeps covering the dead air *between* events instead of only the
+        // gap before the first one. It is stopped in finalizeTurn().
         switch (event.event) {
           // ── Token streaming ──────────────────────────────────────────────
           case 'on_chat_model_stream': {
@@ -271,9 +268,7 @@ export class ChatSession {
     } catch (err: unknown) {
       const error = err as Error;
 
-      if (!thinkingCleared) {
-        this.renderer.clearThinking();
-      }
+      this.renderer.clearThinking();
 
       if (await this.recoverToolCycle(error, hasToolActivity)) {
         audit.record('provider_400_recovered', error.message);
@@ -546,6 +541,8 @@ export class ChatSession {
    */
   private shutdown(): void {
     this.isRunning = false;
+    // Erase any half-painted wait line before the farewell lands on top of it
+    this.renderer.clearThinking();
     process.stdout.write('\n' + colors.muted('  Session ended. Goodbye!\n\n'));
     process.exit(0);
   }

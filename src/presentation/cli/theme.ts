@@ -110,6 +110,100 @@ export const box = {
 /** Spinner frames for tool-in-progress animation. */
 export const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+// ── Shimmer ──────────────────────────────────────────────────────────────────
+
+/**
+ * Length of the bright trail behind the shimmer head, in characters.
+ * Only `SHIMMER_TAIL + 1` characters carry an escape sequence per frame —
+ * everything else is emitted as two flat muted runs.
+ */
+export const SHIMMER_TAIL = 6;
+
+/** Grey value of an unlit character (matches {@link colors.muted}). */
+const SHIMMER_BASE = 0x6b;
+
+/** Grey value of the character directly under the shimmer head. */
+const SHIMMER_PEAK = 0xe5;
+
+/**
+ * Pre-built chalk functions for every position in the shimmer trail,
+ * indexed by distance from the head (`0` = brightest).
+ *
+ * Built once at module load. Building these per character per frame costs
+ * roughly 50× more CPU and emits 5× more bytes for an identical result.
+ */
+export const shimmerRamp = Array.from({ length: SHIMMER_TAIL + 1 }, (_, distance) => {
+  const ratio = 1 - distance / SHIMMER_TAIL;
+  const value = Math.round(SHIMMER_BASE + (SHIMMER_PEAK - SHIMMER_BASE) * ratio);
+  const hex = value.toString(16).padStart(2, '0');
+  return chalk.hex(`#${hex}${hex}${hex}`);
+});
+
+// ── Thinking Phrases ─────────────────────────────────────────────────────────
+
+/**
+ * Wait-state phrases shown while the agent is busy.
+ *
+ * `think` covers the dead air between a tool finishing and the next decision;
+ * `write` covers token generation before the markdown is rendered.
+ */
+export const thinkingPhrases = {
+  think: 'Thinking',
+  write: 'Writing the response',
+} as const;
+
+/** A named wait state. See {@link thinkingPhrases}. */
+export type ThinkingPhase = keyof typeof thinkingPhrases;
+
+/**
+ * Human-readable phrases describing what each tool is doing, shown inside the
+ * tool box while it runs. Keyed by tool name, same convention as
+ * {@link toolIcons}.
+ */
+export const toolPhrases: Record<string, string> = {
+  // Planning
+  write_todos: 'Planning the next steps',
+  read_todos:  'Reviewing the plan',
+  update_todo: 'Updating the plan',
+
+  // Filesystem (ours)
+  safe_write_file: 'Writing to disk',
+  safe_read_file:  'Reading the file',
+  list_files:      'Listing the directory',
+
+  // Filesystem (deepagents built-in)
+  write_file: 'Writing to disk',
+  read_file:  'Reading the file',
+  edit_file:  'Editing the file',
+  ls:         'Listing the directory',
+
+  // Analysis / RAG
+  ask_codebase:          'Searching the codebase',
+  refresh_project_index: 'Rebuilding the project index',
+
+  // Testing
+  run_tests:           'Running the test suite',
+  run_integrity_check: 'Checking integrity',
+
+  // SubAgents
+  task:       'Delegating to a subagent',
+  researcher: 'Researching',
+  coder:      'Writing code',
+
+  // Human
+  ask_human: 'Waiting for you',
+};
+
+/**
+ * Returns the wait-state phrase for a given tool name, with graceful fallback.
+ *
+ * @param toolName - The name of the tool being called.
+ * @returns A phrase describing what the tool is doing.
+ */
+export function getToolPhrase(toolName: string): string {
+  return toolPhrases[toolName] ?? 'Working';
+}
+
 // ── Formatting Utilities ─────────────────────────────────────────────────────
 
 /**
