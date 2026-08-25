@@ -1,6 +1,6 @@
 # 🚀 Architectural Improvements Proposal (LangChain Spec Alignment)
 
-This document presents a deep analysis of potential architectural enhancements for `@dastbal/nestjs-ai-agent` based on LangChain's latest specifications and the **Managed Deep Agents** design patterns (e.g. sandboxing, MCP tools, semantic skill dispatch, and telemetry).
+This document presents a deep analysis of potential architectural enhancements for `@dastbal/umbra` based on LangChain's latest specifications and the **Managed Deep Agents** design patterns (e.g. sandboxing, MCP tools, semantic skill dispatch, and telemetry).
 
 ---
 

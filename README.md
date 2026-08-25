@@ -1,11 +1,17 @@
-# NestJS AI Agent Lib
+# Umbra
 
-[![NestJS AI Agent](https://img.shields.io/badge/NestJS%20AI%20Agent-Lib-blue?style=flat-square)](https://github.com/your-repo/nestjs-ai-agent-lib)
+[![Umbra](https://img.shields.io/badge/Umbra-Autonomous%20Engineering%20Orchestrator-111111?style=flat-square)](https://github.com/dastbal/umbra)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](https://opensource.org/licenses/MIT)
 
 > Built with ❤️ by **David Balladares** — Principal Software Engineer level autonomous agent for NestJS.
 
-An autonomous AI agent framework designed specifically for **NestJS** projects. It analyzes, plans, writes, and verifies code with specialized subagents, all accessible via a premium streaming CLI. Leverages **Google Gemini (Vertex AI)** or **local Ollama** models without requiring API keys for local inference.
+Umbra is an autonomous engineering orchestrator for **NestJS** projects. It
+analyzes, plans, writes, and verifies code with specialized subagents through a
+secure streaming CLI. It supports **Google Gemini (Vertex AI)** and local
+**Ollama** models.
+
+> Requires Node.js 20 or later. Version 2 blocks agent access to credentials,
+> `.git`, arbitrary shell commands, and paths outside the workspace.
 
 ---
 
@@ -50,6 +56,28 @@ This library empowers your NestJS applications with an autonomous AI agent capab
 - ⚙️ **Autonomous Execution:** Executes full plans without requiring manual `yes/no` confirmations.
 - 🩹 **Self-Healing:** Recovers automatically from corrupted session states.
 - 🦙 **Local LLM Support:** Full integration with Ollama, allowing use of models like Gemma4, Qwen3.6, Llama3.2 locally — free, offline, and no API key needed.
+
+## Safe first run
+
+```powershell
+# Install once, then use Umbra from any project directory.
+npm install -g @dastbal/umbra
+
+# Creates a non-destructive local policy without overwriting an existing one.
+umbra init
+
+# Checks Node, local binaries, and configuration without network access.
+umbra doctor
+
+# Optional: sends a minimal `Reply only: OK` health prompt to the selected model.
+umbra doctor --live
+
+# Safe first task: read-only, evidence-gated analysis.
+umbra analyze "Summarize the project architecture"
+```
+
+`umbra metrics --since 7 --check` summarizes privacy-safe local telemetry and
+returns a non-zero exit code when the configured default health threshold fails.
 
 ---
 
@@ -111,7 +139,7 @@ AGENT_MODEL=ollama:gemma4
 **4. Run the agent:**
 
 ```bash
-npm run agent -- deep
+umbra deep
 ```
 
 That's it! No Google account or API key needed.
@@ -128,15 +156,18 @@ Leverages Google's powerful Vertex AI models. Requires authentication.
 
 ```bash
 # 1. Install the Google Cloud SDK: https://cloud.google.com/sdk/docs/install
-# 2. Authenticate and set your GCP project:
-gcloud auth application-default login --project YOUR_GCP_PROJECT_ID
+# 2. Umbra asks before launching Google's official browser login flow:
+umbra auth login --project YOUR_GCP_PROJECT_ID
 
-# 3. Configure your environment variables:
+# 3. Confirm that credentials exist without displaying a token:
+umbra auth status
+
+# 4. Configure your environment variables:
 # Create or update .env.development:
 # AGENT_MODEL=gemini-2.5-flash-lite
 
-# 4. Run the agent:
-npm run agent -- deep
+# 5. Run Umbra:
+umbra deep
 ```
 
 #### Option B2 — Service Account (CI/CD, Production)
@@ -164,7 +195,7 @@ The agent provides an interactive CLI experience similar to other advanced chatb
 ```
 ╭────────────────────────────────────────────────╮
 │                                                │
-│  NestJS AI Agent — Deep Mode                  │
+│  Umbra — Deep Mode                            │
 │  Single autonomous agent with planning tools  │
 │  Model: ollama:gemma4                         │
 │  Session: auth-module (continuing)            │
@@ -197,11 +228,11 @@ Manage conversation history and context using session IDs.
 
 | Command                                 | Behavior                                                              |
 | :-------------------------------------- | :-------------------------------------------------------------------- |
-| `npm run agent -- deep`                 | **Ephemeral** — Starts a fresh session each time.                     |
-| `npm run agent -- deep --session auth`  | **Persistent** — Reopens or creates the `auth` session context.       |
-| `npm run agent -- orchestrate --session feature-x` | Same persistence for the orchestrator mode.                         |
-| `npm run agent -- deep "Your task"`     | Starts an ephemeral session with an initial human message.            |
-| `npm run agent -- deep --session session-name "Your task"` | Starts/resumes a named session with an initial message. |
+| `umbra deep`                 | **Ephemeral** — Starts a fresh session each time.                     |
+| `umbra deep --session auth`  | **Persistent** — Reopens or creates the `auth` session context.       |
+| `umbra orchestrate --session feature-x` | Same persistence for the orchestrator mode.                         |
+| `umbra deep "Your task"`     | Starts an ephemeral session with an initial human message.            |
+| `umbra deep --session session-name "Your task"` | Starts/resumes a named session with an initial message. |
 
 > **Note:** Session data is stored in `.agent/deep_agent_history.db` and `.agent/orchestrator_history.db`.
 
@@ -285,40 +316,40 @@ Alternatively, set the `AGENT_MODEL` environment variable before running the age
 
 # ── Ollama (local, free) ──────────────────────────────────────────
 # Balanced quality/performance
-$env:AGENT_MODEL="ollama:gemma4";       npm run agent -- deep
+$env:AGENT_MODEL="ollama:gemma4";       umbra deep
 
 # Fast, low RAM
-$env:AGENT_MODEL="ollama:gemma4:e2b";   npm run agent -- deep
+$env:AGENT_MODEL="ollama:gemma4:e2b";   umbra deep
 
 # High quality (large download)
-$env:AGENT_MODEL="ollama:gemma4:26b";   npm run agent -- deep
+$env:AGENT_MODEL="ollama:gemma4:26b";   umbra deep
 
 # Strong reasoning, compact
-$env:AGENT_MODEL="ollama:qwen3.6";      npm run agent -- deep
+$env:AGENT_MODEL="ollama:qwen3.6";      umbra deep
 
 # General purpose offline
-$env:AGENT_MODEL="ollama:llama3.2";     npm run agent -- deep
+$env:AGENT_MODEL="ollama:llama3.2";     umbra deep
 
 # ── Vertex AI (cloud) ─────────────────────────────────────────────
 # Fast & cheap (default if no GOOGLE_APPLICATION_CREDENTIALS)
-$env:AGENT_MODEL="gemini-2.5-flash-lite"; npm run agent -- deep
+$env:AGENT_MODEL="gemini-2.5-flash-lite"; umbra deep
 
 # Balanced speed + quality
-$env:AGENT_MODEL="gemini-2.5-flash";      npm run agent -- deep
+$env:AGENT_MODEL="gemini-2.5-flash";      umbra deep
 
 # Max capability (architecture, complex refactors)
-$env:AGENT_MODEL="gemini-2.5-pro";        npm run agent -- orchestrate
+$env:AGENT_MODEL="gemini-2.5-pro";        umbra orchestrate
 ```
 
 ```bash
 # Linux / macOS
 # Ollama examples
-AGENT_MODEL=ollama:gemma4 npm run agent -- deep
-AGENT_MODEL=ollama:qwen3.6 npm run agent -- deep
+AGENT_MODEL=ollama:gemma4 umbra deep
+AGENT_MODEL=ollama:qwen3.6 umbra deep
 
 # Gemini examples
-AGENT_MODEL=gemini-2.5-flash-lite npm run agent -- deep
-AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
+AGENT_MODEL=gemini-2.5-flash-lite umbra deep
+AGENT_MODEL=gemini-2.5-pro umbra orchestrate
 ```
 
 **Available Model Tiers:**
@@ -347,7 +378,7 @@ AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
 Run this once inside the project you want the agent to operate on:
 
 ```bash
-npm run agent -- init
+umbra init
 ```
 
 The command is idempotent and creates `.agent/agent.config.json` only when it is
@@ -371,7 +402,7 @@ evidence-gated mode. It is one-shot, read-only, injects a bounded workspace
 manifest, and requires cited paths in the structured response:
 
 ```bash
-npm run agent -- analyze "Evalúa el propósito, flujo, memoria y cuellos de botella del proyecto"
+umbra analyze "Evalúa el propósito, flujo, memoria y cuellos de botella del proyecto"
 ```
 
 To keep this audit predictable and cheap, `analyze` answers only from its
@@ -393,15 +424,15 @@ and pass an explicit model just for that run:
 
 ```powershell
 # A high-quality, read-only architecture or performance review
-npm run agent -- analyze --model gemini-2.5-pro "Evaluate the project purpose, flow, memory, and performance bottlenecks"
+umbra analyze --model gemini-2.5-pro "Evaluate the project purpose, flow, memory, and performance bottlenecks"
 
 # A stronger Supervisor for one complex implementation session
-npm run agent -- orchestrate --model gemini-2.5-pro --session architecture-review
+umbra orchestrate --model gemini-2.5-pro --session architecture-review
 ```
 
 The precedence is: explicit `--model` > `AGENT_MODEL` > project role profile.
 The role profiles and safety limits are visible and editable in
-`.agent/agent.config.json`; `agent init` never overwrites an existing file.
+`.agent/agent.config.json`; `umbra init` never overwrites an existing file.
 
 ### Deep Agent (`deep`) — Single Autonomous Agent
 
@@ -409,13 +440,13 @@ Ideal for most day-to-day tasks: debugging, code analysis, single-file modificat
 
 ```bash
 # Start an ephemeral session
-npm run agent -- deep
+umbra deep
 
 # Start a persistent session named "my-feature"
-npm run agent -- deep --session my-feature
+umbra deep --session my-feature
 
 # Ask a specific question about a file
-npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts"
+umbra deep "explain src/core/agent/deep-agent-factory.ts"
 ```
 
 **Task Sizing:** The agent automatically classifies tasks before execution:
@@ -442,10 +473,10 @@ Best suited for complex, large-scale tasks such as implementing entire modules, 
 
 ```bash
 # Start an ephemeral orchestrator session
-npm run agent -- orchestrate
+umbra orchestrate
 
 # Start a persistent session for a major refactor
-npm run agent -- orchestrate --session big-refactor
+umbra orchestrate --session big-refactor
 ```
 
 **Mandatory Workflow:** The orchestrator strictly follows a predefined protocol to ensure thoroughness and quality:
@@ -544,7 +575,7 @@ The agent uses Retrieval-Augmented Generation (RAG) to understand your codebase:
 The library follows a clean, modular structure:
 
 ```
-/nestjs-ai-agent-lib
+/umbra
 ├── src/
 │   ├── bin/                      # CLI entry points (deep, orchestrate)
 │   │   └── cli.ts

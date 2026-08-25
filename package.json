@@ -1,13 +1,24 @@
 {
-  "name": "@dastbal/nestjs-ai-agent",
-  "version": "1.5.0",
-  "description": "Autonomous AI Agent for NestJS - Principal Software Engineer Level with RAG and SQLite persistence",
+  "name": "@dastbal/umbra",
+  "version": "2.0.0",
+  "description": "Umbra is a secure autonomous engineering orchestrator for NestJS projects.",
   "author": "David Balladares",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dastbal/umbra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dastbal/umbra/issues"
+  },
+  "homepage": "https://github.com/dastbal/umbra#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "agent": "dist/bin/cli.js"
+    "umbra": "dist/bin/cli.js"
   },
   "files": [
     "dist",
@@ -17,15 +28,20 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "prebuild": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.build.json",
     "gen": "ts-node src/bin/cli.ts classic",
-    "agent": "ts-node src/bin/cli.ts",
+    "umbra": "ts-node src/bin/cli.ts",
     "start:dev": "ts-node src/bin/cli.ts",
     "prepublishOnly": "npm run build",
     "type-check": "tsc --noEmit",
-    "test": "jest",
+    "test": "jest --runInBand",
+    "test:unit": "jest --runInBand --testPathIgnorePatterns=integration|e2e|contract",
+    "test:integration": "jest --runInBand --testPathPatterns=integration",
+    "test:contracts": "jest --runInBand --testPathPatterns=contract",
+    "test:e2e": "jest --runInBand --testPathPatterns=e2e",
     "test:cov": "jest --coverage",
-    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix"
+    "lint": "node node_modules/typescript/bin/tsc --noEmit"
   },
   "dependencies": {
     "@langchain/core": "^1.1.48",

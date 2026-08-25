@@ -142,7 +142,7 @@ export class ChatSession {
    *
    * If `firstMessage` is provided, it is sent immediately before dropping
    * into the interactive loop. This supports the CLI pattern:
-   * `npm run agent -- deep "create a module"` — sends the first message
+   * `umbra deep "create a module"` — sends the first message
    * then keeps the session alive.
    *
    * @param firstMessage - Optional first prompt to send automatically.
@@ -640,7 +640,7 @@ export class ChatSession {
     if (!this.config.agentFactory) {
       // No factory provided — can't hot-swap. Tell user to restart.
       console.log(colors.warning(
-        `  ⚠️  Restart the agent to apply: npm run agent -- deep (AGENT_MODEL is now ${result.model})\n`,
+        `  ⚠️  Restart Umbra to apply: umbra deep (AGENT_MODEL is now ${result.model})\n`,
       ));
       return;
     }

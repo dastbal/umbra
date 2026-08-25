@@ -4,8 +4,18 @@ import * as fs from "fs";
 import * as path from "path";
 import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
+import { AgentSecurityPolicy, resolveWorkspacePath, type AgentActionKind } from '../security';
 
 let indexTimer: NodeJS.Timeout | null = null;
+const securityPolicy = new AgentSecurityPolicy();
+
+/** Evaluates a filesystem tool request and formats a non-sensitive denial. */
+function authorizeFileAction(kind: AgentActionKind, rootDir: string, filePath: string): string | undefined {
+  const evaluation = securityPolicy.evaluate({ kind, rootDir, targetPath: filePath });
+  if (evaluation.decision === 'allow') return undefined;
+  const prefix = evaluation.decision === 'deny' ? 'DENIED' : 'APPROVAL_REQUIRED';
+  return `❌ ${prefix}: ${evaluation.reason}`;
+}
 
 const createBackup = (filePath: string) => {
   log.debug(`Starting backup process for file: ${filePath}`);
@@ -28,8 +38,10 @@ export const safeWriteFileTool = tool(
     log.debug(`safe_write_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
-      const targetPath = path.resolve(rootDir, filePath);
-      if (!targetPath.startsWith(rootDir)) return "❌ Error: Access denied. Cannot write outside the project root.";
+      const authorization = authorizeFileAction('write_file', rootDir, filePath);
+      if (authorization) return authorization;
+      const targetPath = resolveWorkspacePath(rootDir, filePath);
+      if (!targetPath) return '❌ DENIED: The target cannot be resolved safely.';
       const exists = fs.existsSync(targetPath);
       const dir = path.dirname(targetPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -68,9 +80,11 @@ export const safeReadFileTool = tool(
     log.debug(`safe_read_file called with filePath: ${filePath}`);
     try {
       const rootDir = process.cwd();
-      const targetPath = path.resolve(rootDir, filePath);
+      const authorization = authorizeFileAction('read_file', rootDir, filePath);
+      if (authorization) return authorization;
+      const targetPath = resolveWorkspacePath(rootDir, filePath);
+      if (!targetPath) return '❌ DENIED: The target cannot be resolved safely.';
       if (!fs.existsSync(targetPath)) return `❌ File not found: ${filePath}`;
-      if (!targetPath.startsWith(rootDir)) return "❌ Error: Access denied. Cannot read outside the project root.";
       const content = fs.readFileSync(targetPath, "utf-8");
       log.sys(`File read successfully: ${filePath}`);
       return content;
@@ -90,8 +104,10 @@ export const deleteFileTool = tool(
   async ({ file_path }) => {
     const filePath = file_path;
     const rootDir = process.cwd();
-    const fullPath = path.resolve(rootDir, filePath);
-    if (!fullPath.startsWith(rootDir)) return "❌ Error: Access denied. Cannot delete files outside the project root.";
+    const authorization = authorizeFileAction('delete_file', rootDir, filePath);
+    if (authorization) return authorization;
+    const fullPath = resolveWorkspacePath(rootDir, filePath);
+    if (!fullPath) return '❌ DENIED: The target cannot be resolved safely.';
     if (!fs.existsSync(fullPath)) return `❌ ERROR: File ${filePath} does not exist.`;
     fs.unlinkSync(fullPath);
     log.tool(`🗑️ File deleted: ${filePath}`);

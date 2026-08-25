@@ -123,7 +123,7 @@ export function loadAgentConfig(rootDir: string): AgentConfig {
  * Creates the project-local runtime policy when it does not exist.
  *
  * This operation is intentionally idempotent and never overwrites an existing
- * policy. It is the implementation behind the `agent init` command.
+ * policy. It is the implementation behind the `umbra init` command.
  *
  * @param rootDir - Project root that receives the `.agent` directory.
  * @returns Path, creation status, and validated configuration.

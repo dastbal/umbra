@@ -41,9 +41,10 @@ import {
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 // Load env vars from the project root on module import.
-// process.cwd() resolves to the directory where "npm run agent" is executed.
+// process.cwd() resolves to the target workspace where `umbra` is executed.
 const rootDir = process.cwd();
 dotenv.config({ path: path.join(rootDir, '.env') });
 dotenv.config({ path: path.join(rootDir, '.env.development') });
@@ -121,6 +122,21 @@ export class LLMProvider {
       });
     }
     return LLMProvider.embeddingsInstance;
+  }
+
+  /**
+   * Reports whether either supported Google Application Default Credential
+   * source is available without loading or printing credential contents.
+   *
+   * @returns True when a service-account file or local ADC file is present.
+   */
+  public static hasVertexCredentials(): boolean {
+    const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (serviceAccountPath) {
+      return fs.existsSync(path.resolve(rootDir, serviceAccountPath));
+    }
+
+    return fs.existsSync(LLMProvider.getApplicationDefaultCredentialsPath());
   }
 
   // ── Legacy Compatibility ───────────────────────────────────────────────────
@@ -204,7 +220,7 @@ export class LLMProvider {
    * @param model - The Gemini/Vertex model name (e.g., "gemini-2.5-flash").
    * @param temperature - Sampling temperature.
    * @returns A configured `ChatVertexAI` instance.
-   * @throws {Error} If credentials are missing or the credentials file doesn't exist.
+   * @throws {Error} If neither supported credential source is available.
    */
   private static createVertexModel(model: string, temperature: number): ChatVertexAI {
     LLMProvider.ensureVertexCredentials();
@@ -216,21 +232,29 @@ export class LLMProvider {
   }
 
   /**
-   * Validates that Google Application Credentials are configured.
+   * Validates that Google Application Default Credentials are configured.
    *
    * Resolves the credentials path relative to `process.cwd()` and sets the
    * absolute path back into the environment (required by the Google SDK).
    *
-   * @throws {Error} If `GOOGLE_APPLICATION_CREDENTIALS` is not set.
+   * Supports either `GOOGLE_APPLICATION_CREDENTIALS` (service account) or the
+   * local ADC file written by `gcloud auth application-default login`.
+   *
+   * @throws {Error} If neither credential source is available.
    * @throws {Error} If the credentials file does not exist at the resolved path.
    */
   private static ensureVertexCredentials(): void {
     const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
+    if (!credentialsPath && fs.existsSync(LLMProvider.getApplicationDefaultCredentialsPath())) {
+      return;
+    }
+
     if (!credentialsPath) {
       throw new Error(
-        '❌ GOOGLE_APPLICATION_CREDENTIALS is not set. ' +
-        'For Vertex AI models, add it to your .env file. ' +
+        '❌ Google Application Default Credentials are not configured. ' +
+        'Run "umbra auth login --project <project-id>" for local development, ' +
+        'or set GOOGLE_APPLICATION_CREDENTIALS for CI. ' +
         'For local inference, set AGENT_MODEL=ollama:<model> instead.',
       );
     }
@@ -246,5 +270,19 @@ export class LLMProvider {
 
     // Normalize to absolute path — the Google SDK requires this.
     process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredentialsPath;
+  }
+
+  /**
+   * Resolves the operating-system default location used by Google Cloud ADC.
+   *
+   * @returns The expected local Application Default Credentials file path.
+   */
+  private static getApplicationDefaultCredentialsPath(): string {
+    if (process.platform === 'win32') {
+      const appData = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
+      return path.join(appData, 'gcloud', 'application_default_credentials.json');
+    }
+
+    return path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
   }
 }

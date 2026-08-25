@@ -13,6 +13,7 @@ import chalk from "chalk";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import * as readline from "readline";
 import * as path from "path";
+import * as fs from 'fs';
 import { AgentFactory } from "../core/agent/factory";
 import { GraphAgentFactory } from "../core/agent/graph-factory";
 import { DeepAgentFactory } from "../core/agent/deep-agent-factory";
@@ -22,6 +23,9 @@ import { Command as LangGraphCommand } from "@langchain/langgraph";
 import { AgentDB } from "../core/state/db";
 import { ensureAgentConfig, loadAgentConfig } from "../core/config/agent-config";
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
+import { loadTurnAudits, summarizeTurnAudits } from '../core/observability';
+import { LLMProvider } from '../core/llm/provider';
+import { GoogleApplicationDefaultAuth } from '../presentation/cli/google-application-default-auth';
 
 const program = new Command();
 
@@ -110,8 +114,8 @@ async function recoverIncompleteDeepSession(
 }
 
 program
-  .name("agent")
-  .description("Autonomous Engineering Agent for NestJS (Graph-based with HITL)")
+  .name("umbra")
+  .description("Secure autonomous engineering orchestrator for NestJS")
   .argument("<instruction>", "Technical instruction for the agent")
   .action(async (instruction: string) => {
     try {
@@ -225,6 +229,91 @@ program
       log.error("Error in graph agent:");
       log.error(error?.message || "Unknown error");
     }
+  });
+
+program
+  .command('metrics')
+  .description('Summarize privacy-safe local agent metrics')
+  .option('--since <days>', 'Number of days to include', '7')
+  .option('--check', 'Exit non-zero when completion falls below 90% or errors exceed 10%')
+  .action((options: { since: string; check?: boolean }) => {
+    const days = Number(options.since);
+    if (!Number.isFinite(days) || days < 0) {
+      log.error('--since must be a non-negative number of days.');
+      process.exitCode = 1;
+      return;
+    }
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const metrics = summarizeTurnAudits(loadTurnAudits(process.cwd(), since));
+    console.log(JSON.stringify(metrics, null, 2));
+    if (options.check && (metrics.completionRate < 0.9 || metrics.toolErrorRate > 0.1)) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('doctor')
+  .description('Validate local setup without sending repository context')
+  .option('--live', 'Send one minimal provider health prompt after local checks')
+  .action(async (options: { live?: boolean }) => {
+    const checks: Array<{ name: string; passed: boolean }> = [];
+    const nodeMajor = Number(process.versions.node.split('.')[0]);
+    checks.push({ name: 'Node.js >= 20', passed: nodeMajor >= 20 });
+    checks.push({ name: 'Local TypeScript binary', passed: fs.existsSync(path.join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc')) });
+    checks.push({ name: 'Local Jest binary', passed: fs.existsSync(path.join(process.cwd(), 'node_modules', 'jest', 'bin', 'jest.js')) });
+    try {
+      loadAgentConfig(process.cwd());
+      checks.push({ name: 'Agent configuration', passed: true });
+    } catch {
+      checks.push({ name: 'Agent configuration', passed: false });
+    }
+
+    if (options.live && checks.every((check) => check.passed)) {
+      try {
+        const config = loadAgentConfig(process.cwd());
+        const model = resolveModelForSession(config.models.supervisor);
+        const chatModel = LLMProvider.createChatModel(model) as { invoke(input: string): Promise<unknown> };
+        await chatModel.invoke('Reply only: OK');
+        checks.push({ name: 'Live provider response', passed: true });
+      } catch {
+        checks.push({ name: 'Live provider response', passed: false });
+      }
+    }
+
+    for (const check of checks) {
+      console.log(`${check.passed ? '✅' : '❌'} ${check.name}`);
+    }
+    if (!checks.every((check) => check.passed)) process.exitCode = 1;
+  });
+
+const authProgram = program
+  .command('auth')
+  .description('Manage Google Application Default Credentials for Vertex AI');
+
+authProgram
+  .command('status')
+  .description('Show credential readiness without displaying tokens or secret paths')
+  .action(() => {
+    const status = GoogleApplicationDefaultAuth.getStatus();
+    console.log(`${status.ready ? '✅' : '❌'} ${status.message}`);
+    if (!status.ready) process.exitCode = 1;
+  });
+
+authProgram
+  .command('login')
+  .description('Open the official Google Cloud login flow for this local machine')
+  .option('--project <projectId>', 'GCP project used for Application Default Credentials')
+  .action(async (options: { project?: string }) => {
+    const approved = await askConfirmation(
+      'This opens Google Cloud login in your browser and saves credentials only on this machine. Continue?',
+    );
+    if (!approved) {
+      log.sys('Google login cancelled.');
+      return;
+    }
+
+    const exitCode = await GoogleApplicationDefaultAuth.login(options.project);
+    if (exitCode !== 0) process.exitCode = exitCode;
   });
 
 program

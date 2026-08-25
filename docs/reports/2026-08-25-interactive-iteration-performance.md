@@ -53,7 +53,7 @@ reaches eight tools.
 
 ## How to audit the next session
 
-1. Start Deep with the inexpensive tier: `npm run agent -- deep --model lite`.
+1. Start Deep with the inexpensive tier: `umbra deep --model lite`.
 2. Find the newest JSON line in `.agent/telemetry/interactive-turns.jsonl`.
 3. Use its `auditId` value to find the LangSmith trace metadata field
    `agent_audit_id`.

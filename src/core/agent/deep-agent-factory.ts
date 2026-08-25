@@ -652,9 +652,9 @@ export class DeepAgentFactory {
     interaction?: InteractionService,
   ): Promise<void> {
     // If Vertex AI credentials are not configured, skip RAG indexing entirely.
-    // Ollama-only users won't have GOOGLE_APPLICATION_CREDENTIALS set.
+    // Ollama-only users will have neither a service account nor local ADC.
     // The agent still works — it just won't have semantic RAG search.
-    if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    if (!LLMProvider.hasVertexCredentials()) {
       if (interaction) {
         interaction
           .startTask('RAG index skipped (no Vertex credentials)')

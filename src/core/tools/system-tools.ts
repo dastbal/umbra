@@ -1,19 +1,21 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import { exec } from "child_process";
-import { promisify } from "util";
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from 'fs';
+import * as path from 'path';
 import { log } from "./utils/logger";
 import { buildAdrIndex, formatAdrIndex } from "./adr-index";
+import { AgentSecurityPolicy, resolveWorkspacePath } from '../security';
 
-const execAsync = promisify(exec);
+const securityPolicy = new AgentSecurityPolicy();
 
 export const listFilesTool = tool(
   async ({ dirPath }) => {
     try {
       const rootDir = process.cwd();
+      const evaluation = securityPolicy.evaluate({ kind: 'read_file', rootDir, targetPath: dirPath || '.' });
+      if (evaluation.decision !== 'allow') return `❌ DENIED: ${evaluation.reason}`;
       const targetDir = path.resolve(rootDir, dirPath || ".");
+      if (resolveWorkspacePath(rootDir, dirPath || '.') === undefined) return '❌ DENIED: The directory escapes the workspace.';
       if (!fs.existsSync(targetDir)) return `❌ Directory not found: ${dirPath}`;
       const files = fs.readdirSync(targetDir, { withFileTypes: true });
       const list = files.map((f) => `${f.isDirectory() ? "📂" : "📄"} ${f.name}`).join("\n");
@@ -60,23 +62,13 @@ export const listAdrsTool = tool(
 
 export const executeCommandTool = tool(
   async ({ command }) => {
-    const rootDir = process.cwd();
-    log.tool(`🚀 Executing command: ${command}`);
-    const forbiddenPatterns = [/rm\s+-rf\s+\//, /mkfs/, /dd\s+if/];
-    if (forbiddenPatterns.some((pattern) => pattern.test(command))) return "❌ Error: Command blocked for security reasons.";
-    try {
-      const { stdout, stderr } = await execAsync(command, { cwd: rootDir, timeout: 30000 });
-      log.tool("✅ Command executed successfully.");
-      return `✅ SUCCESS: Command executed.\nSTDOUT: ${stdout}\nSTDERR: ${stderr}`;
-    } catch (error: any) {
-      log.error(`Command failed or timed out: ${command}`);
-      const output = error.stdout || error.stderr || error.message;
-      return `❌ ERROR: Command failed.\n${output}`;
-    }
+    void command;
+    log.tool('Blocked arbitrary command execution.');
+    return '❌ DENIED: Arbitrary shell commands are disabled. Use run_tests or run_integrity_check.';
   },
   {
     name: "execute_command",
-    description: "Executes a terminal command (HITL protected).",
+    description: "Disabled. Use typed verification tools instead of arbitrary shell commands.",
     schema: z.object({ command: z.string().describe("The full command to run.") }),
   },
 );

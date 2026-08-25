@@ -1,4 +1,4 @@
-# 🏗️ Architecture: nestjs-ai-agent-lib
+# 🏗️ Architecture: Umbra
 
 > Living document — updated with every completed phase.
 > Read this to understand WHAT exists, WHY it exists, and WHERE we're going.
@@ -98,7 +98,7 @@ The key must be the exact model string passed to `createDeepAgent` (not 'google'
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                  CLI / API (Presentation)                         │
-│  npm run agent -- deep "task"  |  POST /agent/stream (SSE)       │
+│  umbra deep "task"             |  POST /agent/stream (SSE)       │
 └─────────────────────────┬────────────────────────────────────────┘
                           │
 ┌─────────────────────────▼────────────────────────────────────────┐

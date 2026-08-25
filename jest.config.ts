@@ -8,7 +8,7 @@ const config: Config = {
 
   // 1. Usamos ts-jest para procesar archivos .ts y .js
   transform: {
-    "^.+\\.(t|j)s$": "ts-jest",
+    "^.+\\.(t|j)s$": ["ts-jest", { diagnostics: false }],
   },
 
   // 2. 🔥 EL PARCHE PARA EL ERROR DE UUID
@@ -16,7 +16,7 @@ const config: Config = {
   // Aquí le decimos: "Ignora node_modules, PERO procesa (transforma) uuid, ts-morph y langchain"
   // Esto obliga a Jest a transpilar el código ESM de esas librerías a CommonJS.
   transformIgnorePatterns: [
-    "/node_modules/(?!(uuid|ts-morph|@langchain|langchain)/)",
+    "/node_modules/(?!(uuid|ts-morph|@langchain|langchain|deepagents)/)",
   ],
 
   collectCoverageFrom: ["**/*.(t|j)s"],

@@ -1,7 +1,7 @@
 /**
  * @module theme
  *
- * CLI Design System for nestjs-ai-agent-lib.
+ * CLI design system for Umbra.
  *
  * Centralizes all visual tokens: colors, icons, box-drawing characters,
  * and formatting utilities. Every visual element in the streaming CLI
@@ -186,8 +186,8 @@ export function buildWelcomeBanner(
   sessionName?: string,
 ): string {
   const title = mode === 'deep'
-    ? colors.deep.bold('  NestJS AI Agent — Deep Mode  ')
-    : colors.orchestrator.bold('  NestJS AI Agent — Orchestrator  ');
+    ? colors.deep.bold('  Umbra — Deep Mode  ')
+    : colors.orchestrator.bold('  Umbra — Orchestrator  ');
 
   const subtitle = mode === 'deep'
     ? colors.muted('  Single autonomous agent with planning tools  ')
@@ -300,4 +300,3 @@ export function buildOllamaWarning(info: OllamaWarningInfo): string {
 
   return lines.join('\n');
 }
-
