@@ -13,6 +13,7 @@ import {
   completeSlashCommand,
   looksLikeSlashCommand,
   suggestSlashCommands,
+  buildSlashCompleter,
   SlashCommandHost,
 } from './slash-commands';
 
@@ -205,6 +206,66 @@ describe('suggestSlashCommands', () => {
     const commands = buildSlashCommands(makeHost().host);
 
     expect(suggestSlashCommands(commands, 'model')).toEqual([]);
+  });
+});
+
+describe('buildSlashCompleter', () => {
+  it('returns one candidate when the prefix is unambiguous, so Tab completes', () => {
+    const complete = buildSlashCompleter(buildSlashCommands(makeHost().host));
+
+    const [candidates, replaced] = complete('/mo');
+
+    expect(candidates).toEqual(['/model']);
+    // readline replaces this substring with the candidate.
+    expect(replaced).toBe('/mo');
+  });
+
+  it('returns several candidates when the prefix is ambiguous, so Tab lists', () => {
+    const complete = buildSlashCompleter(buildSlashCommands(makeHost().host));
+
+    const [candidates] = complete('/m');
+
+    expect(candidates).toEqual(['/model', '/mentor']);
+  });
+
+  it('offers every command for a bare slash', () => {
+    const commands = buildSlashCommands(makeHost().host);
+    const complete = buildSlashCompleter(commands);
+
+    const [candidates] = complete('/');
+
+    expect(candidates).toHaveLength(commands.length);
+  });
+
+  it('leaves ordinary prose alone', () => {
+    // Tab has no business rewriting a prompt. A path with a slash inside it is
+    // still a prompt, not a half-typed command.
+    const complete = buildSlashCompleter(buildSlashCommands(makeHost().host));
+
+    expect(complete('create a UsersModule')[0]).toEqual([]);
+    expect(complete('arreglá /src/app.ts')[0]).toEqual([]);
+  });
+
+  it('offers nothing for a prefix that matches no command', () => {
+    const complete = buildSlashCompleter(buildSlashCommands(makeHost().host));
+
+    expect(complete('/zzz')[0]).toEqual([]);
+  });
+
+  it('completes a command added to the registry, with no change here', () => {
+    // The point of the registry: Tab is the fourth surface reading it, and the
+    // fourth copy of a list is the one that goes stale.
+    const commands = [
+      ...buildSlashCommands(makeHost().host),
+      {
+        name: '/deploy',
+        description: 'invented for this test',
+        inPicker: true,
+        run: () => undefined,
+      },
+    ];
+
+    expect(buildSlashCompleter(commands)('/de')[0]).toEqual(['/deploy']);
   });
 });
 

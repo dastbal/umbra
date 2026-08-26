@@ -31,6 +31,7 @@ import { isInteractive, selectOutcome, type SelectChoice } from './interactive-s
 import { askText } from './prompts';
 import {
   buildSlashCommands,
+  buildSlashCompleter,
   completeSlashCommand,
   findSlashCommand,
   looksLikeSlashCommand,
@@ -575,6 +576,9 @@ export class ChatSession {
     return askText({
       prompt: '\n' + colors.primary.bold('You: ') + chalk.white(''),
       onInterrupt: () => this.shutdown(),
+      // Tab completes a slash command from the registry. Built per call because
+      // the registry's hints read live session state.
+      completer: buildSlashCompleter(this.slashCommands),
     });
   }
 

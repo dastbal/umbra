@@ -521,3 +521,74 @@ highest-risk path: it is the input of the entire session, not of one menu.
   palette. Written to `ANTIGRAVITY.md` first; moved because that file is
   `.gitignore`d, and an open defect recorded only on one disk is an open defect
   nobody else can see. `ANTIGRAVITY.md` keeps a pointer to it.
+
+---
+
+## Amendment — 2026-08-26 (third): Tab completion
+
+The registry made one more surface cheap, and it was built: `askText` now
+accepts a `completer`, and the chat prompt passes one.
+
+`buildSlashCompleter` in `slash-commands.ts` reads the same registry as the
+dispatcher, the picker and the help text — Tab is the **fourth** consumer of it,
+and it needed no list of its own. That is the payoff the first amendment
+predicted: the fourth copy of a list is the one that goes stale, so there is no
+fourth copy.
+
+`readline` supplies the entire experience around the completer, which is why
+this cost roughly twenty lines while the live `/` palette remains deferred. The
+distinction is not cosmetic: Tab is *configuring* readline, the palette means
+*replacing* it, and readline is the input path for the whole session rather than
+for one menu. The palette's risk assessment in the second amendment stands.
+
+Completion is deliberately not resolution. `buildSlashCompleter` offers
+candidates and never picks one, mirroring `findSlashCommand`'s refusal to
+resolve an ambiguous prefix — `/m` must not silently run `/model`.
+
+### A test that would have lied
+
+Driving the keys as one chunk (`'/m\t\t'`) left a **literal tab in the answer**;
+delivering them one at a time did not. A keyboard delivers keystrokes
+separately, so the batched version was describing an artefact of the test
+double, not the feature. The spec now types with a delay between keys, and
+asserts the absence of a literal tab explicitly — the failure it guards against
+is a stray `\t` travelling into a prompt sent to the model.
+
+### Verification Evidence — third amendment
+
+```
+node node_modules/typescript/bin/tsc --noEmit --pretty false   -> clean
+node node_modules/jest/bin/jest.js --runInBand --no-cache
+  -> Test Suites: 33 passed, 33 total
+     Tests:       4 skipped, 200 passed, 204 total
+```
+
+Baseline was 33 suites / 191 passed. Behaviour observed through a fake TTY with
+keys delivered one at a time, which matches the shell convention:
+
+```
+"/mo" Tab       -> "/model"                              completed
+"/m"  Tab       -> "/m"        listed []                  ambiguous, no guess
+"/m"  Tab Tab   -> "/m"        listed [/model /mentor]    candidates shown
+"/"   Tab Tab   -> "/"         listed [/model /mentor /exit /help]
+"hola" Tab      -> "hola"                                 prose untouched
+```
+
+No case left a literal tab in the line.
+
+After `npm run build`, `buildSlashCompleter` is present in
+`dist/presentation/cli/slash-commands.js` and `dist/…/chat-session.js`, and
+`printf '/help\n' | node dist/bin/cli.js deep` still renders the command list —
+the compiled-binary check this record's method now requires.
+
+Still not run: **Tab in a real terminal.** The arrow prompts are confirmed there
+by David; completion is verified only through a fake TTY so far.
+
+### Related Files — added by the third amendment
+
+- `src/presentation/cli/slash-commands.ts` — `buildSlashCompleter`, `Completer`.
+- `src/presentation/cli/prompts.ts` — `AskTextOptions.completer`.
+- `src/presentation/cli/chat-session.ts` — `readLine` passes the completer.
+- `src/presentation/cli/prompts.spec.ts` — the `askText Tab completion` block.
+- `docs/deferred-work.md` — the palette entry, updated to say the Tab half
+  shipped and only the live filtering remains.

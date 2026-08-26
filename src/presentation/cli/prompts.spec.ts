@@ -121,6 +121,71 @@ describe('askText', () => {
   });
 });
 
+describe('askText Tab completion', () => {
+  /**
+   * Sends keystrokes one at a time, as a keyboard delivers them.
+   *
+   * Writing them as a single chunk is not equivalent: `readline` processed a
+   * batched `\t\t` differently and left a literal tab in the line, which does
+   * not happen when the keys arrive separately. The delay is what makes this
+   * test describe real typing rather than an artefact of the double.
+   *
+   * @param streams - The stream pair.
+   * @param keys - Keystrokes to send, in order, then Enter.
+   */
+  async function type(streams: Streams, keys: string[]): Promise<void> {
+    for (const key of keys) {
+      await new Promise((r) => setTimeout(r, 10));
+      streams.send(key);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    streams.send('\r');
+  }
+
+  /** Completes against a small fixed list. */
+  const completer = (line: string): [string[], string] => [
+    ['/model', '/mentor', '/help'].filter((name) => name.startsWith(line)),
+    line,
+  ];
+
+  it('completes an unambiguous prefix', async () => {
+    const streams = makeStreams(true);
+    const pending = askText({
+      prompt: '> ', completer, input: streams.input, output: streams.output,
+    });
+
+    await type(streams, ['/', 'm', 'o', '\t']);
+
+    expect(await pending).toBe('/model');
+  });
+
+  it('leaves an ambiguous prefix untouched, with no literal tab in the line', async () => {
+    const streams = makeStreams(true);
+    const pending = askText({
+      prompt: '> ', completer, input: streams.input, output: streams.output,
+    });
+
+    // Two tabs on an ambiguous prefix: the shell convention is to list, not to
+    // guess. What must never happen is a tab ending up in the text.
+    await type(streams, ['/', 'm', '\t', '\t']);
+
+    const answer = await pending;
+    expect(answer).toBe('/m');
+    expect(answer).not.toContain('\t');
+  });
+
+  it('does not rewrite ordinary prose on Tab', async () => {
+    const streams = makeStreams(true);
+    const pending = askText({
+      prompt: '> ', completer, input: streams.input, output: streams.output,
+    });
+
+    await type(streams, ['h', 'o', 'l', 'a', '\t']);
+
+    expect(await pending).toBe('hola');
+  });
+});
+
 describe('askNumber', () => {
   it('parses a number inside the range', async () => {
     const streams = makeStreams(false);

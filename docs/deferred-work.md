@@ -139,7 +139,13 @@ no model call, and a repaint is roughly 300 bytes to stdout per keystroke.
 **Recommendation:** revisit at roughly a dozen commands. With four, the
 navigable `/help` already solves discovery.
 
-A cheaper intermediate step, if the itch needs scratching sooner: `readline`
-accepts a `completer` function, so Tab completion is about twenty lines with no
-raw mode and no risk to the input path. It completes and lists on Tab; it does
-not show the list unprompted while typing.
+**Update — 2026-08-26: the cheap half is done.** `readline` accepts a
+`completer`, so Tab completion needed no raw mode and no change to the input
+path. `buildSlashCompleter` in `src/presentation/cli/slash-commands.ts` reads
+the same registry, and `ChatSession#readLine` passes it to `askText`. Tab
+completes an unambiguous prefix, Tab twice lists the candidates, and ordinary
+prose is left alone.
+
+What remains deferred is only the **live** palette: the list appearing and
+filtering as you type, without pressing anything. That is the part that needs
+the line editor described above, and the risk assessment above stands unchanged.

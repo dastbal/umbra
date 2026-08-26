@@ -257,6 +257,38 @@ export function suggestSlashCommands(
 }
 
 /**
+ * The shape `readline` expects from a completer: the candidates, and the
+ * substring they replace.
+ */
+export type Completer = (line: string) => [string[], string];
+
+/**
+ * Builds a Tab-completion function for `readline`.
+ *
+ * `readline` calls this with the line typed so far. Returning one candidate
+ * makes Tab complete it; returning several makes Tab list them and fill in the
+ * longest common prefix. Returning none leaves the line untouched, which is
+ * what must happen for ordinary prose — `arreglá /src/app.ts` is a prompt, not
+ * a half-typed command, and Tab has no business rewriting it.
+ *
+ * This is deliberately built on {@link completeSlashCommand} rather than on its
+ * own list: Tab is the fourth surface to read the registry, and the reason the
+ * registry exists is that the fourth copy of a list is the one that goes stale.
+ *
+ * Note this is completion, not resolution: it offers candidates and never picks
+ * one. Ambiguity is the user's to settle — see {@link findSlashCommand}.
+ *
+ * @param commands - The registry to complete against.
+ * @returns A completer suitable for `readline`'s `completer` option.
+ */
+export function buildSlashCompleter(commands: SlashCommand[]): Completer {
+  return (line: string) => {
+    const candidates = completeSlashCommand(commands, line).map((c) => c.name);
+    return [candidates, line];
+  };
+}
+
+/**
  * Reports whether input looks like an attempt at a slash command.
  *
  * Used to tell an unknown command apart from an ordinary message, so a typo

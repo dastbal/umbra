@@ -85,6 +85,20 @@ export interface AskTextOptions {
    * session rather than the question.
    */
   onInterrupt?: () => void;
+  /**
+   * Tab-completion function, in `readline`'s own shape: given the line so far,
+   * return the candidates and the substring they replace.
+   *
+   * `readline` provides the entire editing experience around this — Tab to
+   * complete, Tab twice to list — which is why completion costs almost nothing
+   * here while a live palette that filters as you type does not: the palette
+   * needs raw mode, and raw mode means replacing `readline` rather than
+   * configuring it.
+   *
+   * Only consulted on a TTY. `readline` does not process Tab as completion when
+   * its input is a pipe, because there is no interactive line to edit.
+   */
+  completer?: (line: string) => [string[], string];
   /** Input stream. Overridable for tests. @default process.stdin */
   input?: NodeJS.ReadStream;
   /** Output stream. Overridable for tests. @default process.stdout */
@@ -107,6 +121,7 @@ export function askText(opts: AskTextOptions): Promise<string | null> {
     const rl = readline.createInterface({
       input: opts.input ?? process.stdin,
       output: opts.output ?? process.stdout,
+      completer: opts.completer,
     });
 
     rl.on('SIGINT', () => {
