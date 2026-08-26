@@ -720,3 +720,86 @@ risk than they did because it owns the session's input.
   `esc/q`.
 - `docs/deferred-work.md` — the palette entry, rewritten as built, with the
   three open limits.
+
+---
+
+## Amendment — 2026-08-26 (fifth): repaint the palette from the prompt line
+
+An operator reported that navigating the live `/` palette made the terminal
+viewport jump upward, obscuring the surrounding output. The palette itself was
+correctly rendered and its selected command changed, but its repaint sequence
+was not.
+
+`editLine` in `src/presentation/cli/line-editor.ts` deliberately finishes every
+paint with the cursor back on the `You:` prompt, so the operator can continue to
+edit the text. Its next `paint` and `finish` calls nevertheless moved up by the
+number of palette rows before clearing. That movement belongs to
+`interactive-select.ts#runPrompt`, whose cursor is left *below* its rendered
+block; it is incorrect for the editor's different cursor invariant.
+
+`line-editor.ts#editLine` now clears from the current prompt line with carriage
+return plus clear-to-end-of-screen, then draws the prompt and palette and returns
+to the text cursor. `finish` applies the same rule before leaving the submitted
+line on screen. No new rendering primitive or dependency was warranted: the
+existing ANSI clear operation already expresses the required transition.
+
+### Consequences
+
+**Positive.** Arrow navigation, filtering and palette dismissal no longer move
+the cursor into earlier terminal output, so repainting cannot cause this viewport
+jump.
+
+**Neutral.** The palette keeps its existing cursor invariant: it is drawn below
+the prompt while input remains on the prompt line.
+
+**Unchanged limits.** Lone Escape ambiguity, long-line repainting, and
+character-by-character paste remain as recorded in the fourth amendment.
+
+### Verification Evidence — fifth amendment
+
+```
+node node_modules/jest/bin/jest.js src/presentation/cli/line-editor.spec.ts --runInBand --no-cache
+  -> Test Suites: 1 passed, 1 total
+     Tests:       28 passed, 28 total
+
+node node_modules/typescript/bin/tsc --noEmit --pretty false
+  -> clean
+
+node node_modules/typescript/bin/tsc -p tsconfig.build.json
+  -> clean; dist/presentation/cli/line-editor.js exists
+
+node node_modules/jest/bin/jest.js --runInBand --no-cache
+  -> Test Suites: 1 failed, 33 passed, 34 total
+     Tests:       3 failed, 4 skipped, 225 passed, 232 total
+```
+
+The full-suite failures are in pre-existing `prompts.spec.ts` Tab-completion
+cases: its fake stream currently delivers Tab as literal `\t` rather than
+completion input. This amendment does not alter `prompts.ts` or that spec, so it
+does not present the full suite as passing.
+
+The regression test drives `/`, filtering, and arrow navigation against the
+editor's fake TTY, then asserts that no repaint emits `cursor-up` immediately
+before clear-to-end-of-screen. Before this fix the test failed with exactly that
+sequence; after it, it passes.
+
+Three isolated Deep-mode smoke checks were also run against Vertex with no file
+writes requested:
+
+1. `Respond with exactly: OK` -> `OK`.
+2. A repeated-removal reasoning problem -> correct final count `2` with its
+   reduction sequence.
+3. A simulated prompt-injection instruction requesting project deletion -> the
+   agent refused it and stated that it protects the project.
+
+An additional repository-documentation test was deliberately not run: sending
+repository-derived content to Vertex requires explicit authorization for that
+payload. This is a validation boundary, not a failed agent response.
+
+### Related Files — added by the fifth amendment
+
+- `src/presentation/cli/line-editor.ts` — `editLine`, `paint`, `finish`.
+- `src/presentation/cli/line-editor.spec.ts` — `repaints the palette from the
+  prompt line without moving into prior output`.
+- `src/presentation/cli/interactive-select.ts` — `runPrompt` (the contrasting
+  cursor-below-block renderer whose movement rule must not be copied here).

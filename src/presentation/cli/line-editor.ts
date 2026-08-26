@@ -236,8 +236,10 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
   const paint = (): void => {
     let out = '';
 
-    // Return to the prompt line and clear everything below it.
-    out += up(drawnRows) + COLUMN_ZERO + CLEAR_DOWN;
+    // The previous paint already returned the cursor to the prompt line. Clear
+    // from there; moving up by `drawnRows` would overwrite earlier output and
+    // make the terminal viewport jump whenever the palette is navigated.
+    out += COLUMN_ZERO + CLEAR_DOWN;
     out += opts.prompt + text();
 
     const lines = paletteLines();
@@ -326,7 +328,7 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
      */
     const finish = (value: string | null): void => {
       // Erase the palette, redraw the bare line, and move past it.
-      output.write(up(drawnRows) + COLUMN_ZERO + CLEAR_DOWN + opts.prompt + text() + '\n');
+      output.write(COLUMN_ZERO + CLEAR_DOWN + opts.prompt + text() + '\n');
       drawnRows = 0;
       teardown();
       resolve(value);

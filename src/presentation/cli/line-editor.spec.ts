@@ -266,6 +266,19 @@ describe('the live palette', () => {
     expect(await run(term, keys)).toBe('/mentor');
   });
 
+  it('repaints the palette from the prompt line without moving into prior output', async () => {
+    const term = makeTerm();
+    const pending = run(term, ['/', 'm', KEY.down]);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // `paint` leaves the cursor on `You:`. Moving up before clearing would
+    // redraw over earlier terminal output and make the viewport jump upward.
+    expect(term.written()).not.toMatch(/\x1b\[\d+A\r\x1b\[0J/);
+
+    term.send(KEY.ctrlC);
+    await pending;
+  });
+
   it('wraps the highlight upward from the first row', async () => {
     const term = makeTerm();
     const keys = ['/', KEY.up, KEY.enter];
