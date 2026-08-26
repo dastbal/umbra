@@ -29,6 +29,7 @@ import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
 import { isInteractive, selectOutcome, type SelectChoice } from './interactive-select';
 import { askText } from './prompts';
+import { canEditLive, editLine, type Suggestion } from './line-editor';
 import {
   buildSlashCommands,
   buildSlashCompleter,
@@ -182,6 +183,10 @@ export class ChatSession {
    * the help text, so all three can never disagree about what exists.
    */
   private readonly slashCommands: SlashCommand[];
+  /** Lines the operator submitted this session, for the editor's history. */
+  private readonly inputHistory: string[] = [];
+  /** Cap on remembered lines, so a long session does not grow the list forever. */
+  private static readonly MAX_HISTORY = 100;
 
   /**
    * @param agent - A compiled LangGraph agent (from createDeepAgent).
@@ -571,15 +576,70 @@ export class ChatSession {
   private async readLine(): Promise<string | null> {
     if (!this.isRunning) return null;
 
-    // `askText` owns the short-lived readline and closes it before resolving,
-    // which is what keeps streaming output clean.
-    return askText({
-      prompt: '\n' + colors.primary.bold('You: ') + chalk.white(''),
+    const styledPrompt = colors.primary.bold('You: ') + chalk.white('');
+
+    if (canEditLive()) {
+      // The live editor cannot take a prompt containing a newline — it has to
+      // know which column the text starts in — so the blank line is written
+      // before it opens rather than being part of the prompt.
+      process.stdout.write('\n');
+      const line = await editLine({
+        prompt: styledPrompt,
+        suggest: (typed) => this.suggestForPalette(typed),
+        history: this.inputHistory,
+        onInterrupt: () => this.shutdown(),
+      });
+      if (line?.trim()) this.rememberInput(line.trim());
+      return line;
+    }
+
+    // Fallback: `askText` owns a short-lived readline and closes it before
+    // resolving, which is what keeps streaming output clean. Tab still
+    // completes here; only the live palette needs the editor above.
+    const typed = await askText({
+      prompt: '\n' + styledPrompt,
       onInterrupt: () => this.shutdown(),
-      // Tab completes a slash command from the registry. Built per call because
-      // the registry's hints read live session state.
       completer: buildSlashCompleter(this.slashCommands),
     });
+    if (typed?.trim()) this.rememberInput(typed.trim());
+    return typed;
+  }
+
+  /**
+   * Builds the live palette rows for what the operator has typed so far.
+   *
+   * Reads the same registry as the dispatcher, so the palette is its fifth
+   * consumer and still needs no list of its own.
+   *
+   * Returns nothing unless the text looks like a command being typed. A palette
+   * that opened on ordinary prose would cover the screen on every message and
+   * make `↑↓` unusable for history.
+   *
+   * @param typed - The current line.
+   * @returns The rows to show beneath the prompt.
+   */
+  private suggestForPalette(typed: string): Suggestion[] {
+    if (!looksLikeSlashCommand(typed)) return [];
+    return completeSlashCommand(this.slashCommands, typed).map((command) => ({
+      value: command.name,
+      label: command.name,
+      hint: command.hint?.() ?? command.description,
+    }));
+  }
+
+  /**
+   * Records a submitted line for `↑↓` history.
+   *
+   * Skips an immediate repeat, because a history full of the same line makes
+   * `↑` useless, and caps the list so a long session does not grow it without
+   * bound.
+   *
+   * @param line - The submitted line, already trimmed and non-empty.
+   */
+  private rememberInput(line: string): void {
+    if (this.inputHistory[this.inputHistory.length - 1] === line) return;
+    this.inputHistory.push(line);
+    if (this.inputHistory.length > ChatSession.MAX_HISTORY) this.inputHistory.shift();
   }
 
   /**

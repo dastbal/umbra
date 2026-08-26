@@ -394,11 +394,15 @@ async function runPrompt<T>(
 
     if (end < choices.length) lines.push(colors.dim('    ↓ …'));
 
+    // `q` is advertised alongside Escape rather than hidden as a synonym: a
+    // lone ESC byte is ambiguous to the keypress decoder, which emits nothing
+    // until another byte arrives, so Escape can appear not to respond to the
+    // first press. `q` is one unambiguous byte and always lands.
     lines.push(
       colors.muted(
         multi
-          ? '    ↑↓ move · space toggle · enter confirm · esc cancel'
-          : '    ↑↓ move · enter select · esc cancel',
+          ? '    ↑↓ move · space toggle · enter confirm · esc/q cancel'
+          : '    ↑↓ move · enter select · esc/q cancel',
       ),
     );
 

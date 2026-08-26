@@ -110,42 +110,43 @@ exercised, because the tool was never callable. Treat that limit as unproven.
 
 ---
 
-## The `/` command palette
+## The `/` command palette — **built 2026-08-26**
 
-> Recorded 2026-08-26. Deferred on cost/benefit, not on a defect.
+Implemented after all. Kept here rather than deleted, because the reasoning
+about *why it was expensive* is what a future reader needs when deciding whether
+to extend the line editor further.
 
-Typing `/` would show the command list below the prompt, filtering as the
-operator keeps typing, navigable with the arrow keys.
+`src/presentation/cli/line-editor.ts` — `editLine` — replaces `readline` at the
+chat prompt on a TTY. Typing `/` opens a dimmed list below the prompt that
+filters as more is typed, `↑↓` move the `❯` pointer, Enter or Tab take the
+highlighted row, Escape or Ctrl+G dismiss it. The palette reads the same command
+registry as the dispatcher, the picker, the help text and Tab completion, so it
+is its fifth consumer and needed no list of its own.
 
-**The primitive it needs already exists**:
-`completeSlashCommand` in `src/presentation/cli/slash-commands.ts` returns the
-commands still reachable from a partial input, and a bare `/` returns all of
-them. `ChatSession#completions` exposes it and is deliberately unused.
+**What it cost, as predicted:** everything `readline` gave for free had to be
+reimplemented — backspace, delete, cursor movement, Home/End, `Ctrl+A/E/U/K/W`,
+`↑↓` history, and code-point-correct editing so `á` and `ñ` survive.
 
-**What makes it expensive is not the palette.** Showing suggestions while the
-operator types requires raw mode, and raw mode means `readline` cannot be the
-reader — so its line editing has to be reimplemented: backspace and delete,
-cursor movement, `Ctrl+A`/`E`/`U`/`W`, bracketed paste, multi-byte characters so
-`á` and `ñ` survive, and `↑↓` history.
+**The escape hatch is the mitigation that made it acceptable.**
+`UMBRA_SIMPLE_PROMPT=1` forces the old `readline` prompt on a real terminal, so
+an operator who hits a defect here keeps working. Without a TTY the editor is
+never used at all.
 
-The risk is what separates this from ADR-012's menus: `readline` is the input
-path for the **entire session**. A bug in a menu breaks a menu; a bug in the
-line editor means the operator cannot type. This is also the point where Ink
-starts to justify its cost, which would reopen a trade-off ADR-012 settled.
+### Still open, and worth knowing before extending this
 
-**Token cost: zero.** Filtering is a `startsWith` over an in-memory array with
-no model call, and a repaint is roughly 300 bytes to stdout per keystroke.
+- **A lone ESC byte is ambiguous to the keypress decoder.** With no
+  `readline.Interface` supplying an escape timeout, `emitKeypressEvents` emits
+  nothing for a solitary ESC until another byte arrives — verified directly:
+  `ESC ESC` produced no event, `ESC ESC ESC` produced one, and `ESC` followed by
+  Enter arrived as `meta+return`. Escape is still handled, but Ctrl+G is offered
+  as the key that always lands, and the menu hint now reads `esc/q cancel`
+  rather than promising Escape alone. Fixing this properly means supplying an
+  escape timeout, which means an owning `Interface` — a change to how the
+  editor reads input, not a tweak.
+- **Long lines are not wrapped.** The repaint assumes the prompt plus the text
+  fits on one row. A line longer than the terminal will confuse the cursor
+  arithmetic. Not hit in normal use; a real limit all the same.
+- **Paste arrives one character at a time.** The decoder feeds a pasted chunk
+  through as individual keypresses, so each triggers a repaint. Correct, but a
+  very large paste will be slow.
 
-**Recommendation:** revisit at roughly a dozen commands. With four, the
-navigable `/help` already solves discovery.
-
-**Update — 2026-08-26: the cheap half is done.** `readline` accepts a
-`completer`, so Tab completion needed no raw mode and no change to the input
-path. `buildSlashCompleter` in `src/presentation/cli/slash-commands.ts` reads
-the same registry, and `ChatSession#readLine` passes it to `askText`. Tab
-completes an unambiguous prefix, Tab twice lists the candidates, and ordinary
-prose is left alone.
-
-What remains deferred is only the **live** palette: the list appearing and
-filtering as you type, without pressing anything. That is the part that needs
-the line editor described above, and the risk assessment above stands unchanged.

@@ -592,3 +592,131 @@ by David; completion is verified only through a fake TTY so far.
 - `src/presentation/cli/prompts.spec.ts` — the `askText Tab completion` block.
 - `docs/deferred-work.md` — the palette entry, updated to say the Tab half
   shipped and only the live filtering remains.
+
+---
+
+## Amendment — 2026-08-26 (fourth): the live palette
+
+The `/` palette that the second and third amendments deferred was built, at
+David's request once he saw that Tab alone was not what he had asked for: he
+wanted the options listed **live** beneath the prompt, dimmed, filtering as he
+types, with the same `❯` pointer the menus use.
+
+`src/presentation/cli/line-editor.ts` — `editLine` — replaces `readline` at the
+chat prompt on a TTY. `ChatSession#suggestForPalette` feeds it rows from the
+command registry, making the palette its **fifth** consumer with still no list
+of its own.
+
+### What this reverses, and what it does not
+
+The deferral is reversed; the **reasoning behind it is not**, and it is worth
+keeping because it turned out to be accurate. Everything `readline` provided had
+to be written: backspace and delete, cursor movement, Home/End,
+`Ctrl+A/E/U/K/W`, `↑↓` history with the in-progress draft preserved across a
+trip into it, and a buffer of **code points** rather than string indices —
+`'añadí'.length` counts UTF-16 units, so unit indexing would put the cursor
+inside a character and corrupt exactly the Spanish input this project types.
+
+The risk assessment also stands: this is the input path for the whole session.
+Two mitigations make it acceptable rather than reckless:
+
+- Without a TTY the editor is never reached; `askText` serves, as before.
+- `UMBRA_SIMPLE_PROMPT=1` forces that same fallback **on a real terminal**, so
+  an operator who hits a defect here keeps working instead of waiting for a fix.
+
+Ink was not reconsidered. The trade-off in the original table assumed a
+reconciler would be needed for state this complex; one file of explicit state
+proved sufficient, and adding React to a globally installed package still loses.
+
+### A defect this work exposed in already-shipped code
+
+Driving Escape in a test surfaced something the menus have shipped with since
+this ADR was accepted. Measured directly against `emitKeypressEvents`:
+
+```
+send ESC ESC       -> no event at all; the decoder is still waiting
+send ESC ESC ESC   -> one event: { name: 'escape', meta: true }
+send ESC then CR   -> one event: { name: 'return', meta: true }
+```
+
+**A lone ESC byte emits nothing until another byte arrives.** `readline.Interface`
+supplies an escape timeout that resolves this; `emitKeypressEvents` used on its
+own does not, and that is how both this editor and `interactive-select` read
+keys. So "press Escape to cancel" can appear not to respond to the first press.
+
+Two honest fixes, neither of which pretends the ambiguity is gone:
+
+- The editor accepts **Ctrl+G** to dismiss the palette — one unambiguous byte
+  that always lands. Escape still works when the decoder resolves it.
+- The menu hint now reads `esc/q cancel` instead of `esc cancel`. `q` already
+  cancelled and was documented as a synonym; it is advertised now, because a
+  hint that promises only Escape is a hint that can be wrong.
+
+Resolving this properly requires an owning `Interface` to supply the timeout,
+which changes how these modules read input. Recorded in `docs/deferred-work.md`
+rather than done here.
+
+### Consequences
+
+**Positive.** The palette is discoverable without pressing anything, and history
+on `↑↓` — which `readline` provided and this could have silently dropped — is
+preserved.
+
+**Negative — accepted limits, all recorded in `docs/deferred-work.md`:**
+
+- Escape's ambiguity above.
+- **Long lines are not wrapped.** The repaint assumes prompt plus text fits one
+  row; a longer line confuses the cursor arithmetic.
+- **Paste arrives one character at a time**, each triggering a repaint. Correct
+  but slow for a very large paste.
+
+### Verification Evidence — fourth amendment
+
+```
+node node_modules/typescript/bin/tsc --noEmit --pretty false   -> clean
+node node_modules/jest/bin/jest.js --runInBand --no-cache
+  -> Test Suites: 34 passed, 34 total
+     Tests:       4 skipped, 227 passed, 231 total
+```
+
+Baseline was 33 suites / 200 passed; `line-editor.spec.ts` accounts for the
+delta. Its 27 cases are weighted toward the `readline` behaviours that could
+have been lost silently — mid-line editing, `ñ` backspaced as one character, the
+kill shortcuts, the draft surviving a history round trip, and `↑` reaching the
+palette rather than history while the palette is open.
+
+Rendered output after typing `/m`, then one `↓`:
+
+```
+You: /m
+  ❯ /model   switch the active LLM model
+    /mentor  deep mentor mode is OFF — turn it on
+
+You: /m
+    /model   switch the active LLM model
+  ❯ /mentor  deep mentor mode is OFF — turn it on
+
+Enter -> "/mentor"
+```
+
+After `npm run build`, `dist/presentation/cli/line-editor.js` exists, and both
+fallbacks were exercised against the compiled binary: piped stdin still renders
+`/help`, and `UMBRA_SIMPLE_PROMPT=1` still answers a typo with
+`Did you mean: /model`.
+
+Still not run: **the palette on a real terminal.** The arrow menus are confirmed
+there by David; this is verified only through a fake TTY, and it carries more
+risk than they did because it owns the session's input.
+
+### Related Files — added by the fourth amendment
+
+- `src/presentation/cli/line-editor.ts` — `editLine`, `canEditLive`,
+  `dismissPalette`, `paint`, `visibleWidth`, `Suggestion`, `EditLineOptions`.
+- `src/presentation/cli/line-editor.spec.ts` — the editing, palette and history
+  contracts.
+- `src/presentation/cli/chat-session.ts` — `readLine` (now branches),
+  `suggestForPalette`, `rememberInput`, `inputHistory`, `MAX_HISTORY`.
+- `src/presentation/cli/interactive-select.ts` — the cancel hint, corrected to
+  `esc/q`.
+- `docs/deferred-work.md` — the palette entry, rewritten as built, with the
+  three open limits.
