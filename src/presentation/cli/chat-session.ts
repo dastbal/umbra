@@ -22,12 +22,21 @@
  * ```
  */
 
-import * as readline from 'readline';
 import chalk from 'chalk';
 import { Command as LangGraphCommand } from '@langchain/langgraph';
 import { StreamRenderer } from './stream-renderer';
 import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
+import { isInteractive, selectOutcome, type SelectChoice } from './interactive-select';
+import { askText } from './prompts';
+import {
+  buildSlashCommands,
+  completeSlashCommand,
+  findSlashCommand,
+  looksLikeSlashCommand,
+  suggestSlashCommands,
+  type SlashCommand,
+} from './slash-commands';
 import { ContextCompressor } from '../../core/agent/context-compressor';
 import { resolveSummarizerModel } from '../../core/config/model-resolver';
 import {
@@ -37,6 +46,56 @@ import {
 import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
+
+/**
+ * Builds the rejection decision sent back to the graph.
+ *
+ * The message matters as much as the type: without an explicit instruction not
+ * to retry, the model reads a bare rejection as a transient failure and calls
+ * the same gated tool again (ADR-011).
+ *
+ * @returns The reject decision payload.
+ */
+export function rejectionDecision(): { type: string; message: string } {
+  return {
+    type: 'reject',
+    message: 'User rejected this action. Do not retry. Ask the user what to do next.',
+  };
+}
+
+/**
+ * Turns the gate's `allowedDecisions` into menu rows.
+ *
+ * Built from `allowed` rather than hardcoded, so a decision the policy starts
+ * permitting appears in the menu without another change here. `requestApproval`
+ * currently emits only `approve` and `reject`; `edit` is part of the payload
+ * type and is handled if it ever arrives.
+ *
+ * Unknown decision types are shown verbatim rather than dropped — silently
+ * hiding an option the gate offered would misrepresent the operator's choices.
+ *
+ * @param allowed - Decision identifiers permitted for this action.
+ * @returns Rows for the approval prompt, approve first.
+ */
+export function buildDecisionChoices(allowed: string[]): SelectChoice<string>[] {
+  const known: Record<string, { label: string; hint?: string }> = {
+    approve: { label: '✓  Approve',           hint: 'let the action run' },
+    reject:  { label: '✗  Reject',            hint: 'block it and tell the agent to stop' },
+    edit:    { label: '✎  Change it',         hint: 'send it back with an instruction' },
+  };
+
+  const order = ['approve', 'edit', 'reject'];
+  const sorted = [...allowed].sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib);
+  });
+
+  return sorted.map((decision) => ({
+    label: known[decision]?.label ?? decision,
+    hint: known[decision]?.hint,
+    value: decision,
+  }));
+}
 
 /** Configuration for a ChatSession. */
 export interface ChatSessionConfig {
@@ -82,9 +141,13 @@ export interface ChatSessionConfig {
  * We do NOT keep a single readline instance open for the whole session.
  * Keeping readline open while streaming causes it to print phantom `>`
  * prompts that corrupt the streaming output (stdout collision).
- * Instead, we create a short-lived readline ONLY for each user prompt,
- * and close it immediately after the user presses Enter. This guarantees
- * readline is never alive while tokens are being streamed.
+ * Instead, a short-lived readline is created ONLY for each user prompt and
+ * closed immediately after the user presses Enter. This guarantees readline is
+ * never alive while tokens are being streamed.
+ *
+ * That lifetime now lives in `./prompts` (`askText`), which every question in
+ * this class goes through — so the rule is enforced in one place instead of
+ * being re-implemented per prompt. The reasoning above is why it exists.
  */
 export class ChatSession {
   private readonly config: {
@@ -111,6 +174,13 @@ export class ChatSession {
    * since the last compression (ADR-024).
    */
   private lastCompressedMessageCount = 0;
+  /**
+   * The slash command registry for this session.
+   *
+   * Built once in the constructor and read by the dispatcher, the picker and
+   * the help text, so all three can never disagree about what exists.
+   */
+  private readonly slashCommands: SlashCommand[];
 
   /**
    * @param agent - A compiled LangGraph agent (from createDeepAgent).
@@ -129,6 +199,14 @@ export class ChatSession {
       ...config,
     };
     this.currentModel = config.model;
+    this.slashCommands = buildSlashCommands({
+      switchModel:       () => this.handleModelSwitch(),
+      toggleMentor:      () => this.handleMentorToggle(),
+      openCommandPicker: () => this.handleHelp(),
+      printHelp:         () => this.showHelp(),
+      exitSession:       () => this.shutdown(),
+      isMentorActive:    () => this.mentorModeActive,
+    });
     this.graphConfig = {
       configurable: { thread_id: this.config.threadId },
       recursionLimit: this.config.recursionLimit,
@@ -401,18 +479,16 @@ export class ChatSession {
       this.renderer.showHITLRequest(action.name, action.args);
 
       const allowed: string[] = reviewConfigs[i]?.allowedDecisions ?? ['approve', 'reject'];
-      const approved = await this.askApproval(`  Approve? [${allowed.join('/')}] `);
+      const decision = await this.askDecision(allowed);
 
-      if (approved) {
+      if (decision.type === 'approve') {
         process.stdout.write(colors.accent('  ✓ Approved\n'));
-        decisions.push({ type: 'approve' });
+      } else if (decision.type === 'edit') {
+        process.stdout.write(colors.warning('  ✎ Sent back with feedback\n'));
       } else {
         process.stdout.write(colors.danger('  ✗ Rejected\n'));
-        decisions.push({
-          type: 'reject',
-          message: 'User rejected this action. Do not retry. Ask the user what to do next.',
-        });
       }
+      decisions.push(decision);
     }
 
     // Resume the agent with decisions (streaming continues from resumed state)
@@ -447,8 +523,8 @@ export class ChatSession {
    * Exits cleanly on empty input or Ctrl+C.
    *
    * ## Slash Commands
-   * - `/model` — opens the interactive model selection menu
-   * - `/help`  — shows available slash commands
+   * Not listed here on purpose: the authoritative list is the registry in
+   * `./slash-commands`, and a copy in this comment is a copy that goes stale.
    */
   private async promptLoop(): Promise<void> {
     while (this.isRunning) {
@@ -459,19 +535,19 @@ export class ChatSession {
       const trimmed = input.trim();
       if (!trimmed) continue;
 
-      // ── Slash command dispatcher ────────────────────────────────────────────────────────
-      if (trimmed === '/model') {
-        await this.handleModelSwitch();
+      // ── Slash command dispatcher ────────────────────────────────────────────
+      // Every command comes from the one registry, so a new entry there is
+      // reachable here with no change.
+      const command = findSlashCommand(this.slashCommands, trimmed);
+      if (command) {
+        await command.run();
         continue;
       }
 
-      if (trimmed === '/mentor') {
-        await this.handleMentorToggle();
-        continue;
-      }
-
-      if (trimmed === '/help') {
-        this.showHelp();
+      // A slash-prefixed word that matches nothing is a typo, not a prompt.
+      // Sending it to the agent would spend a turn on it and answer nonsense.
+      if (looksLikeSlashCommand(trimmed)) {
+        this.reportUnknownCommand(trimmed);
         continue;
       }
 
@@ -485,55 +561,103 @@ export class ChatSession {
   /**
    * Prompt the user and wait for a line of input.
    *
-   * Creates a fresh readline for each question and closes it immediately
-   * after the user presses Enter. This prevents readline from staying open
-   * while the agent streams tokens (which caused phantom `>` prompts).
+   * Delegates to `askText`, which creates a fresh readline per question and
+   * closes it before resolving. This prevents readline from staying open while
+   * the agent streams tokens (which caused phantom `>` prompts).
    *
    * @returns The input string, or null if the session was closed.
    */
-  private readLine(): Promise<string | null> {
-    return new Promise((resolve) => {
-      if (!this.isRunning) { resolve(null); return; }
+  private async readLine(): Promise<string | null> {
+    if (!this.isRunning) return null;
 
-      // Short-lived readline — only alive while waiting for input
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-
-      rl.on('SIGINT', () => {
-        rl.close();
-        this.shutdown();
-      });
-
-      rl.question(
-        '\n' + colors.primary.bold('You: ') + chalk.white(''),
-        (answer) => {
-          rl.close(); // ← closed before streaming starts
-          resolve(answer);
-        },
-      );
+    // `askText` owns the short-lived readline and closes it before resolving,
+    // which is what keeps streaming output clean.
+    return askText({
+      prompt: '\n' + colors.primary.bold('You: ') + chalk.white(''),
+      onInterrupt: () => this.shutdown(),
     });
   }
 
   /**
+   * Ask the operator to decide on one pending action (ADR-011).
+   *
+   * On an interactive terminal this is an arrow-key menu built from the
+   * decisions the gate actually allows, so the operator never has to know that
+   * `y` means approve. Without a TTY it falls back to {@link askApproval}.
+   *
+   * ## Why cancelling is a rejection
+   *
+   * Escape and Ctrl+C both resolve to **reject**, never to approve. This prompt
+   * guards a write or a delete that the security policy refused to allow on its
+   * own; an ambiguous keystroke must fail closed. Ctrl+C additionally ends the
+   * session, matching what it does at the chat prompt — but the rejection is
+   * recorded first, so the agent never resumes with an unanswered gate.
+   *
+   * @param allowed - Decision types the gate permits, from `allowedDecisions`.
+   * @returns The decision to send back to the graph.
+   */
+  private async askDecision(
+    allowed: string[],
+  ): Promise<{ type: string; message?: string }> {
+    if (!isInteractive()) {
+      const approved = await this.askApproval(`  Approve? [${allowed.join('/')}] `);
+      return approved ? { type: 'approve' } : rejectionDecision();
+    }
+
+    const outcome = await selectOutcome<string>({
+      title: 'This action needs your approval',
+      choices: buildDecisionChoices(allowed),
+    });
+
+    if (outcome.status === 'interrupted') {
+      // Record the rejection before tearing the session down, so the graph is
+      // never left resumed on an unanswered gate.
+      process.stdout.write(colors.danger('  ✗ Rejected (interrupted)\n'));
+      setImmediate(() => this.shutdown());
+      return rejectionDecision();
+    }
+
+    if (outcome.status !== 'selected') return rejectionDecision();
+
+    if (outcome.value === 'edit') {
+      const feedback = await this.readFeedback();
+      return { type: 'edit', message: feedback };
+    }
+
+    return outcome.value === 'approve' ? { type: 'approve' } : rejectionDecision();
+  }
+
+  /**
+   * Reads a free-text instruction for an `edit` decision.
+   *
+   * Uses a short-lived readline, for the same reason as {@link readLine}.
+   *
+   * @returns The operator's text, or a generic instruction if left empty.
+   */
+  private async readFeedback(): Promise<string> {
+    const answer = await askText({
+      prompt: colors.warning('  What should it do instead? '),
+    });
+    return answer?.trim() ||
+      'The user wants this action changed. Ask them what to do next.';
+  }
+
+  /**
    * Prompt for a y/n approval decision.
+   *
+   * Retained as the non-interactive path for {@link askDecision}: with piped
+   * stdin there are no keystrokes for an arrow menu to read.
    * Also uses a short-lived readline to avoid streaming interference.
    *
    * @param prompt - The question to display.
    * @returns True if approved.
    */
-  private askApproval(prompt: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-      rl.question(colors.warning(prompt), (answer) => {
-        rl.close();
-        resolve(answer.toLowerCase() === 'y' || answer.toLowerCase() === 'approve');
-      });
-    });
+  private async askApproval(prompt: string): Promise<boolean> {
+    const answer = await askText({ prompt: colors.warning(prompt) });
+    // Anything that is not an explicit yes is a refusal: this guards a write or
+    // a delete, so silence and nonsense must both fail closed.
+    const normalized = answer?.trim().toLowerCase() ?? '';
+    return normalized === 'y' || normalized === 'approve';
   }
 
   /**
@@ -742,18 +866,91 @@ export class ChatSession {
   }
 
   /**
-   * Displays the list of available slash commands.
+   * Handles the `/help` slash command.
+   *
+   * On an interactive terminal the command list is navigable and the chosen
+   * command runs immediately, so `/help` becomes the way to discover *and*
+   * reach every command rather than a wall of text to read and retype.
+   * Without a TTY it prints the static list via {@link showHelp}.
+   */
+  private async handleHelp(): Promise<void> {
+    if (!isInteractive()) { this.showHelp(); return; }
+
+    // Rows come from the registry, so a command added there appears here with
+    // no change and can never be listed but unreachable.
+    const listed = this.slashCommands.filter((command) => command.inPicker);
+
+    const outcome = await selectOutcome<SlashCommand>({
+      title: 'Slash commands',
+      choices: listed.map((command) => ({
+        label: command.name,
+        value: command,
+        hint: command.hint?.() ?? command.description,
+      })),
+    });
+
+    if (outcome.status === 'interrupted') { this.shutdown(); return; }
+    if (outcome.status !== 'selected') return;
+
+    await outcome.value.run();
+  }
+
+  /**
+   * Lists the commands a partially typed input could still become.
+   *
+   * Nothing calls this yet. It exists because it is the one primitive Tab
+   * completion and a `/` palette both need, and having it here means neither
+   * has to restate the command list — which is the whole point of the registry.
+   *
+   * @param partial - What the user has typed so far, including the slash.
+   * @returns The names of the commands still reachable.
+   */
+  public completions(partial: string): string[] {
+    return completeSlashCommand(this.slashCommands, partial).map((c) => c.name);
+  }
+
+  /**
+   * Tells the user a slash-prefixed word is not a command.
+   *
+   * Suggests the near matches rather than only reporting the failure, and never
+   * forwards the typo to the agent: that would spend a turn and a model call to
+   * answer a question the user did not ask.
+   *
+   * @param input - The unrecognised input.
+   */
+  private reportUnknownCommand(input: string): void {
+    const near = suggestSlashCommands(this.slashCommands, input);
+    console.log('');
+    console.log(colors.warning(`  Unknown command: ${input}`));
+    if (near.length > 0) {
+      console.log(colors.muted(`  Did you mean: ${near.map((c) => c.name).join(', ')}`));
+    } else {
+      console.log(colors.muted('  Type /help to see the available commands.'));
+    }
+    console.log('');
+  }
+
+  /**
+   * Displays the list of available slash commands as static text.
+   *
+   * Retained as the non-interactive path for {@link handleHelp}, and still the
+   * right output when the user only wants to read what exists.
    */
   private showHelp(): void {
-    const mentorStatus = this.mentorModeActive
-      ? colors.accent.bold(' [ON]')
-      : colors.muted(' [OFF]');
+    // Widest name, so the descriptions line up however many commands exist.
+    const width = Math.max(...this.slashCommands.map((c) => c.name.length));
+
     console.log('');
     console.log(colors.secondary.bold('  Available slash commands:'));
-    console.log(`  ${colors.primary.bold('/model')}   — Switch the active LLM model (Ollama / Vertex AI)`);
-    console.log(`  ${colors.primary.bold('/mentor')}${mentorStatus}  — Toggle deep mentor mode (trade-offs, root causes, Socratic gates)`);
-    console.log(`  ${colors.primary.bold('/help')}    — Show this help message`);
-    console.log(`  ${colors.muted('Ctrl+C')}   — Exit the session`);
+    for (const command of this.slashCommands) {
+      const badge = command.badge?.() ?? '';
+      const styledBadge = badge
+        ? (this.mentorModeActive ? colors.accent.bold(badge) : colors.muted(badge))
+        : '';
+      const name = colors.primary.bold(command.name.padEnd(width));
+      console.log(`  ${name}${styledBadge}  — ${command.description}`);
+    }
+    console.log(`  ${colors.muted('Ctrl+C'.padEnd(width))}  — Exit the session`);
     console.log('');
   }
 }

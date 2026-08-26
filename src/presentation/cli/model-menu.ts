@@ -10,12 +10,20 @@
  * Triggered by typing `/model` in the chat session.
  *
  * ## Design Decisions
- * - Uses raw `readline` (not `inquirer` or `prompts`) to stay consistent with
- *   the rest of the CLI and avoid adding heavy interactive UI dependencies.
+ * - No interactive UI dependency (`inquirer`, `prompts`) is used. The arrow-key
+ *   navigation comes from `./interactive-select`, which is built on Node's own
+ *   `readline` keypress decoder — see that module for the mechanism.
+ * - **Every level has two paths.** On a real terminal the user navigates with
+ *   the arrow keys. Without a TTY — piped input, CI, `< NUL` — there are no
+ *   keystrokes to read and an arrow prompt would hang forever, so the original
+ *   "type a number and press Enter" path is kept and used instead. It is a live
+ *   fallback, not dead code.
  * - `detectOllamaModels()` is called on-demand (not at startup) so there's no
  *   startup latency for Vertex AI users.
- * - The menu marks the currently active model with `(active)` to orient the user.
- * - Returns `null` if the user cancels (types 0 or empty) without switching.
+ * - The menu marks the currently active model with `(active)` to orient the user,
+ *   and the arrow prompt opens with the highlight already on it.
+ * - Returns `null` if the user cancels (Escape, Ctrl+C, or `0`/empty in the
+ *   numeric fallback) without switching.
  *
  * @example
  * ```ts
@@ -26,9 +34,10 @@
  * ```
  */
 
-import * as readline from 'readline';
 import { ModelSwitcher } from '../../core/config/model-switcher';
 import { colors, box } from './theme';
+import { isInteractive, selectOutcome, SelectChoice } from './interactive-select';
+import { askNumber as askNumberPrompt } from './prompts';
 import chalk from 'chalk';
 
 /**
@@ -39,6 +48,60 @@ export interface ModelMenuResult {
   model: string;
   /** True if the model was saved to .env successfully. */
   saved: boolean;
+}
+
+/**
+ * Presents one level of the menu, choosing the interaction style for the
+ * terminal at hand.
+ *
+ * On an interactive terminal this is an arrow-key prompt. Otherwise it prints
+ * the numbered list and reads a number, which is the only thing that can work
+ * when stdin is a pipe.
+ *
+ * Ctrl+C is treated as a cancellation of the menu rather than a session
+ * shutdown: the user returns to the chat prompt, where a second Ctrl+C ends the
+ * session through `ChatSession`'s own SIGINT handler.
+ *
+ * @typeParam T - The value carried by each row.
+ * @param title - Section heading for this level.
+ * @param choices - Rows to present. Separators are skipped by navigation and
+ *                  are not numbered in the fallback.
+ * @returns The chosen value, or `null` if the user cancelled.
+ */
+async function chooseFromList<T>(
+  title: string,
+  choices: SelectChoice<T>[],
+): Promise<T | null> {
+  if (isInteractive()) {
+    console.log('');
+    const outcome = await selectOutcome<T>({ title, choices });
+    return outcome.status === 'selected' ? outcome.value : null;
+  }
+
+  // ── Fallback: numbered list + typed number ─────────────────────────────────
+  printSection(title);
+
+  const selectable = choices.filter((c) => !c.separator && !c.disabled);
+  let numbered = 0;
+  for (const choice of choices) {
+    if (choice.separator) {
+      console.log('');
+      console.log(colors.secondary(`  ${choice.label}`));
+      continue;
+    }
+    numbered++;
+    const hint      = choice.hint   ? colors.muted(`  (${choice.hint})`) : '';
+    const activeTag = choice.active ? colors.accent(' ← active')         : '';
+    const label     = choice.disabled
+      ? colors.dim(choice.label)
+      : chalk.white(choice.label);
+    console.log(`  ${colors.primary.bold(`${numbered}.`)} ${label}${hint}${activeTag}`);
+  }
+  console.log('');
+
+  const picked = await askNumber('  Select: ', 0, selectable.length);
+  if (picked === null || picked === 0) return null;
+  return selectable[picked - 1].value as T;
 }
 
 /**
@@ -56,38 +119,32 @@ export async function showModelMenu(
   envFilePath?: string,
 ): Promise<ModelMenuResult | null> {
   console.log('');
-  printMenuBox('🔧  Switch LLM Model', [
-    '  Type the number and press Enter.',
-    '  Press 0 or Enter to cancel.',
-  ]);
+  printMenuBox('🔧  Switch LLM Model', interactiveHints());
   console.log('');
 
   // ── Step 1: Provider Selection ─────────────────────────────────────────────
-  const providers = [
-    { key: '1', label: '⚡  Vertex AI  (Gemini cloud — requires Google credentials)', value: 'vertex' },
-    { key: '2', label: '🦙  Ollama     (Local models — free, no API key needed)',     value: 'ollama' },
+  const isCurrentOllama = currentModel.startsWith('ollama:');
+  const providers: SelectChoice<'vertex' | 'ollama'>[] = [
+    {
+      label: '⚡  Vertex AI  (Gemini cloud — requires Google credentials)',
+      value: 'vertex',
+      active: !isCurrentOllama,
+    },
+    {
+      label: '🦙  Ollama     (Local models — free, no API key needed)',
+      value: 'ollama',
+      active: isCurrentOllama,
+    },
   ];
 
-  printSection('Select Provider');
-  const isCurrentOllama = currentModel.startsWith('ollama:');
-  providers.forEach((p) => {
-    const isActive = (p.value === 'ollama' && isCurrentOllama) ||
-                     (p.value === 'vertex' && !isCurrentOllama);
-    const activeTag = isActive ? colors.accent(' ← active') : '';
-    console.log(`  ${colors.primary.bold(p.key + '.')} ${chalk.white(p.label)}${activeTag}`);
-  });
-
-  const providerChoice = await askNumber('  Provider: ', 0, providers.length);
-  if (providerChoice === null || providerChoice === 0) {
+  const selectedProvider = await chooseFromList('Select Provider', providers);
+  if (selectedProvider === null) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selectedProvider = providers[providerChoice - 1];
-  console.log('');
-
   // ── Step 2: Model Selection ────────────────────────────────────────────────
-  if (selectedProvider.value === 'vertex') {
+  if (selectedProvider === 'vertex') {
     return showVertexModelMenu(currentModel, envFilePath);
   } else {
     return showOllamaModelMenu(currentModel, envFilePath);
@@ -113,37 +170,21 @@ async function showVertexModelMenu(
 ): Promise<ModelMenuResult | null> {
   const allEntries = ModelSwitcher.getVertexModels();
 
-  // Split into selectable models and separators so we can number correctly.
-  const selectableModels = allEntries.filter((m) => m.label !== '');
+  // An entry with an empty label is a family header, not a model. It becomes a
+  // separator: rendered, but skipped by navigation and never numbered.
+  const choices: SelectChoice<string>[] = allEntries.map((entry) =>
+    entry.label === ''
+      ? { label: entry.name, separator: true }
+      : { label: entry.label, value: entry.name, active: entry.name === currentModel },
+  );
 
-  printSection('Select Gemini Model');
-
-  // Track selectable index separately so separators don't consume numbers.
-  let selectableIdx = 0;
-  for (const entry of allEntries) {
-    if (entry.label === '') {
-      // Separator / family header — print without a number
-      console.log('');
-      console.log(colors.secondary(`  ${entry.name}`));
-    } else {
-      selectableIdx++;
-      const isActive = entry.name === currentModel;
-      const activeTag = isActive ? colors.accent(' ← active') : '';
-      console.log(
-        `  ${colors.primary.bold(`${selectableIdx}.`)} ${chalk.white(entry.label)}${activeTag}`,
-      );
-    }
-  }
-  console.log('');
-
-  const choice = await askNumber('  Model: ', 0, selectableModels.length);
-  if (choice === null || choice === 0) {
+  const selected = await chooseFromList('Select Gemini Model', choices);
+  if (selected === null) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selected = selectableModels[choice - 1];
-  return applyModelSelection(selected.name, envFilePath);
+  return applyModelSelection(selected, envFilePath);
 }
 
 // ── Private: Ollama model submenu ─────────────────────────────────────────────
@@ -179,29 +220,26 @@ async function showOllamaModelMenu(
   console.log(colors.accent(`✓ (${ollamaModels.length} found)`));
   console.log('');
 
-  printSection('Select Ollama Model');
-
   const currentBareModel = currentModel.startsWith('ollama:')
     ? currentModel.slice('ollama:'.length)
     : currentModel;
 
-  ollamaModels.forEach((m: { name: string; size: string }, i: number) => {
-    const isActive = m.name === currentBareModel;
-    const activeTag  = isActive ? colors.accent(' ← active') : '';
-    const sizeLabel  = colors.muted(`  (${m.size})`);
-    console.log(
-      `  ${colors.primary.bold(`${i + 1}.`)} ${chalk.white(m.name)}${sizeLabel}${activeTag}`,
-    );
-  });
+  const choices: SelectChoice<string>[] = ollamaModels.map(
+    (m: { name: string; size: string }) => ({
+      label: m.name,
+      value: m.name,
+      hint: m.size,
+      active: m.name === currentBareModel,
+    }),
+  );
 
-  const choice = await askNumber('  Model: ', 0, ollamaModels.length);
-  if (choice === null || choice === 0) {
+  const selected = await chooseFromList('Select Ollama Model', choices);
+  if (selected === null) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selected = ollamaModels[choice - 1];
-  const fullModelString = ModelSwitcher.toOllamaString(selected.name);
+  const fullModelString = ModelSwitcher.toOllamaString(selected);
   return applyModelSelection(fullModelString, envFilePath);
 }
 
@@ -238,6 +276,27 @@ function applyModelSelection(
 // ── Private: UI Helpers ───────────────────────────────────────────────────────
 
 /**
+ * Builds the header hint lines, which differ per interaction style.
+ *
+ * Telling a user on a pipe to "use the arrow keys" would be wrong, and telling
+ * a user on a real terminal to "type the number" would understate what they
+ * can do — so the hint is derived from the same check that picks the path.
+ *
+ * @returns The subtitle lines for the menu box.
+ */
+function interactiveHints(): string[] {
+  return isInteractive()
+    ? [
+        '  Use ↑↓ to move, Enter to select.',
+        '  Press Esc to cancel.',
+      ]
+    : [
+        '  Type the number and press Enter.',
+        '  Press 0 or Enter to cancel.',
+      ];
+}
+
+/**
  * Prints a framed menu box with a title and optional subtitle lines.
  *
  * @param title - The box title.
@@ -265,8 +324,10 @@ function printSection(label: string): void {
 /**
  * Prompts the user for a numeric input within a given range.
  *
- * Uses a short-lived readline (closed immediately after input) to avoid
- * interfering with the streaming output.
+ * Kept as a thin wrapper rather than inlined at the call site: it fixes the
+ * prompt styling for this menu, and it is the name the fallback path has always
+ * been documented under. The readline lifetime and the range validation live in
+ * `./prompts` (`askNumber`), so they are not re-implemented here.
  *
  * @param prompt - The prompt string to display.
  * @param min - Minimum valid value (inclusive).
@@ -274,23 +335,5 @@ function printSection(label: string): void {
  * @returns The parsed number, or `null` if input was empty/invalid.
  */
 function askNumber(prompt: string, min: number, max: number): Promise<number | null> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    rl.question(colors.primary.bold(prompt), (answer) => {
-      rl.close();
-      const trimmed = answer.trim();
-      if (!trimmed) { resolve(null); return; }
-      const num = parseInt(trimmed, 10);
-      if (isNaN(num) || num < min || num > max) {
-        console.log(colors.warning(`  Invalid choice. Please enter a number between ${min} and ${max}.`));
-        resolve(null);
-      } else {
-        resolve(num);
-      }
-    });
-  });
+  return askNumberPrompt(colors.primary.bold(prompt), min, max);
 }

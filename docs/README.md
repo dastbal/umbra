@@ -6,6 +6,9 @@ CLI usage, configuration, security behavior, and migration notes.
 - [Architecture](ARCHITECTURE.md) explains the active Deep-agent design and its
   historical context.
 - [Architecture decisions](adr/) record durable technical decisions.
+- [Deferred work](deferred-work.md) records work that was scoped and
+  deliberately not implemented, including any open defect found while scoping
+  it. Read it before proposing a feature that may already be planned there.
 - [Migrating to Umbra 2.0](MIGRATING-TO-UMBRA.md) maps the former package and
   command names to the public Umbra identity.
 - [LangChain reference index](langchain-llms-index.md) is reference material,
