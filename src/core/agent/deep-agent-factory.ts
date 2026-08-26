@@ -776,6 +776,7 @@ Keyword → Skill map (check in this order):
 - "research done / handoff / plan for coder"           → \`skills/research-output-format.md\`
 - "import / boundary / layer / ORM / leak / architecture check" → \`skills/validate-architecture-boundaries.md\`
 - "mentor / teach me / explain why / trade-off / learning" → \`skills/mentor-mode.md\`
+- "ADR / decision record / document this decision / supersede" → \`skills/document-decision.md\`
 
 If no keyword matches, call \`list_files("skills/")\` to discover available skills.
 Load the matching skill with \`safe_read_file("skills/<name>.md")\` and follow it precisely.
@@ -786,6 +787,12 @@ ARCHITECTURE DECISION INDEX:
 - Only when a prior architecture decision, model policy, safety boundary, or project history is relevant,
   call \`list_adrs\` first. It returns only paths, title, status, and compact context.
 - Then use \`safe_read_file\` on the one ADR that is relevant to the task; never load all ADRs.
+- WRITING one is conditional, never automatic. Load \`skills/document-decision.md\` and record a
+  decision in this project's \`docs/adr/\` only when the finished work moved a layer boundary,
+  a persistence or migration strategy, an auth/safety boundary, a public contract (DTO, interface,
+  endpoint), a provider or library choice, or accepted a knowing trade-off in cost or consistency.
+- Routine refactors, renames, bug fixes with one obvious answer, and reversible local choices get
+  NO ADR. Never write a record to satisfy a format; a folder of trivial ADRs buries the real ones.
 
 🔒 FILE PROTECTION LAW:
 These files are NEVER to be modified by the agent under any circumstances:

@@ -22,6 +22,7 @@ import { resolveModelForSession } from "../core/config/model-resolver";
 import { Command as LangGraphCommand } from "@langchain/langgraph";
 import { AgentDB } from "../core/state/db";
 import { ensureAgentConfig, loadAgentConfig } from "../core/config/agent-config";
+import { ensureWorkspaceSkills } from "../core/config/workspace-scaffold";
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
 import { loadTurnAudits, summarizeTurnAudits } from '../core/observability';
 import { LLMProvider } from '../core/llm/provider';
@@ -346,7 +347,9 @@ authProgram
 
 program
   .command("init")
-  .description("Create the idempotent project-local multi-agent policy")
+  .description(
+    "Create the idempotent project-local multi-agent policy, working guides, and decision-record index",
+  )
   .action(() => {
     try {
       const result = ensureAgentConfig(process.cwd());
@@ -360,6 +363,25 @@ program
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       log.error(`Could not initialize agent policy: ${message}`);
+      return;
+    }
+
+    try {
+      const scaffold = ensureWorkspaceSkills(process.cwd());
+      log.sys(
+        `Working guides: ${scaffold.installedSkills.length} installed, ` +
+          `${scaffold.preservedSkills.length} preserved at ${scaffold.skillsPath}`,
+      );
+      log.sys(
+        scaffold.createdAdrIndex
+          ? `Decision-record index created: ${scaffold.adrPath}`
+          : `Decision-record index already exists: ${scaffold.adrPath}`,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(
+        `Agent policy is ready, but the working guides could not be installed: ${message}`,
+      );
     }
   });
 
