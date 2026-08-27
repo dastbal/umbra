@@ -42,6 +42,21 @@ export interface DelegationLedger {
   readonly questionsAsked: Map<DelegationId, number>;
   /** Delegations opened per role, used to mint identifiers. */
   readonly delegationCounts: Map<GuardedSubagent, number>;
+  /**
+   * The delegation currently running, or `undefined` between delegations.
+   *
+   * A subagent knows nothing about the ledger: it runs in its own graph and
+   * receives only its rendered order. So the components that act on its behalf
+   * — its budget middleware and `ask_delegator` — find out which delegation
+   * they belong to by reading this pointer, which the orchestration guard sets
+   * before handing control over and clears when the delegate returns.
+   *
+   * A single pointer is sufficient because nested delegation is disabled
+   * (`maxDelegationDepth: 1`) and the orchestrator delegates one subagent at a
+   * time. Should parallel delegation ever be enabled, this must become a
+   * per-run association or the two delegates will spend each other's budget.
+   */
+  activeDelegationId?: DelegationId;
 }
 
 /**

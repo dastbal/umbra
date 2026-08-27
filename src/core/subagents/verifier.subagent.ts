@@ -5,7 +5,10 @@ import {
   listFilesTool,
   executeTestsTool,
   integrityCheckTool,
+  listAdrsTool,
+  askDelegatorTool,
 } from '../tools';
+import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-budget.middleware';
 
 /** System prompt for the read-only verification stage. */
 const VERIFIER_SYSTEM_PROMPT = `You are a Verification Engineer for a NestJS TypeScript project.
@@ -15,7 +18,13 @@ Inspect the files named by the Supervisor, run the relevant Jest tests, and run 
 integrity check. Compare the evidence with the Researcher handoff and report only a compact JSON
 artifact matching the response schema. Mark passed only when both testsPassed and
 typeCheckPassed are true. Put every unresolved issue in remainingIssues and state one nextAction.
-Do not include a transcript or large logs.`;
+Do not include a transcript or large logs.
+
+Your order is the whole brief: you cannot see the conversation that produced it. When it does
+not settle what counts as verified, call ask_delegator rather than deciding for yourself.
+Consult list_adrs when a decision record governs what the change was allowed to do. Your tool
+attempts come from one budget shared by the whole turn; if you run out, report what you actually
+ran and put the rest in remainingIssues.`;
 
 const baseVerifierSubAgent: SubAgent = {
   name: 'verifier',
@@ -25,7 +34,15 @@ const baseVerifierSubAgent: SubAgent = {
   systemPrompt: VERIFIER_SYSTEM_PROMPT,
   responseFormat: verificationArtifactSchema,
   // ADR: Cast to any[] — DynamicStructuredTool type boundary (dual @langchain/core)
-  tools: [safeReadFileTool, listFilesTool, executeTestsTool, integrityCheckTool] as any[],
+  tools: [
+    safeReadFileTool,
+    listFilesTool,
+    executeTestsTool,
+    integrityCheckTool,
+    listAdrsTool,
+    askDelegatorTool,
+  ] as any[],
+  middleware: [createSubagentBudgetMiddleware()] as any[],
 };
 
 /**

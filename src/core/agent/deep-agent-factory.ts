@@ -281,7 +281,10 @@ export class DeepAgentFactory {
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      middleware: [createOrchestrationGuard(agentConfig.limits.maxRetries)] as any[],
+      middleware: [createOrchestrationGuard({
+        maxRetries: agentConfig.limits.maxRetries,
+        maxAgentTurns: agentConfig.limits.maxAgentTurns,
+      })] as any[],
       subagents: [
         createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
         createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
@@ -953,16 +956,48 @@ before it enters this graph. Obey it exactly:
 
 For implementation tasks, follow this exact sequence:
 1. Call \`write_todos\` with the full plan (Analysis → Implementation → Verification).
-2. Call \`task\` with subagent "researcher":
-   - Provide full context: what to build, existing patterns to follow, constraints.
-   - The researcher returns a compact JSON handoff.
-3. Call \`task\` with subagent "coder":
-   - Pass the COMPLETE compact handoff from the researcher.
-   - The coder implements, tests, and returns results.
+2. Call \`task\` with subagent "researcher", passing a complete ORDER (see below).
+3. Call \`task\` with subagent "coder", passing a complete ORDER that includes the
+   researcher handoff in \`knownContext\`.
 4. Call \`task\` with subagent "verifier" after the Coder finishes.
    - The verifier is read-only and runs focused tests plus the TypeScript integrity check.
 5. If verification fails, allow at most the configured correction cycles, then call the verifier again.
 6. Report to the user: what was built, decisions and trade-offs, changed files, evidence, risks, and next steps.
+
+📦 EVERY DELEGATION CARRIES ITS ORDER — THIS IS NOT OPTIONAL
+A subagent cannot see this conversation. It receives one message: the \`description\`
+you write. Whatever you leave out, it cannot look up — it can only guess, and a guessing
+delegate explores until its budget is gone. Never send a bare instruction such as
+"list the files in skills/".
+
+Put a JSON object in \`description\`, with exactly these fields:
+
+{
+  "userRequest": "<the request of the user, copied word for word, not paraphrased>",
+  "objective": "<what this delegate must achieve>",
+  "knownContext": ["<what you already know, so it is not rediscovered>"],
+  "inScope": ["<what belongs to this delegation>"],
+  "outOfScope": ["<what must NOT be explored — this is what bounds the cost>"],
+  "definitionOfDone": "<the artifact you expect back>",
+  "conventions": ["<project rules and decision records that constrain the work>"]
+}
+
+An order missing \`userRequest\`, \`objective\`, \`definitionOfDone\`, \`knownContext\` or
+\`inScope\` is refused and handed back to you to repair. Repair it and delegate again.
+
+\`outOfScope\` is not required, but it is the field that saves the most budget. Fill it
+when you genuinely know a boundary; never invent one, because the delegate will obey it.
+
+🎚️ BUDGETS AND PARTIAL RESULTS
+Each delegation is granted a share of one budget shared by this whole turn, and a
+reserve is held back so you can always answer. Consequences you must handle:
+- A delegate may return \`"status":"partial"\` with a populated \`unknowns\` list. That is a
+  real result, not a failure. Never treat a partial research handoff as approval to
+  implement: report what is known and what is missing.
+- If a delegation is refused for lack of budget, do NOT delegate again. Answer with what
+  has been established and state plainly what was not investigated.
+- A delegate may ask a question through \`ask_delegator\`. It is answered from the order you
+  wrote, or put to the operator. The better your order, the fewer interruptions.
 
 🤖 AVAILABLE SUBAGENTS:
 - **researcher**: Analyzes codebase, reads files, returns implementation plan. Use FIRST.

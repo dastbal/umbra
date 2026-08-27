@@ -29,6 +29,7 @@ import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
 import { isInteractive, selectOutcome, type SelectChoice } from './interactive-select';
 import { askText } from './prompts';
+import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
 import { canEditLive, editLine, type Suggestion } from './line-editor';
 import {
   buildSlashCommands,
@@ -479,6 +480,13 @@ export class ChatSession {
     const interrupt = (interrupts as any[])[0]?.value;
     if (!interrupt) return;
 
+    // A question from a delegate is not an approval request. Without this
+    // branch it would render as one — see handleDelegateQuestion.
+    if (interrupt.kind === DELEGATE_QUESTION_KIND) {
+      await this.handleDelegateQuestion(interrupt);
+      return;
+    }
+
     const actionRequests: any[] = interrupt.actionRequests ?? [];
     const reviewConfigs: any[]  = interrupt.reviewConfigs ?? [];
     const decisions: any[] = [];
@@ -501,8 +509,72 @@ export class ChatSession {
     }
 
     // Resume the agent with decisions (streaming continues from resumed state)
+    await this.resumeAgent({ decisions });
+  }
+
+  /**
+   * Renders a subagent question and resumes the run with the answer.
+   *
+   * A question is not an approval, and before this branch existed every
+   * interrupt was read as one — `actionRequests` plus `reviewConfigs`. Without
+   * the discriminator a delegate asking what "improve the skills" meant would
+   * have rendered as an authorization to perform an action, which is a worse
+   * outcome than not having the feature.
+   *
+   * Cancelling is deliberately not an answer. Escape on the security gate means
+   * reject; here it means the operator declined to answer, and the delegate is
+   * told exactly that so it records an unknown instead of inventing a reply.
+   *
+   * @param request - The question raised by a delegate.
+   */
+  private async handleDelegateQuestion(request: {
+    question: string;
+    options?: string[];
+  }): Promise<void> {
+    this.renderer.clearThinking();
+    process.stdout.write(`\n  ${colors.accent('?')} ${chalk.bold('A subagent is asking:')}\n`);
+    process.stdout.write(`  ${request.question}\n\n`);
+
+    const answer = await this.readAnswer(request.options);
+
+    if (answer === undefined) {
+      process.stdout.write(colors.muted('  — not answered; the subagent will record it as unknown\n'));
+    }
+
+    await this.resumeAgent({ answer });
+  }
+
+  /**
+   * Collects the operator answer, as a menu when choices were offered.
+   *
+   * @param options - Choices supplied by the delegate, when it supplied any.
+   * @returns The answer, or `undefined` when the operator did not give one.
+   */
+  private async readAnswer(options?: string[]): Promise<string | undefined> {
+    if (options && options.length > 0 && isInteractive()) {
+      const outcome = await selectOutcome<string>({
+        title: 'Answer',
+        choices: options.map((option): SelectChoice<string> => ({ label: option, value: option })),
+      });
+      return outcome.status === 'selected' ? outcome.value : undefined;
+    }
+
+    const typed = await askText({ prompt: '  Your answer (empty to skip): ' });
+    const trimmed = typed?.trim();
+    return trimmed === undefined || trimmed === '' ? undefined : trimmed;
+  }
+
+  /**
+   * Resumes a suspended run and keeps rendering its output.
+   *
+   * Shared by the approval gate and the question channel so both resume through
+   * one code path; two copies of a streaming loop is how the two drift apart.
+   *
+   * @param payload - The value handed back to the waiting `interrupt()`.
+   */
+  private async resumeAgent(payload: unknown): Promise<void> {
     const resumeStream = this.agent.streamEvents(
-      new LangGraphCommand({ resume: { decisions } }),
+      new LangGraphCommand({ resume: payload }),
       { ...this.graphConfig, version: 'v2' },
     );
 

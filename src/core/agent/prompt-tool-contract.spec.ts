@@ -9,6 +9,9 @@ jest.mock('../llm/provider', () => ({
 
 import * as tools from '../tools';
 import { DeepAgentFactory } from './deep-agent-factory';
+import { researcherSubAgent } from '../subagents/researcher.subagent';
+import { coderSubAgent } from '../subagents/coder.subagent';
+import { verifierSubAgent } from '../subagents/verifier.subagent';
 
 /**
  * Every tool name the codebase knows about, read from the tool objects rather
@@ -112,5 +115,80 @@ describe('the deep prompt only names tools the model can actually call', () => {
     // If `task` ever leaves this prompt the routing instructions are dead text;
     // if it leaves the declarations, ADR-013 happens again.
     expect(internals.buildSystemPrompt('C:\\project', 'orchestrator')).toContain('task');
+  });
+});
+
+/**
+ * The same check, applied where nobody was looking.
+ *
+ * `docs/deferred-work.md` recorded the gap under *"Harness tool exclusions
+ * never reach the subagents"*, in a sentence worth repeating: **the set of
+ * tools a model can call is assembled in more than one place, and only one of
+ * those places is verified.** The check above verifies the `simple` agent. A
+ * subagent is a separate graph with its own declarations, and until now nothing
+ * checked what its prompt promised against what it holds.
+ *
+ * This closes the direction that matters — a prompt instructing a delegate to
+ * call something it does not have. It does not close the opposite direction,
+ * where deepagents' own middleware hands a subagent a tool nobody declared;
+ * that needs a runtime observation and stays recorded as deferred work.
+ */
+describe('a subagent prompt only names tools that subagent declares', () => {
+  const SUBAGENTS = [researcherSubAgent, coderSubAgent, verifierSubAgent];
+
+  /**
+   * Reports whether a prompt names a tool in order to forbid it.
+   *
+   * A prohibition and an instruction look identical to a regex, which is why
+   * the check above is scoped to one mode. Rather than excusing such a mention
+   * with an exception list — five entries is how a guard becomes decoration —
+   * this demands the prohibiting form itself. The Coder is told to use
+   * safe_write_file "(not write_file)" precisely because deepagents contributes
+   * write_file and it breaks on Windows paths; deleting that sentence to satisfy
+   * a test would remove a real safeguard.
+   */
+  const forbiddenInPrompt = (prompt: string, name: string): boolean =>
+    new RegExp('\\bnot\\s+`?' + name + '\\b').test(prompt);
+
+  it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
+    'the %s prompt advertises nothing it cannot call',
+    (_name, subagent) => {
+      const declared = [
+        ...(subagent.tools ?? []).map((tool) => (tool as { name: string }).name),
+        // deepagents contributes the todo list to every subagent.
+        'write_todos',
+      ];
+      const undeclared = toolsNamedIn(subagent.systemPrompt)
+        .filter((name) => !declared.includes(name))
+        .filter((name) => !forbiddenInPrompt(subagent.systemPrompt, name));
+
+      expect(undeclared).toEqual([]);
+    },
+  );
+
+  it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
+    'the %s can ask about its own order instead of guessing',
+    (_name, subagent) => {
+      const declared = (subagent.tools ?? []).map((tool) => (tool as { name: string }).name);
+
+      expect(declared).toContain('ask_delegator');
+      expect(subagent.systemPrompt).toContain('ask_delegator');
+    },
+  );
+
+  it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
+    'the %s is held to the budget its order granted',
+    (_name, subagent) => {
+      expect(subagent.middleware?.some((one) => one.name === 'SubagentBudget')).toBe(true);
+    },
+  );
+
+  it('lets the agent that writes code consult the decision records', () => {
+    // list_adrs was declared only by the Researcher, so the Coder wrote into a
+    // project whose recorded decisions it could not read — including a consumer
+    // project that received docs/adr/ from `umbra init`.
+    const coderTools = (coderSubAgent.tools ?? []).map((tool) => (tool as { name: string }).name);
+
+    expect(coderTools).toContain('list_adrs');
   });
 });

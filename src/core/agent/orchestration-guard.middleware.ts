@@ -1,3 +1,4 @@
+import { ToolMessage } from '@langchain/core/messages';
 import { createMiddleware } from 'langchain';
 import {
   assertDelegationAllowed,
@@ -6,11 +7,67 @@ import {
   type GuardedSubagent,
   type VerificationStatus,
 } from './orchestration-policy';
+import {
+  assertMandateComplete,
+  IncompleteMandateError,
+  MANDATE_TEMPLATE,
+  parseMandateOrder,
+  renderMandate,
+  type Mandate,
+} from './delegation/mandate';
+import {
+  currentTurn,
+  nextDelegationId,
+  openTurn,
+  recordFinding,
+  type DelegationLedger,
+} from './delegation/delegation-registry';
+import { classifyDelegationOutcome } from './delegation/delegation-outcome';
 
 const ROUTE_MARKER = '[ORCHESTRATION_ROUTE';
 
-/** Creates a LangGraph middleware that enforces delegated workflow transitions. */
-export function createOrchestrationGuard(maxRetries: number) {
+/**
+ * Questions a delegate may put to the operator before it must answer with what
+ * it has.
+ *
+ * Two, deliberately. `docs/deferred-work.md` recorded the hazard before the
+ * channel existed: the risk is not the price of a question but a model that
+ * asks about everything, spending a turn each time. That limit has never been
+ * exercised in production and must be treated as unproven until a trace shows
+ * how a delegate actually uses it.
+ */
+export const DEFAULT_QUESTION_ALLOWANCE = 2;
+
+/** Limits the orchestration guard enforces for one interactive turn. */
+export interface GuardLimits {
+  /** Maximum correction cycles permitted after verification. */
+  maxRetries: number;
+  /** Tool attempts available to the whole turn, shared by every delegate. */
+  maxAgentTurns: number;
+}
+
+/**
+ * Creates a LangGraph middleware that enforces delegated workflow transitions.
+ *
+ * The guard now does four things at the moment of delegation, in this order:
+ *
+ * 1. **Checks the transition** against the Researcher → Coder → Verifier
+ *    lifecycle, as it always did.
+ * 2. **Checks the order.** A delegate sees only the `description` string, so a
+ *    delegation that does not carry the user's request, the objective and what
+ *    is already known is refused — and refused *repairably*, as a tool result
+ *    holding the template, not as an exception that ends the turn.
+ * 3. **Grants a budget** from the turn's single pool, and records the mandate
+ *    where the delegate's own middleware and `ask_delegator` can find it.
+ * 4. **Hands the delegate prose instead of JSON.** The orchestrator writes the
+ *    order as JSON because that is what a model emits reliably inside a string
+ *    field; the delegate receives headed prose because that is what a model
+ *    reads. The guard is the translator between the two.
+ *
+ * @param limits - Retry and budget limits for the turn.
+ * @returns Middleware suitable for `createDeepAgent`.
+ */
+export function createOrchestrationGuard(limits: GuardLimits) {
   return createMiddleware({
     name: 'OrchestrationGuard',
     wrapToolCall: async (request, handler) => {
@@ -27,10 +84,42 @@ export function createOrchestrationGuard(maxRetries: number) {
       const decision = evaluateDelegation(
         readDelegationHistory(request.state.messages, request.toolCall.id),
         subagent,
-        maxRetries,
+        limits.maxRetries,
       );
       assertDelegationAllowed(decision);
-      return handler(request);
+
+      const ledger = openTurnForRequest(request, limits.maxAgentTurns);
+      if (!ledger) return handler(request);
+
+      const order = parseMandateOrder(readDescription(request.toolCall.args));
+      try {
+        assertMandateComplete(order);
+      } catch (error: unknown) {
+        if (!(error instanceof IncompleteMandateError)) throw error;
+        return refuseRepairably(request.toolCall.id, error);
+      }
+
+      const delegationId = nextDelegationId(ledger, subagent);
+      const granted = ledger.pool.allocate(delegationId, subagent);
+      if (granted === 0) {
+        return refuseForBudget(request.toolCall.id, subagent);
+      }
+
+      const mandate: Mandate = {
+        ...order,
+        budget: { toolCalls: granted, questions: DEFAULT_QUESTION_ALLOWANCE },
+      };
+      ledger.mandates.set(delegationId, mandate);
+      ledger.activeDelegationId = delegationId;
+
+      try {
+        const result = await handler(withRenderedMandate(request, mandate, ledger));
+        harvestFindings(ledger, result);
+        return result;
+      } finally {
+        ledger.pool.release(delegationId);
+        ledger.activeDelegationId = undefined;
+      }
     },
   });
 }
@@ -50,13 +139,22 @@ export function createOrchestrationGuard(maxRetries: number) {
  * already ran for this request"* — with no researcher having run. The
  * orchestrator could not delegate at all.
  *
- * Counting *attempts* rather than completed calls is deliberate and unchanged: a
- * subagent that crashed without producing a result must not be retried forever.
- * Only the call under authorization is skipped.
+ * ## What counts as an attempt — reversed on purpose, 2026-08-27
  *
- * A tool call always carries an id — a result is a `ToolMessage` that must
- * reference `tool_call_id`, so a call without one could never be answered — which
- * is why there is no fallback path here.
+ * This function used to count every delegation *request*, whether or not it
+ * produced anything, and a test asserted that semantic so a crashed subagent
+ * could not be retried forever. That protection had a cost nobody had measured:
+ * a Researcher killed by the recursion limit had already spent the turn's only
+ * researcher slot, so the orchestrator asking again was told *"Researcher
+ * already ran for this request"* — with no research in hand and no way forward.
+ * That dead end was observed live.
+ *
+ * Now only a delegation that **decided** something spends an attempt: one that
+ * returned an artifact, or returned a partial handoff. A delegation that
+ * produced no result at all did not decide anything and does not count. The
+ * runaway-retry concern the old rule protected against is now held by the
+ * budget pool instead: every retry is granted from the same turn budget, so a
+ * failure that repeats runs out of money without needing a counter of its own.
  *
  * @returns The delegation state for the current turn.
  */
@@ -64,9 +162,9 @@ export function readDelegationHistory(
   messages: readonly unknown[],
   inFlightToolCallId?: string,
 ): DelegationHistory {
-  const currentTurn = messages.slice(findCurrentTurnStart(messages));
-  const text = currentTurn.map(toText).join('\n');
-  const artifacts = readDelegationArtifacts(currentTurn, inFlightToolCallId);
+  const currentTurnMessages = messages.slice(findCurrentTurnStart(messages));
+  const text = currentTurnMessages.map(toText).join('\n');
+  const artifacts = readDelegationArtifacts(currentTurnMessages, inFlightToolCallId);
 
   return {
     routeRequiresImplementation: !text.includes('implementation=false]'),
@@ -113,6 +211,100 @@ export function describeSubagentRejection(args: unknown): string {
     + `Only ${allowed} are allowed.`;
 }
 
+/**
+ * Identifies the turn a delegation belongs to, from persisted messages.
+ *
+ * Two independent quantities are combined because neither is sufficient alone:
+ * the position of the route marker is stable within a turn but is zero when no
+ * marker exists, and the count of user instructions grows once per turn but
+ * says nothing about routing. Together they change between turns and hold still
+ * inside one, which is all a budget scope needs.
+ *
+ * @param messages - The thread's persisted messages.
+ * @returns A key identifying the current turn.
+ */
+export function readTurnKey(messages: readonly unknown[]): string {
+  const humanMessages = messages.filter(isHumanMessage).length;
+  return `${findCurrentTurnStart(messages)}:${humanMessages}`;
+}
+
+function openTurnForRequest(request: unknown, totalBudget: number): DelegationLedger | undefined {
+  const typed = request as { runtime?: { configurable?: Record<string, unknown> }; state?: { messages?: unknown[] } };
+  const threadId = typed.runtime?.configurable?.['thread_id'];
+  if (typeof threadId !== 'string') return currentTurn(undefined);
+
+  return openTurn(threadId, readTurnKey(typed.state?.messages ?? []), totalBudget);
+}
+
+function readDescription(args: unknown): unknown {
+  return isRecord(args) ? args.description : undefined;
+}
+
+/**
+ * Replaces the JSON order with the prose the delegate will actually read.
+ *
+ * The findings gathered earlier in this turn are appended, so a delegate never
+ * repeats an investigation another delegate already completed — the cheapest
+ * budget saving available, since it costs nothing to hand over.
+ */
+function withRenderedMandate(request: unknown, mandate: Mandate, ledger: DelegationLedger): never {
+  const typed = request as { toolCall: { args?: Record<string, unknown> } };
+  const inherited = ledger.findings.length > 0
+    ? `\n\n## Already established this turn — inherit it, do not re-verify\n\n`
+      + ledger.findings.map((finding) => `- ${finding}`).join('\n')
+    : '';
+
+  return {
+    ...(request as object),
+    toolCall: {
+      ...typed.toolCall,
+      args: { ...typed.toolCall.args, description: `${renderMandate(mandate)}${inherited}` },
+    },
+  } as never;
+}
+
+function refuseRepairably(toolCallId: string | undefined, error: IncompleteMandateError): ToolMessage {
+  return new ToolMessage({
+    tool_call_id: toolCallId ?? '',
+    content:
+      `${error.message}\n\nIssue the order again with this shape, as JSON, in 'description':\n\n`
+      + `${MANDATE_TEMPLATE}`,
+  });
+}
+
+function refuseForBudget(toolCallId: string | undefined, subagent: GuardedSubagent): ToolMessage {
+  return new ToolMessage({
+    tool_call_id: toolCallId ?? '',
+    content:
+      `This turn has no budget left to delegate to the ${subagent}; only the reserve remains. `
+      + `Do not delegate again. Answer now with what has been established, and state plainly what `
+      + `was not investigated.`,
+  });
+}
+
+/**
+ * Copies a returned artifact's findings into the turn's shared memory.
+ *
+ * Tolerant by design: an artifact that cannot be read yields nothing and the
+ * delegation is unaffected. Failing a completed delegation over unreadable
+ * bookkeeping would discard work that already succeeded.
+ */
+function harvestFindings(ledger: DelegationLedger, result: unknown): void {
+  const text = toText(result);
+  const start = text.indexOf('{');
+  if (start === -1) return;
+
+  try {
+    const parsed = JSON.parse(text.slice(start)) as { findings?: unknown };
+    if (!Array.isArray(parsed.findings)) return;
+    for (const finding of parsed.findings) {
+      if (typeof finding === 'string') recordFinding(ledger, finding);
+    }
+  } catch {
+    return;
+  }
+}
+
 function getGuardedSubagent(args: unknown): GuardedSubagent | undefined {
   if (!isRecord(args) || typeof args.subagent_type !== 'string') return undefined;
   const normalized = args.subagent_type.trim().toLowerCase();
@@ -126,6 +318,12 @@ function findCurrentTurnStart(messages: readonly unknown[]): number {
     if (toText(messages[index]).includes(ROUTE_MARKER)) return index;
   }
   return 0;
+}
+
+function isHumanMessage(message: unknown): boolean {
+  if (!isRecord(message)) return false;
+  if (message.type === 'human') return true;
+  return typeof message.getType === 'function' && message.getType() === 'human';
 }
 
 interface DelegationArtifacts {
@@ -145,12 +343,14 @@ function readDelegationArtifacts(
     verifierResults: [],
   };
   const taskById = new Map<string, GuardedSubagent>();
+  const resultStatusById = readResultStatuses(messages);
 
   for (const message of messages) {
     for (const taskCall of readTaskCalls(message, inFlightToolCallId)) {
+      if (taskCall.id) taskById.set(taskCall.id, taskCall.subagent);
+      if (!spendsAnAttempt(taskCall.id, resultStatusById)) continue;
       if (taskCall.subagent === 'researcher') artifacts.researcherCalls += 1;
       if (taskCall.subagent === 'coder') artifacts.coderCalls += 1;
-      if (taskCall.id) taskById.set(taskCall.id, taskCall.subagent);
     }
 
     const result = readTaskResult(message);
@@ -164,6 +364,33 @@ function readDelegationArtifacts(
     }
   }
   return artifacts;
+}
+
+/**
+ * Decides whether a recorded delegation spent one of its role's attempts.
+ *
+ * A call with no result at all is a delegation that died without deciding
+ * anything — the recursion limit, a rejected provider request, a transport
+ * failure. It does not count. See {@link readDelegationHistory} for why this
+ * reverses the earlier rule.
+ */
+function spendsAnAttempt(
+  toolCallId: string | undefined,
+  resultStatusById: Map<string, string | undefined>,
+): boolean {
+  if (toolCallId === undefined) return true;
+  if (!resultStatusById.has(toolCallId)) return false;
+
+  return classifyDelegationOutcome({ artifactStatus: resultStatusById.get(toolCallId) }).consumesAttempt;
+}
+
+function readResultStatuses(messages: readonly unknown[]): Map<string, string | undefined> {
+  const statuses = new Map<string, string | undefined>();
+  for (const message of messages) {
+    if (!isRecord(message) || typeof message.tool_call_id !== 'string') continue;
+    statuses.set(message.tool_call_id, readArtifactStatus(toText(message)));
+  }
+  return statuses;
 }
 
 interface TaskCall {
