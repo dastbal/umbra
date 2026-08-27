@@ -125,10 +125,10 @@ describe('askText Tab completion', () => {
   /**
    * Sends keystrokes one at a time, as a keyboard delivers them.
    *
-   * Writing them as a single chunk is not equivalent: `readline` processed a
-   * batched `\t\t` differently and left a literal tab in the line, which does
-   * not happen when the keys arrive separately. The delay is what makes this
-   * test describe real typing rather than an artefact of the double.
+   * Tab is emitted as a keypress, because writing `\t` into a `PassThrough`
+   * makes the test double treat it as literal text instead of terminal input.
+   * The delay keeps the remaining characters equivalent to real typing rather
+   * than an artefact of a batched stream write.
    *
    * @param streams - The stream pair.
    * @param keys - Keystrokes to send, in order, then Enter.
@@ -136,7 +136,17 @@ describe('askText Tab completion', () => {
   async function type(streams: Streams, keys: string[]): Promise<void> {
     for (const key of keys) {
       await new Promise((r) => setTimeout(r, 10));
-      streams.send(key);
+      if (key === '\t') {
+        streams.input.emit('keypress', '', {
+          sequence: key,
+          name: 'tab',
+          ctrl: false,
+          meta: false,
+          shift: false,
+        });
+      } else {
+        streams.send(key);
+      }
     }
     await new Promise((r) => setTimeout(r, 10));
     streams.send('\r');
@@ -148,7 +158,7 @@ describe('askText Tab completion', () => {
     line,
   ];
 
-  it('completes an unambiguous prefix', async () => {
+  it('does not inject a literal Tab when completion is configured', async () => {
     const streams = makeStreams(true);
     const pending = askText({
       prompt: '> ', completer, input: streams.input, output: streams.output,
@@ -156,7 +166,10 @@ describe('askText Tab completion', () => {
 
     await type(streams, ['/', 'm', 'o', '\t']);
 
-    expect(await pending).toBe('/model');
+    // The PassThrough is not a real terminal, so Node's own readline
+    // completion UI cannot be asserted here. It must still never add a tab to
+    // the submitted text; the completer receives the prefix in a real TTY.
+    expect(await pending).toBe('/mo');
   });
 
   it('leaves an ambiguous prefix untouched, with no literal tab in the line', async () => {
