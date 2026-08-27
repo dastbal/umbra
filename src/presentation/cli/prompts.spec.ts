@@ -166,10 +166,12 @@ describe('askText Tab completion', () => {
 
     await type(streams, ['/', 'm', 'o', '\t']);
 
-    // The PassThrough is not a real terminal, so Node's own readline
-    // completion UI cannot be asserted here. It must still never add a tab to
-    // the submitted text; the completer receives the prefix in a real TTY.
-    expect(await pending).toBe('/mo');
+    // Node's readline completes this prefix on some supported Node releases
+    // and leaves it intact on others when driven by this stream double. Both
+    // are valid harness outcomes; a literal Tab in submitted text is not.
+    const answer = await pending;
+    expect(['/mo', '/model']).toContain(answer);
+    expect(answer).not.toContain('\t');
   });
 
   it('leaves an ambiguous prefix untouched, with no literal tab in the line', async () => {
