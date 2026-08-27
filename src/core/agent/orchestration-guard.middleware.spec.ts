@@ -406,3 +406,100 @@ describe('a suspended delegation is paused, not finished', () => {
     expect(currentTurn('thread-suspend')?.activeDelegationId).toBeUndefined();
   });
 });
+
+describe('a model that flattens the order into the call', () => {
+  const LIMITS = { maxRetries: 2, maxAgentTurns: 50 };
+
+  const routeEnvelope = {
+    content: '[ORCHESTRATION_ROUTE trusted=true complexity=medium implementation=true]\n'
+      + 'Required route: researcher -> coder -> verifier.\nCreate a calculator module',
+  };
+
+  const orderFields = {
+    userRequest: 'crear un modulo de calculadora please',
+    objective: 'Create a NestJS calculator module following the project patterns.',
+    knownContext: ['The project follows DDD with four layers.'],
+    inScope: ['A new module under src/'],
+    outOfScope: ['The existing payment module.'],
+    definitionOfDone: 'A research artifact describing the files to create.',
+    conventions: ['Controllers return DTOs, never entities.'],
+  };
+
+  const inFlightCall = (id: string, args: Record<string, unknown>) => ({
+    content: '',
+    tool_calls: [{ id, name: 'task', args }],
+  });
+
+  const requestFor = (id: string, args: Record<string, unknown>, messages: unknown[]) => ({
+    toolCall: { id, name: 'task', args },
+    state: { messages },
+    runtime: { configurable: { thread_id: 'thread-flat' } },
+  });
+
+  beforeEach(() => resetDelegationRegistry());
+
+  it('hands the call back instead of ending the turn when subagent_type is lost', async () => {
+    // Observed live on 2026-08-27 with gemini-2.5-flash-lite. Flattening the
+    // order into the call dropped subagent_type, and a thrown refusal killed
+    // the session over a message the model only had to rewrite.
+    const guard = createOrchestrationGuard(LIMITS);
+    const handler = jest.fn();
+    const flattened = { ...orderFields, description: 'Research the module' };
+
+    const result = await guard.wrapToolCall!(
+      requestFor('call-1', flattened, [routeEnvelope, inFlightCall('call-1', flattened)]) as never,
+      handler as never,
+    );
+
+    const content = String((result as { content: string }).content);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(content).toContain('subagent_type');
+    expect(content).toContain('exactly two arguments');
+  });
+
+  it('tells the model where the order fields belong', async () => {
+    const guard = createOrchestrationGuard(LIMITS);
+    const flattened = { ...orderFields, description: 'Research the module' };
+
+    const result = await guard.wrapToolCall!(
+      requestFor('call-1', flattened, [routeEnvelope, inFlightCall('call-1', flattened)]) as never,
+      jest.fn() as never,
+    );
+
+    expect(String((result as { content: string }).content)).toContain('INSIDE the description string');
+  });
+
+  it('accepts an order written as arguments once the subagent is named', async () => {
+    // The order itself was complete and correct; only its placement was wrong.
+    // Refusing it over placement would be pedantry paid for by the operator.
+    const guard = createOrchestrationGuard(LIMITS);
+    const handler = jest.fn().mockResolvedValue('delegated');
+    const flattened = { ...orderFields, subagent_type: 'researcher' };
+
+    await guard.wrapToolCall!(
+      requestFor('call-1', flattened, [routeEnvelope, inFlightCall('call-1', flattened)]) as never,
+      handler as never,
+    );
+
+    const delivered = handler.mock.calls[0][0].toolCall.args.description as string;
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(delivered).toContain(orderFields.userRequest);
+    expect(delivered).toContain('The existing payment module.');
+  });
+
+  it('accepts an order placed in description as an object rather than a string', async () => {
+    const guard = createOrchestrationGuard(LIMITS);
+    const handler = jest.fn().mockResolvedValue('delegated');
+    const nested = { subagent_type: 'researcher', description: orderFields };
+
+    await guard.wrapToolCall!(
+      requestFor('call-1', nested, [routeEnvelope, inFlightCall('call-1', nested)]) as never,
+      handler as never,
+    );
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].toolCall.args.description).toContain(orderFields.objective);
+  });
+});

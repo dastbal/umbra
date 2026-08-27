@@ -167,6 +167,9 @@ export function assertMandateComplete(order: unknown): asserts order is MandateO
  * @returns The parsed order, or `undefined` when no JSON object was found.
  */
 export function parseMandateOrder(description: unknown): unknown | undefined {
+  // Some models put the order in `description` as an object rather than as a
+  // JSON string. Both are the same order; only the serialization differs.
+  if (isRecord(description)) return description;
   if (typeof description !== 'string') return undefined;
 
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(description);
@@ -178,6 +181,37 @@ export function parseMandateOrder(description: unknown): unknown | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Recovers an order a model wrote as arguments of `task` instead of inside
+ * `description`.
+ *
+ * Observed live on 2026-08-27 with `gemini-2.5-flash-lite`: instructed to put a
+ * JSON object into `description`, it read the field list as the argument list
+ * and called `task` with `userRequest`, `objective`, `knownContext`, `inScope`,
+ * `outOfScope`, `definitionOfDone` and `description` at the top level — and, in
+ * flattening them, dropped `subagent_type` entirely.
+ *
+ * The order it wrote was complete and correct. Refusing it over where the model
+ * put it would be pedantry paid for by the operator, so the guard reads it from
+ * either place. The prompt still asks for the nested form, because only that one
+ * survives a schema the provider actually validates.
+ *
+ * @param args - The arguments supplied to `task`.
+ * @returns The order found at the top level, or `undefined` when there is none.
+ */
+export function readFlattenedOrder(args: unknown): unknown | undefined {
+  if (!isRecord(args)) return undefined;
+  if (!('userRequest' in args) || !('objective' in args)) return undefined;
+
+  const keys: (keyof MandateOrder)[] = [
+    'userRequest', 'objective', 'knownContext', 'inScope',
+    'outOfScope', 'definitionOfDone', 'conventions',
+  ];
+  const order: Record<string, unknown> = {};
+  for (const key of keys) if (key in args) order[key] = args[key];
+  return order;
 }
 
 /**
@@ -234,6 +268,10 @@ export function renderMandate(mandate: Mandate): string {
   );
 
   return sections.join('\n\n');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function extractFirstObject(text: string): string | undefined {

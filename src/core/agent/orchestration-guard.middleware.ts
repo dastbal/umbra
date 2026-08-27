@@ -13,6 +13,7 @@ import {
   IncompleteMandateError,
   MANDATE_TEMPLATE,
   parseMandateOrder,
+  readFlattenedOrder,
   renderMandate,
   type Mandate,
 } from './delegation/mandate';
@@ -76,7 +77,13 @@ export function createOrchestrationGuard(limits: GuardLimits) {
 
       const subagent = getGuardedSubagent(request.toolCall.args);
       if (!subagent) {
-        throw new Error(describeSubagentRejection(request.toolCall.args));
+        // Repairable, not terminal. Observed live on 2026-08-27: a model asked
+        // to put a JSON order inside `description` read the field list as the
+        // argument list, flattened the order into the call, and lost
+        // `subagent_type` on the way. Throwing ended the turn over a message the
+        // model only had to rewrite — the same mistake the mandate gate had
+        // already learned not to make.
+        return refuseSubagent(request.toolCall.id, request.toolCall.args);
       }
 
       // The assistant message holding this call is already in `state.messages`
@@ -92,7 +99,8 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       const ledger = openTurnForRequest(request, limits.maxAgentTurns);
       if (!ledger) return handler(request);
 
-      const order = parseMandateOrder(readDescription(request.toolCall.args));
+      const order = parseMandateOrder(readDescription(request.toolCall.args))
+        ?? readFlattenedOrder(request.toolCall.args);
       try {
         assertMandateComplete(order);
       } catch (error: unknown) {
@@ -285,6 +293,35 @@ function refuseRepairably(toolCallId: string | undefined, error: IncompleteManda
     content:
       `${error.message}\n\nIssue the order again with this shape, as JSON, in 'description':\n\n`
       + `${MANDATE_TEMPLATE}`,
+  });
+}
+
+/**
+ * Hands back a delegation whose subagent could not be identified.
+ *
+ * Carries the exact call shape rather than only the diagnosis: the failure this
+ * exists for is a model that got the *order* right and the *envelope* wrong, and
+ * telling it what was missing without telling it where to put things invites the
+ * same call again.
+ */
+function refuseSubagent(toolCallId: string | undefined, args: unknown): ToolMessage {
+  return new ToolMessage({
+    tool_call_id: toolCallId ?? '',
+    content:
+      `${describeSubagentRejection(args)}
+
+`
+      + `Call task with exactly two arguments and no others:
+`
+      + `  subagent_type: "researcher" | "coder" | "verifier"
+`
+      + `  description:   a STRING whose entire content is the JSON order
+
+`
+      + `The order fields go INSIDE the description string, never at the top level `
+      + `of the call:
+
+${MANDATE_TEMPLATE}`,
   });
 }
 

@@ -970,7 +970,17 @@ you write. Whatever you leave out, it cannot look up — it can only guess, and 
 delegate explores until its budget is gone. Never send a bare instruction such as
 "list the files in skills/".
 
-Put a JSON object in \`description\`, with exactly these fields:
+Call \`task\` with EXACTLY TWO arguments and no others:
+
+  subagent_type : "researcher" | "coder" | "verifier"
+  description   : a STRING whose entire content is the JSON order below
+
+The order fields live INSIDE that description string. Never put userRequest,
+objective, knownContext, inScope, outOfScope, definitionOfDone or conventions at
+the top level of the call — a call shaped that way has no subagent_type and is
+handed back to you.
+
+description must be a string containing exactly this:
 
 {
   "userRequest": "<the request of the user, copied word for word, not paraphrased>",
