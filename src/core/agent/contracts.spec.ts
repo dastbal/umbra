@@ -98,3 +98,59 @@ describe('agent contracts', () => {
     ).toBe(true);
   });
 });
+
+describe('partial research handoffs', () => {
+  const base = {
+    objective: 'Review the shipped skills',
+    relevantFiles: ['skills/analyze-codebase.md'],
+    findings: ['The skill defines the research protocol'],
+    decisions: [],
+    risks: [],
+    testPlan: [],
+    constraints: [],
+    nextAction: 'Continue from the listed unknowns',
+  };
+
+  it('accepts a partial handoff that states what stayed unknown', () => {
+    const parsed = researchArtifactSchema.safeParse({
+      ...base,
+      status: 'partial',
+      evidence: [],
+      unknowns: ['Whether the coder subagent can reach the ADR index'],
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('refuses a partial handoff whose gaps are not stated', () => {
+    const parsed = researchArtifactSchema.safeParse({
+      ...base,
+      status: 'partial',
+      evidence: [],
+      unknowns: [],
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it('still demands a citation before implementation may start', () => {
+    const parsed = researchArtifactSchema.safeParse({
+      ...base,
+      status: 'ready',
+      evidence: [],
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it('defaults the new fields so existing producers stay valid', () => {
+    const parsed = researchArtifactSchema.parse({
+      ...base,
+      status: 'blocked',
+      evidence: [],
+    });
+
+    expect(parsed.unknowns).toEqual([]);
+    expect(parsed.openQuestions).toEqual([]);
+  });
+});

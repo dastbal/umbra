@@ -13,7 +13,7 @@ export type AgentRole =
 export type TaskComplexity = 'small' | 'medium' | 'large';
 
 /** Lifecycle states shared by task and handoff artifacts. */
-export type ArtifactStatus = 'ready' | 'passed' | 'failed' | 'blocked';
+export type ArtifactStatus = 'ready' | 'passed' | 'failed' | 'blocked' | 'partial';
 
 /**
  * Compact, read-only handoff from the Researcher to the Coder.
@@ -22,8 +22,17 @@ export type ArtifactStatus = 'ready' | 'passed' | 'failed' | 'blocked';
  * full transcript so the Supervisor context remains bounded.
  */
 export interface ResearchArtifact {
-  /** Whether the research is ready for implementation. */
-  status: 'ready' | 'blocked';
+  /**
+   * Whether the research is ready for implementation.
+   *
+   * `partial` was added when delegation budgets were introduced: a delegate
+   * that exhausts its allotment must be able to hand back what it verified.
+   * Before it existed the only way to end an unfinished investigation was an
+   * exception, which discarded every finding the delegate had already earned.
+   * A partial handoff never authorizes implementation — see
+   * `evaluateDelegation`.
+   */
+  status: 'ready' | 'blocked' | 'partial';
   /** The implementation objective. */
   objective: string;
   /** Files that must be inspected or changed. */
@@ -40,6 +49,13 @@ export interface ResearchArtifact {
   testPlan: string[];
   /** Constraints that must not be violated. */
   constraints: string[];
+  /**
+   * Questions the delegate could not resolve, left explicit rather than
+   * guessed. Required in practice for a `partial` handoff.
+   */
+  unknowns?: string[];
+  /** Questions the delegate would ask if the investigation continued. */
+  openQuestions?: string[];
   /** The next action expected from the receiving agent. */
   nextAction: string;
 }
@@ -82,18 +98,47 @@ export interface AgentTaskResult {
   costUsd?: number;
 }
 
-/** Runtime validator for the compact handoff returned by the Researcher. */
+/**
+ * Runtime validator for the compact handoff returned by the Researcher.
+ *
+ * Two rules are enforced beyond the field shapes, both consequences of the
+ * `partial` state:
+ *
+ * - Evidence is mandatory for a `ready` handoff only. A delegate that ran out
+ *   of budget before verifying anything must still be able to say so; forcing a
+ *   citation there is an invitation to fabricate one.
+ * - A `partial` handoff must list what stayed unknown. A partial result whose
+ *   gaps are not stated is indistinguishable from a complete one, which is the
+ *   single way this state becomes dangerous.
+ */
 export const researchArtifactSchema = z.object({
-  status: z.enum(['ready', 'blocked']),
+  status: z.enum(['ready', 'blocked', 'partial']),
   objective: z.string(),
   relevantFiles: z.array(z.string()),
   findings: z.array(z.string()),
-  evidence: z.array(evidenceCitationSchema).min(1),
+  evidence: z.array(evidenceCitationSchema),
   decisions: z.array(z.string()),
   risks: z.array(z.string()),
   testPlan: z.array(z.string()),
   constraints: z.array(z.string()),
+  unknowns: z.array(z.string()).default([]),
+  openQuestions: z.array(z.string()).default([]),
   nextAction: z.string(),
+}).superRefine((artifact, ctx) => {
+  if (artifact.status === 'ready' && artifact.evidence.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['evidence'],
+      message: 'A ready handoff must cite at least one verified source.',
+    });
+  }
+  if (artifact.status === 'partial' && artifact.unknowns.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['unknowns'],
+      message: 'A partial handoff must state what stayed unknown.',
+    });
+  }
 });
 
 /** Runtime validator for the compact handoff returned by the Verifier. */
