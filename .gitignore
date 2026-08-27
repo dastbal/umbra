@@ -37,7 +37,13 @@ llm-pricing.json
 
 # --- AI Orchestration (no va al repo público) ---
 ANTIGRAVITY.md
+# Provider skill entries are junctions to .agents/skills/, which IS versioned.
+# Git would follow them and commit a real copy per provider — the exact
+# duplication the single-canonical-copy rule exists to prevent.
 .claude/
+.codex/
+.antigravity/
+.gemini/
 
 # --- Logs y Temporales ---
 npm-debug.log*
