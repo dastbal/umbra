@@ -129,6 +129,66 @@ exercised, because the tool was never callable. Treat that limit as unproven.
 
 ---
 
+## Harness tool exclusions never reach the subagents
+
+> Recorded 2026-08-26, branch `2.0.0`. Found by the first `umbra orchestrate` run
+> that got past the delegation guard (see the amendment to
+> [ADR-013](./adr/ADR-013-subagent-tool-exclusion-and-provider-diagnostics.md)).
+
+### What is broken today
+
+With delegation working, the orchestrator handed off to the researcher, then to
+the coder, which wrote the file and verified it. The run then died on:
+
+```
+Error invoking tool 'read_file' with kwargs {"path":"src/app.ts"}:
+Received tool input did not match expected schema
+```
+
+`read_file` is one of the six names in `detectGeminiIncompatibleTools`' baseline
+exclusion list — excluded from the main agent precisely because deepagents'
+version breaks here. No subagent declares it either: `createCoderSubAgent` lists
+`safe_write_file`, `safe_read_file`, `list_files`, `run_tests`,
+`run_integrity_check`, and the researcher lists `ask_codebase`, `safe_read_file`,
+`list_files`, `list_adrs`.
+
+It reaches the subagent from deepagents' own filesystem middleware, and the
+exclusion does not follow: `_ToolExclusionMiddleware` wraps the **main** agent's
+model call, while every subagent is a separate graph with its own middleware
+stack and its own harness resolution.
+
+### Why this keeps happening
+
+It is the mirror of the `task` defect. There, a tool the prompt demanded was
+withheld from the model. Here, a tool withheld *for being broken* is handed to
+the subagents. Same blind spot in both: **the set of tools a model can call is
+assembled in more than one place, and only one of those places is verified.**
+`prompt-tool-contract.spec.ts` checks the main `simple` agent. Nothing checks
+what a subagent ends up holding.
+
+### Plan
+
+1. Establish what each subagent actually receives at runtime — declared tools
+   plus whatever its middleware contributes. Reading the specs is not enough;
+   that is what made this invisible.
+2. Apply the same exclusions there. Whether that is a harness profile per
+   subagent, an explicit exclusion middleware in each spec, or suppressing the
+   filesystem middleware for subagents that bring their own safe tools is the
+   decision to make — deepagents' `SubAgent` type accepts `middleware`, which is
+   the likely lever.
+3. Extend the contract test to the subagents, so a tool nobody declared cannot
+   appear in one again.
+4. Validate with a real `umbra orchestrate` run that reaches the coder, which is
+   the only way this surfaced.
+
+### Note
+
+Until it is fixed, `umbra orchestrate` can delegate and the coder can write, but
+a subagent that reaches for `read_file` instead of `safe_read_file` ends the run.
+`umbra deep` is unaffected: it has no subagents.
+
+---
+
 ## One base prompt for three modes that declare different tools
 
 > Recorded 2026-08-26, branch `2.0.0`. Found by the contract test added in

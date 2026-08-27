@@ -1,4 +1,8 @@
-import { describeSubagentRejection, readDelegationHistory } from './orchestration-guard.middleware';
+import {
+  createOrchestrationGuard,
+  describeSubagentRejection,
+  readDelegationHistory,
+} from './orchestration-guard.middleware';
 
 describe('readDelegationHistory', () => {
   it('uses only events after the latest interactive route envelope', () => {
@@ -95,5 +99,98 @@ describe('describeSubagentRejection', () => {
 
   it('treats a blank subagent_type as missing, not as an unknown name', () => {
     expect(describeSubagentRejection({ subagent_type: '   ' })).toContain("no 'subagent_type' argument");
+  });
+});
+
+describe('the guard does not count the call it is authorizing', () => {
+  const routeEnvelope = {
+    content: '[ORCHESTRATION_ROUTE trusted=true complexity=medium implementation=true]\n'
+      + 'Required route: researcher -> coder -> verifier.\nImprove the skills',
+  };
+
+  /** The assistant message LangGraph has already appended when the guard runs. */
+  const inFlightCall = (id: string, subagent: string) => ({
+    content: '',
+    tool_calls: [{ id, name: 'task', args: { description: 'analyze', subagent_type: subagent } }],
+  });
+
+  it('reads a first delegation as having no history', () => {
+    // Reproduces the live failure: on turn one, with no researcher having run,
+    // the guard saw its own pending request and refused it.
+    const history = readDelegationHistory(
+      [routeEnvelope, inFlightCall('call-1', 'researcher')],
+      'call-1',
+    );
+
+    expect(history.researcherCalls).toBe(0);
+  });
+
+  it('still counts it when the in-flight id is not supplied', () => {
+    // Guards the diagnosis itself: without the exclusion the count is 1, which
+    // is what made every first delegation fail.
+    const history = readDelegationHistory([routeEnvelope, inFlightCall('call-1', 'researcher')]);
+
+    expect(history.researcherCalls).toBe(1);
+  });
+
+  it('lets the first researcher delegation through the real middleware', async () => {
+    const guard = createOrchestrationGuard(2);
+    const handler = jest.fn().mockResolvedValue('delegated');
+
+    const result = await guard.wrapToolCall!(
+      {
+        toolCall: { id: 'call-1', name: 'task', args: { subagent_type: 'researcher' } },
+        state: { messages: [routeEnvelope, inFlightCall('call-1', 'researcher')] },
+      } as never,
+      handler as never,
+    );
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(result).toBe('delegated');
+  });
+
+  it('still refuses a second researcher delegation in the same request', async () => {
+    const guard = createOrchestrationGuard(2);
+    const handler = jest.fn().mockResolvedValue('delegated');
+
+    await expect(guard.wrapToolCall!(
+      {
+        toolCall: { id: 'call-2', name: 'task', args: { subagent_type: 'researcher' } },
+        state: {
+          messages: [
+            routeEnvelope,
+            inFlightCall('call-1', 'researcher'),
+            { tool_call_id: 'call-1', content: '{"status":"ready"}' },
+            inFlightCall('call-2', 'researcher'),
+          ],
+        },
+      } as never,
+      handler as never,
+    )).rejects.toThrow(/already ran/);
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('keeps counting a crashed attempt, so it cannot be retried forever', async () => {
+    // An attempt with no result still counts: that semantic is load-bearing and
+    // is what the existing fixtures assert. Only the in-flight call is skipped.
+    const guard = createOrchestrationGuard(2);
+    const handler = jest.fn().mockResolvedValue('delegated');
+
+    await expect(guard.wrapToolCall!(
+      {
+        toolCall: { id: 'call-2', name: 'task', args: { subagent_type: 'researcher' } },
+        state: {
+          messages: [
+            routeEnvelope,
+            inFlightCall('call-1', 'researcher'),
+            inFlightCall('call-2', 'researcher'),
+          ],
+        },
+      } as never,
+      handler as never,
+    )).rejects.toThrow(/already ran/);
+
+    expect(handler).not.toHaveBeenCalled();
   });
 });

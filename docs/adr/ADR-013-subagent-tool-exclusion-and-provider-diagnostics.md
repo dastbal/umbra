@@ -275,3 +275,93 @@ trace.
 - `src/bin/cli.ts` — `cleanupAndExit`.
 - `src/presentation/cli/chat-session.ts` — `shutdown`.
 - `docs/deferred-work.md` — the `ask_human` amendment and the per-mode prompt entry.
+
+---
+
+## Amendment — 2026-08-26
+
+Two statements in the Negative section are now settled, and running the fixed
+orchestrator produced a third finding. The original text stands; this records
+what the live runs proved.
+
+### The route failure was a defect, and it is fixed
+
+The record said *"it is unproven whether it is a defect or the recursion limit of
+the probe"*. It was a defect, reproduced on the first turn of a real session with
+no delegation history at all:
+
+```
+You: quiero que mejorar los ksills tuyos ...
+  write_todos ✓
+  ✗ Researcher already ran for this request; use its handoff.
+```
+
+`evaluateDelegation` allows a researcher only while `researcherCalls === 0`, and
+LangGraph appends the assistant message holding a tool call **before** the tool
+runs. So the guard read its own pending request as history, counted one, and
+refused. Proven deterministically against the real functions:
+
+```
+with the in-flight message in the list : researcherCalls 1 → rejected
+without it                            : researcherCalls 0 → allowed
+```
+
+`readDelegationHistory` now takes the in-flight `tool_call_id` and excludes it.
+Counting *attempts* rather than completed calls is unchanged and deliberate — a
+subagent that crashed without a result must not be retried forever — so only the
+call under authorization is skipped.
+
+**Why no test caught it:** every fixture in
+`orchestration-guard.middleware.spec.ts` hands `readDelegationHistory` a history
+assembled by hand, as if the turn had ended. None passed what the middleware
+actually receives. The tests and reality differed precisely in the message that
+causes the bug. The new cases drive `createOrchestrationGuard().wrapToolCall`
+directly, with the in-flight assistant message present.
+
+### The orchestrator delegates, verified live
+
+Same throwaway workspace, `implementation=true` route, `dist/` rebuilt:
+
+```
+write_todos ✓
+task ✓                                    ← researcher, completed
+task {subagent_type:"coder"} →
+    list_files ✓  safe_read_file ✓  safe_write_file ✓  safe_read_file ✓  run_integrity_check ✓
+task ✓                                    ← coder, completed
+run_integrity_check ✓
+"already ran"? NO
+```
+
+The researcher handed off, the coder wrote the file and verified it. That path had
+never executed.
+
+### New finding: harness exclusions do not reach subagents
+
+That run then died on something else:
+
+```
+Error invoking tool 'read_file' with kwargs {"path":"src/app.ts"}:
+Received tool input did not match expected schema
+```
+
+`read_file` is in `detectGeminiIncompatibleTools`' baseline exclusion list, and no
+subagent spec declares it — `createCoderSubAgent` lists only
+`safe_write_file`, `safe_read_file`, `list_files`, `run_tests`,
+`run_integrity_check`. It reached the subagent from deepagents' own filesystem
+middleware, and the exclusion never applied there: `_ToolExclusionMiddleware`
+wraps the **main** agent's model call, while each subagent is a separate graph
+with its own middleware stack.
+
+It is the mirror image of this ADR's main defect. There, a tool the prompt
+demanded was withheld from the model. Here, a tool withheld from the main agent
+*for being broken* is handed to the subagents, where nothing checks. Both come
+from the same blind spot: **the set of tools the model can call is assembled in
+more than one place, and only one of them is verified.**
+
+Not fixed here — it is a change to what the subagents can call, which is its own
+decision. Recorded in `docs/deferred-work.md` with this evidence.
+
+Related files added by the amendment:
+
+- `src/core/agent/orchestration-guard.middleware.ts` — `readDelegationHistory` (in-flight exclusion), `createOrchestrationGuard`.
+- `src/core/agent/orchestration-guard.middleware.spec.ts` — the cases that drive `wrapToolCall` directly.

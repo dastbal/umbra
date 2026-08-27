@@ -21,8 +21,11 @@ export function createOrchestrationGuard(maxRetries: number) {
         throw new Error(describeSubagentRejection(request.toolCall.args));
       }
 
+      // The assistant message holding this call is already in `state.messages`
+      // when the guard runs, so the in-flight id must be excluded — otherwise the
+      // guard counts the delegation it is authorizing as a previous one.
       const decision = evaluateDelegation(
-        readDelegationHistory(request.state.messages),
+        readDelegationHistory(request.state.messages, request.toolCall.id),
         subagent,
         maxRetries,
       );
@@ -32,11 +35,38 @@ export function createOrchestrationGuard(maxRetries: number) {
   });
 }
 
-/** Extracts the current-turn workflow state from LangGraph's persisted messages. */
-export function readDelegationHistory(messages: readonly unknown[]): DelegationHistory {
+/**
+ * Extracts the current-turn workflow state from LangGraph's persisted messages.
+ *
+ * @param messages - The thread's persisted messages.
+ * @param inFlightToolCallId - Identifier of the `task` call being authorized right
+ * now, excluded from the counts.
+ *
+ * That exclusion is the whole point of the parameter. LangGraph appends the
+ * assistant message that holds a tool call **before** the tool runs, so a guard
+ * reading this history mid-authorization sees its own pending request. With
+ * `evaluateDelegation` allowing a researcher only while `researcherCalls === 0`,
+ * the count of one meant every first delegation was refused as *"Researcher
+ * already ran for this request"* — with no researcher having run. The
+ * orchestrator could not delegate at all.
+ *
+ * Counting *attempts* rather than completed calls is deliberate and unchanged: a
+ * subagent that crashed without producing a result must not be retried forever.
+ * Only the call under authorization is skipped.
+ *
+ * A tool call always carries an id — a result is a `ToolMessage` that must
+ * reference `tool_call_id`, so a call without one could never be answered — which
+ * is why there is no fallback path here.
+ *
+ * @returns The delegation state for the current turn.
+ */
+export function readDelegationHistory(
+  messages: readonly unknown[],
+  inFlightToolCallId?: string,
+): DelegationHistory {
   const currentTurn = messages.slice(findCurrentTurnStart(messages));
   const text = currentTurn.map(toText).join('\n');
-  const artifacts = readDelegationArtifacts(currentTurn);
+  const artifacts = readDelegationArtifacts(currentTurn, inFlightToolCallId);
 
   return {
     routeRequiresImplementation: !text.includes('implementation=false]'),
@@ -105,7 +135,10 @@ interface DelegationArtifacts {
   verifierResults: VerificationStatus[];
 }
 
-function readDelegationArtifacts(messages: readonly unknown[]): DelegationArtifacts {
+function readDelegationArtifacts(
+  messages: readonly unknown[],
+  inFlightToolCallId?: string,
+): DelegationArtifacts {
   const artifacts: DelegationArtifacts = {
     researcherCalls: 0,
     coderCalls: 0,
@@ -114,7 +147,7 @@ function readDelegationArtifacts(messages: readonly unknown[]): DelegationArtifa
   const taskById = new Map<string, GuardedSubagent>();
 
   for (const message of messages) {
-    for (const taskCall of readTaskCalls(message)) {
+    for (const taskCall of readTaskCalls(message, inFlightToolCallId)) {
       if (taskCall.subagent === 'researcher') artifacts.researcherCalls += 1;
       if (taskCall.subagent === 'coder') artifacts.coderCalls += 1;
       if (taskCall.id) taskById.set(taskCall.id, taskCall.subagent);
@@ -138,11 +171,13 @@ interface TaskCall {
   subagent: GuardedSubagent;
 }
 
-function readTaskCalls(message: unknown): TaskCall[] {
+function readTaskCalls(message: unknown, inFlightToolCallId?: string): TaskCall[] {
   if (!isRecord(message) || !Array.isArray(message.tool_calls)) return [];
 
   return message.tool_calls.flatMap((toolCall) => {
     if (!isRecord(toolCall) || toolCall.name !== 'task') return [];
+    // The call being authorized is not part of its own history.
+    if (inFlightToolCallId !== undefined && toolCall.id === inFlightToolCallId) return [];
     const subagent = getGuardedSubagent(toolCall.args);
     if (subagent === undefined) return [];
     return [{ id: typeof toolCall.id === 'string' ? toolCall.id : undefined, subagent }];
