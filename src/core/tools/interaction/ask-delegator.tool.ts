@@ -75,7 +75,7 @@ export const askDelegatorTool = tool(
       ledger,
       delegationId,
       question,
-      askOperator,
+      operatorChannelEnabled() ? askOperator : undefined,
       options,
     );
 
@@ -97,6 +97,35 @@ export const askDelegatorTool = tool(
     }),
   },
 );
+
+/**
+ * Reports whether a delegate may suspend the run to reach the operator.
+ *
+ * ## Why this is off by default
+ *
+ * A subagent graph has no checkpointer. `getSubagents` in `deepagents` builds
+ * each one with `createAgent({ model, systemPrompt, tools, middleware, name })`
+ * — the checkpointer is passed only to the top-level agent. `interrupt()`
+ * suspends by persisting state and waiting to be resumed with a `Command`, and
+ * a graph that cannot persist has nothing to resume.
+ *
+ * Observed live on 2026-08-27, on the first real run of this channel: the
+ * Researcher asked a question, the run stopped, and 145 seconds later the
+ * operator was still looking at a spinner. Nobody was ever going to be asked.
+ *
+ * The mandate half of this tool is unaffected and stays on: a question the order
+ * already answers is answered from the order, quoted, with no suspension
+ * involved. That is the path that carries most of the value.
+ *
+ * `UMBRA_SUBAGENT_QUESTIONS=1` re-enables the escalation for whoever is working
+ * on making it suspend properly. This mirrors `UMBRA_SIMPLE_PROMPT=1`
+ * (ADR-012): an unproven path ships reachable, not enabled.
+ *
+ * @returns Whether the operator channel may be used.
+ */
+function operatorChannelEnabled(): boolean {
+  return process.env['UMBRA_SUBAGENT_QUESTIONS'] === '1';
+}
 
 /**
  * Puts a question to the operator through the LangGraph interrupt channel.

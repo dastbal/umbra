@@ -8,7 +8,7 @@ Date: 2026-08-27
 
 ## Status
 
-Accepted — 2026-08-27
+Accepted — amended 2026-08-27 (first live run)
 
 ## Context
 
@@ -294,3 +294,88 @@ this record's positive consequences are treated as measured.
 - `src/presentation/cli/chat-session.ts` — `handleDelegateQuestion`,
   `resumeAgent`.
 - `src/core/agent/prompt-tool-contract.spec.ts` — the subagent contract.
+
+---
+
+## Amendment — 2026-08-27, first live run
+
+The record above was written before this decision had ever met a model. It has
+now, and the run settled two of its open questions — one in its favour, one
+against it. Nothing above is removed; this section states what changed.
+
+### The mandate works
+
+`umbra orchestrate`, asked *"puede prguntarle a u usbagente como esta please"*,
+produced a delegation whose `description` opened with:
+
+> **The user's request, verbatim** — puede prguntarle a u usbagente como esta please
+> **Your objective** — Analyze the codebase to determine how to implement a feature that allows a user to ask a subagent 'how are you' (status check).
+> **What is already known — do not rediscover this** — The user wants to be able to ask a subagent 'how are you'.
+
+The orchestrator wrote the JSON order, the guard rendered it, and the delegate
+received the request the operator actually made. Compare the delegation that
+motivated this record: `"List all files in the skills/ directory"`.
+
+### The question channel cannot suspend, and hung the run
+
+The same run then stopped. The Researcher issued one model request and the
+session sat on `Delegating to a subagent` for 145 seconds until the operator
+interrupted it. The trace shows no tool span completing after that request.
+
+The cause is in `deepagents` and is decisive. `getSubagents` builds every
+subagent with:
+
+```js
+agents[agentParams.name] = createAgent({
+  model, systemPrompt, tools, middleware, name, ...responseFormat
+});
+```
+
+There is no `checkpointer`. The only one in the whole construction is passed to
+the top-level `createDeepAgent`. `interrupt()` suspends by persisting state and
+waiting to be resumed with a `Command`, and a graph with nothing to persist to
+has nothing to resume from. The delegate raised a question that could never be
+delivered, and the run waited for an answer nobody was going to be asked for.
+
+This was foreseeable from the source and was not foreseen: the decision above
+reused the `requestApproval` pattern without checking that the graph it would run
+in had the one thing that pattern depends on. The `Related Files` list names
+`ask-delegator.tool.ts` as a consumer of the ADR-011 mechanism; that mechanism
+lives in the *orchestrator's* graph, and a subagent is not it.
+
+### What changed in response
+
+**The operator escalation is disabled by default.** `ask_delegator` still answers
+from the mandate — quoted, free, no suspension — which is the path carrying most
+of the value and which the failed run never reached. A question the order does
+not cover now returns the explicit "record this in `unknowns`" reply instead of
+suspending. `UMBRA_SUBAGENT_QUESTIONS=1` re-enables the escalation for whoever
+works on making it suspend properly, the same shape as `UMBRA_SIMPLE_PROMPT=1`
+in [ADR-012](./ADR-012-arrow-key-selection-prompts.md): an unproven path ships
+reachable, not enabled.
+
+**The guard no longer treats a suspension as the end of a delegation.** It closed
+the delegation in a `finally`, so a suspended run would have released its budget
+and cleared `activeDelegationId` — and the resumed tool body, re-executed from
+the top as `interrupt()` requires, would have found no delegation to belong to
+and been told none was active. That is precisely the re-execution hazard
+[ADR-011](./ADR-011-path-containment-and-real-approval.md) documents, reached
+through a `finally` rather than a `catch`. A `GraphInterrupt` is now re-thrown
+with the delegation left open.
+
+Both are covered by tests: a suspension keeps the pointer and the grant, an
+ordinary failure closes them, and the mocked `interrupt()` in
+`ask-delegator.tool.spec.ts` throws if the disabled path is ever reached.
+
+### What this leaves open
+
+Making a delegate genuinely able to ask the operator requires the subagent graph
+to be resumable, which means either a checkpointer reaching `getSubagents` — not
+currently possible through the `SubAgent` type — or moving the question out of the
+subagent and into the orchestrator's graph, where suspension already works. The
+second is the more promising shape and nothing here forecloses it.
+
+Until then the honest statement is: **a delegate can consult its order, and
+cannot reach a human.** The `Consequences → Positive` bullet claiming that a
+delegate with a genuine question reaches the operator is not yet true, and is
+withdrawn until it is.

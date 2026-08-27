@@ -1,4 +1,5 @@
 import { ToolMessage } from '@langchain/core/messages';
+import { isGraphInterrupt } from '@langchain/langgraph';
 import { createMiddleware } from 'langchain';
 import {
   assertDelegationAllowed,
@@ -115,10 +116,15 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       try {
         const result = await handler(withRenderedMandate(request, mandate, ledger));
         harvestFindings(ledger, result);
+        closeDelegation(ledger, delegationId);
         return result;
-      } finally {
-        ledger.pool.release(delegationId);
-        ledger.activeDelegationId = undefined;
+      } catch (error: unknown) {
+        // A suspension is not the end of a delegation, it is a pause. Releasing
+        // the grant and clearing the pointer here would leave the resumed tool
+        // body with no delegation to belong to — the re-execution hazard
+        // ADR-011 documents, reached through a `finally` instead of a `catch`.
+        if (!isGraphInterrupt(error)) closeDelegation(ledger, delegationId);
+        throw error;
       }
     },
   });
@@ -234,6 +240,16 @@ function openTurnForRequest(request: unknown, totalBudget: number): DelegationLe
   if (typeof threadId !== 'string') return currentTurn(undefined);
 
   return openTurn(threadId, readTurnKey(typed.state?.messages ?? []), totalBudget);
+}
+
+/**
+ * Ends a delegation: returns what it did not spend and clears the pointer.
+ *
+ * Never called for a suspended delegation. See the call site.
+ */
+function closeDelegation(ledger: DelegationLedger, delegationId: string): void {
+  ledger.pool.release(delegationId);
+  ledger.activeDelegationId = undefined;
 }
 
 function readDescription(args: unknown): unknown {

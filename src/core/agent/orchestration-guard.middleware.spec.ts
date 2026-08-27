@@ -5,6 +5,7 @@ import {
   readTurnKey,
 } from './orchestration-guard.middleware';
 import { currentTurn, resetDelegationRegistry } from './delegation/delegation-registry';
+import { GraphInterrupt } from '@langchain/langgraph';
 
 describe('readDelegationHistory', () => {
   it('uses only events after the latest interactive route envelope', () => {
@@ -326,5 +327,82 @@ describe('the guard at the moment of delegation', () => {
     ]);
 
     expect(firstTurn).not.toBe(secondTurn);
+  });
+});
+
+describe('a suspended delegation is paused, not finished', () => {
+  const LIMITS = { maxRetries: 2, maxAgentTurns: 50 };
+
+  const routeEnvelope = {
+    content: '[ORCHESTRATION_ROUTE trusted=true complexity=medium implementation=true]\n'
+      + 'Required route: researcher -> coder -> verifier.\nAsk a subagent how it is',
+  };
+
+  const order = {
+    userRequest: 'puede preguntarle a un subagente como esta please',
+    objective: 'Determine how a status check could be implemented.',
+    knownContext: ['The route permits implementation.'],
+    inScope: ['The subagent definitions'],
+    outOfScope: [],
+    definitionOfDone: 'A research artifact.',
+    conventions: [],
+  };
+
+  const requestFor = (id: string, messages: unknown[]) => ({
+    toolCall: { id, name: 'task', args: { description: JSON.stringify(order), subagent_type: 'researcher' } },
+    state: { messages },
+    runtime: { configurable: { thread_id: 'thread-suspend' } },
+  });
+
+  const inFlightCall = (id: string) => ({
+    content: '',
+    tool_calls: [{ id, name: 'task', args: { description: JSON.stringify(order), subagent_type: 'researcher' } }],
+  });
+
+  beforeEach(() => resetDelegationRegistry());
+
+  it('keeps the delegation open when the run suspends to ask the operator', async () => {
+    // interrupt() suspends by throwing. Closing the delegation here would leave
+    // the resumed tool body with no delegation to belong to, and ask_delegator
+    // would answer that no delegation context is active.
+    const guard = createOrchestrationGuard(LIMITS);
+    const suspend = jest.fn().mockRejectedValue(new GraphInterrupt([]));
+
+    await expect(guard.wrapToolCall!(
+      requestFor('call-1', [routeEnvelope, inFlightCall('call-1')]) as never,
+      suspend as never,
+    )).rejects.toBeDefined();
+
+    const ledger = currentTurn('thread-suspend');
+
+    expect(ledger?.activeDelegationId).toBe('researcher#1');
+    expect(ledger?.pool.grantable).toBe(26);
+  });
+
+  it('closes the delegation for an ordinary failure', async () => {
+    const guard = createOrchestrationGuard(LIMITS);
+    const fail = jest.fn().mockRejectedValue(new Error('the provider rejected the request'));
+
+    await expect(guard.wrapToolCall!(
+      requestFor('call-1', [routeEnvelope, inFlightCall('call-1')]) as never,
+      fail as never,
+    )).rejects.toThrow('the provider rejected');
+
+    const ledger = currentTurn('thread-suspend');
+
+    expect(ledger?.activeDelegationId).toBeUndefined();
+    expect(ledger?.pool.grantable).toBe(40);
+  });
+
+  it('closes the delegation when it completes normally', async () => {
+    const guard = createOrchestrationGuard(LIMITS);
+    const handler = jest.fn().mockResolvedValue('{"status":"ready"}');
+
+    await guard.wrapToolCall!(
+      requestFor('call-1', [routeEnvelope, inFlightCall('call-1')]) as never,
+      handler as never,
+    );
+
+    expect(currentTurn('thread-suspend')?.activeDelegationId).toBeUndefined();
   });
 });
