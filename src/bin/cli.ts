@@ -24,11 +24,17 @@ import { AgentDB } from "../core/state/db";
 import { ensureAgentConfig, loadAgentConfig } from "../core/config/agent-config";
 import { ensureWorkspaceSkills } from "../core/config/workspace-scaffold";
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
-import { loadTurnAudits, summarizeTurnAudits, flushPendingTraces } from '../core/observability';
+import {
+  loadTurnAudits,
+  summarizeTurnAudits,
+  flushPendingTraces,
+  suppressLangSmithTransportLogs,
+} from '../core/observability';
 import { LLMProvider } from '../core/llm/provider';
 import { GoogleApplicationDefaultAuth } from '../presentation/cli/google-application-default-auth';
 
 const program = new Command();
+suppressLangSmithTransportLogs();
 
 // Styled logs
 const log = {
@@ -701,4 +707,3 @@ program
   });
 
 program.parse(process.argv);
-

@@ -228,6 +228,23 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
     });
 
   /**
+   * Calculates where the input ends and where its cursor belongs on screen.
+   *
+   * Terminal output wraps automatically, but cursor-right never does. Keeping
+   * these physical coordinates separate prevents a long input from redrawing
+   * subsequent paints at a fictitious column beyond the first row.
+   */
+  const inputLayout = (): { endRow: number; cursorRow: number; cursorColumn: number } => {
+    const inputColumns = promptWidth + visibleWidth(text());
+    const cursorColumns = promptWidth + visibleWidth(buffer.slice(0, cursor).join(''));
+    return {
+      endRow: Math.floor(Math.max(0, inputColumns - 1) / terminalWidth),
+      cursorRow: Math.floor(cursorColumns / terminalWidth),
+      cursorColumn: cursorColumns % terminalWidth,
+    };
+  };
+
+  /**
    * Repaints the prompt line and the palette, leaving the cursor in place.
    *
    * The cursor lands where the operator expects it — inside the text — while
@@ -235,6 +252,7 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
    */
   const paint = (): void => {
     let out = '';
+    const layout = inputLayout();
 
     // The previous paint already returned the cursor to the prompt line. Clear
     // from there; moving up by `drawnRows` would overwrite earlier output and
@@ -246,8 +264,11 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
     if (lines.length > 0) out += '\n' + lines.join('\n');
     drawnRows = lines.length;
 
-    // Put the cursor back into the text.
-    out += up(drawnRows) + COLUMN_ZERO + right(promptWidth + cursor);
+    // Put the cursor back into the text. The input itself may have wrapped
+    // across physical rows, so its cursor cannot be addressed as one long
+    // horizontal offset from the prompt origin.
+    out += up(drawnRows + layout.endRow - layout.cursorRow) +
+      COLUMN_ZERO + right(layout.cursorColumn);
 
     output.write(out);
   };

@@ -266,6 +266,20 @@ describe('the live palette', () => {
     expect(await run(term, keys)).toBe('/mentor');
   });
 
+  it('repositions the cursor from the physical row of a wrapped input', async () => {
+    const term = makeTerm(20);
+    const longLine = 'a'.repeat(40);
+    await run(term, [...longLine, KEY.ctrlC]);
+
+    const paints = term.written().split('\r\x1b[0J');
+    const latestPaint = paints.at(-2) ?? '';
+    // `You: ` occupies five columns. The 40-character input ends at row 2,
+    // column 5 in a 20-column terminal, rather than at column 45 of row 0.
+    expect(latestPaint).toContain(`${longLine}\r\x1b[5C`);
+    expect(latestPaint).not.toContain(`\r\x1b[45C`);
+
+  });
+
   it('repaints the palette from the prompt line without moving into prior output', async () => {
     const term = makeTerm();
     const pending = run(term, ['/', 'm', KEY.down]);

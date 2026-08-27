@@ -1,5 +1,9 @@
 import { Client } from 'langsmith';
-import { flushPendingTraces, isTracingEnabled } from './trace-flush';
+import {
+  flushPendingTraces,
+  isTracingEnabled,
+  suppressLangSmithTransportLogs,
+} from './trace-flush';
 
 const awaitPendingTraceBatches = jest.fn();
 
@@ -79,5 +83,22 @@ describe('trace flushing on exit', () => {
       throw new Error('no api key');
     });
     await expect(flushPendingTraces(30)).resolves.toBeUndefined();
+  });
+});
+
+describe('LangSmith transport logs', () => {
+  it('hides only known background-upload failures', () => {
+    const error = jest.fn();
+    const warn = jest.fn();
+    const terminal = { error, warn };
+    suppressLangSmithTransportLogs(terminal);
+
+    terminal.error('Error exporting batch:', new Error('network unavailable'));
+    terminal.warn('LangSmith trace upload failed; data saved to C:/traces');
+    terminal.error('Provider request failed');
+
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith('Provider request failed');
+    expect(warn).not.toHaveBeenCalled();
   });
 });
