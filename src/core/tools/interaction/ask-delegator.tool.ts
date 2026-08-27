@@ -101,30 +101,27 @@ export const askDelegatorTool = tool(
 /**
  * Reports whether a delegate may suspend the run to reach the operator.
  *
- * ## Why this is off by default
+ * ## Enabled by default, since 2026-08-27
  *
- * A subagent graph has no checkpointer. `getSubagents` in `deepagents` builds
- * each one with `createAgent({ model, systemPrompt, tools, middleware, name })`
- * — the checkpointer is passed only to the top-level agent. `interrupt()`
- * suspends by persisting state and waiting to be resumed with a `Command`, and
- * a graph that cannot persist has nothing to resume.
+ * This shipped disabled on the belief that a subagent graph cannot suspend,
+ * because `getSubagents` builds it without a checkpointer and `interrupt()`
+ * refuses to run without one. That inference was wrong and is now measured:
+ * `interrupt()` resolves its context through async-local-storage, which inside
+ * a nested `invoke` still carries the **parent's** checkpointer. A delegate
+ * suspends and resumes correctly with the plumbing that already exists.
  *
- * Observed live on 2026-08-27, on the first real run of this channel: the
- * Researcher asked a question, the run stopped, and 145 seconds later the
- * operator was still looking at a spinner. Nobody was ever going to be asked.
+ * What was actually broken was the CLI: `streamEvents` never reports
+ * `__interrupt__` on any event, so nobody asked the question and the run looked
+ * hung. Fixed by reading the graph's own state — see
+ * `presentation/cli/pending-interrupts.ts`.
  *
- * The mandate half of this tool is unaffected and stays on: a question the order
- * already answers is answered from the order, quoted, with no suspension
- * involved. That is the path that carries most of the value.
- *
- * `UMBRA_SUBAGENT_QUESTIONS=1` re-enables the escalation for whoever is working
- * on making it suspend properly. This mirrors `UMBRA_SIMPLE_PROMPT=1`
- * (ADR-012): an unproven path ships reachable, not enabled.
+ * `UMBRA_SUBAGENT_QUESTIONS=0` turns the escalation off for an operator who
+ * finds it intrusive; the mandate half keeps working either way.
  *
  * @returns Whether the operator channel may be used.
  */
 function operatorChannelEnabled(): boolean {
-  return process.env['UMBRA_SUBAGENT_QUESTIONS'] === '1';
+  return process.env['UMBRA_SUBAGENT_QUESTIONS'] !== '0';
 }
 
 /**

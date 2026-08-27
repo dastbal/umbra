@@ -8,7 +8,7 @@ Date: 2026-08-27
 
 ## Status
 
-Accepted — amended 2026-08-27 (first live run)
+Accepted — amended 2× 2026-08-27
 
 ## Context
 
@@ -379,3 +379,89 @@ Until then the honest statement is: **a delegate can consult its order, and
 cannot reach a human.** The `Consequences → Positive` bullet claiming that a
 delegate with a genuine question reaches the operator is not yet true, and is
 withdrawn until it is.
+
+---
+
+## Amendment — 2026-08-27, second: the diagnosis above was wrong
+
+The first amendment blamed the 145-second hang on subagent graphs having no
+checkpointer, and disabled the operator question channel on that basis. **That
+inference was wrong.** It was drawn from reading
+`node_modules/@langchain/langgraph/dist/interrupt.js:54` — the
+`MISSING_CHECKPOINTER` guard — without executing anything. This amendment
+records what execution showed.
+
+### What was measured
+
+A spike built the exact topology under discussion with `FakeToolCallingModel`,
+so no provider was involved: an orchestrator with a checkpointer, a tool that
+invokes a subagent graph, and a tool inside that subagent that calls
+`interrupt()`. Three variants ran — subagent without a checkpointer (what
+`deepagents` does), with its own sharing the parent thread, and with its own on a
+separate thread.
+
+**All three suspended and resumed correctly.** Including the first.
+
+`interrupt()` resolves its config through
+`AsyncLocalStorageProviderSingleton.getRunnableConfig()`, not from the graph that
+owns the tool. Inside a nested `invoke`, that context still carries the
+**parent's** `__pregel_checkpointer`. A delegate can suspend and be resumed with
+the plumbing that already exists, and always could.
+
+### What was actually broken, and it is larger
+
+The same spike then drove the graph the way `ChatSession#sendMessage` does —
+`streamEvents(..., { version: 'v2' })`, watching `on_chain_end` for
+`__interrupt__`:
+
+```
+events seen: { on_chain_start: 10, on_chain_end: 7, on_chat_model_start: 2,
+               on_chat_model_end: 2, on_chain_stream: 2,
+               on_tool_start: 2, on_tool_error: 2 }
+interrupt visible anywhere     : false
+interrupt visible on_chain_end : false
+graph left waiting on tasks    : ["tools"]
+pending interrupts in state    : 1
+```
+
+A tool that suspends emits `on_tool_start` and then `on_tool_error` — never
+`on_tool_end` — and **`__interrupt__` appears on no event at all**, while the
+graph is genuinely suspended and waiting.
+
+So the CLI printed `Delegating to a subagent`, never received the matching tool
+end, never called `handleHITL`, and left the spinner turning. The run had
+stopped to ask a question that nothing ever asked. That is the hang, exactly.
+
+**This was never specific to delegation.** The identical measurement with a
+top-level tool — the shape of the `AgentSecurityPolicy` approval gate — produced
+the same result. See the amendment to
+[ADR-011](./ADR-011-path-containment-and-real-approval.md).
+
+### What changed
+
+`src/presentation/cli/pending-interrupts.ts` reads suspensions from the graph's
+own state, which is the authority; the event stream is a view of it that omits
+precisely this. `ChatSession#settlePendingInterrupts` closes every turn by asking
+the graph directly and resuming through the existing `handleHITL`, looping
+because a suspension raised *during* a resume is just as invisible, and bounded
+so a graph that keeps re-suspending returns control instead of holding the
+session.
+
+The operator channel is enabled again, now by measurement rather than by
+assumption. `UMBRA_SUBAGENT_QUESTIONS=0` turns it off for an operator who finds
+it intrusive; the mandate half works either way.
+
+**The consequence withdrawn by the first amendment is restored:** a delegate with
+a genuine question does reach the operator. It is verified end to end against the
+compiled `dist/` build — stream finishes silently, state reports one pending
+suspension, the resume delivers the answer into the tool, and the next read
+reports none.
+
+### What this says about the first amendment
+
+It reached the right action for the wrong reason. Disabling an unproven path was
+defensible; the reasoning attached to it was a guess presented with more
+confidence than an unexecuted read of a library deserves. Recorded here rather
+than rewritten above, because the mistake is the useful part: **a source file
+read is a hypothesis, and this project has a spike harness cheap enough that
+there was no excuse for not running one.**

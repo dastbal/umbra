@@ -6,7 +6,7 @@
 
 ## Status
 
-Accepted — 2026-08-25
+Accepted — amended 2026-08-27
 
 ## Context
 
@@ -286,3 +286,44 @@ the tools the model actually receives.**
 Related files added by the amendment:
 
 - `src/core/agent/prompt-tool-contract.spec.ts` — the prompt/declaration contract.
+
+---
+
+## Amendment — 2026-08-27: the interrupt was raised, and the CLI never rendered it
+
+The section *"`require_approval` raises the interrupt the CLI already renders"*
+is half right, and the wrong half was load-bearing.
+
+**What this record verified:** that `requestApproval` raises the interrupt, that
+the payload matches what `ChatSession#handleHITL` reads, and that `approve` and
+`reject` produce the right effect on disk. The evidence table above stands
+untouched; every row of it is still true.
+
+**What it did not verify:** that the interrupt ever reaches `handleHITL` through
+the path the CLI actually uses. That was inferred from the payload matching, and
+the inference was false.
+
+`ChatSession#sendMessage` drives the agent with
+`streamEvents(..., { version: 'v2' })` and looked for `__interrupt__` on
+`on_chain_end`. Measured on 2026-08-27 with a spike over a real graph, no
+provider involved:
+
+- a tool that suspends emits `on_tool_start` and then `on_tool_error` — **never
+  `on_tool_end`**;
+- `__interrupt__` appears on **no event at all**;
+- meanwhile `getState` reports the graph waiting, with one pending interrupt.
+
+So an approval-gated write suspended the run correctly and then sat there: the
+operator was never asked, the spinner never resolved, and the session looked
+hung. The same measurement over a delegated subagent produced the same result and
+is recorded in
+[ADR-014](./ADR-014-delegation-mandate-shared-budget-and-question-channel.md).
+
+**Fixed by** `src/presentation/cli/pending-interrupts.ts` and
+`ChatSession#settlePendingInterrupts`: the turn now ends by reading suspensions
+from the graph's own state, which is the authority, instead of from an event
+stream that omits them. Nothing in the gate itself changed.
+
+The lesson is narrower than "test more". A payload matching a consumer's expected
+shape proves the consumer *could* handle it. It says nothing about whether the
+message is ever delivered — and **delivery is where this defect lived.**

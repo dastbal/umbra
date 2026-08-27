@@ -9,10 +9,17 @@ import type { Mandate } from '../../agent/delegation/mandate';
 jest.mock('@langchain/langgraph', () => ({
   ...jest.requireActual('@langchain/langgraph'),
   getConfig: () => ({ configurable: { thread_id: 'thread-ask' } }),
-  interrupt: () => {
-    throw new Error('interrupt() must not be reached while the channel is disabled');
+  // Stands in for a real suspension: interrupt() throws to suspend and, on
+  // resume, returns the operator's answer. Measured 2026-08-27 to work inside a
+  // nested subagent graph, which this project had wrongly believed impossible.
+  interrupt: (request: unknown) => {
+    interruptCalls.push(request);
+    return interruptReply;
   },
 }));
+
+const interruptCalls: unknown[] = [];
+let interruptReply: unknown;
 
 const mandate: Mandate = {
   userRequest: 'puede preguntarle a un subagente como esta please',
@@ -43,6 +50,8 @@ describe('ask_delegator', () => {
   beforeEach(() => {
     resetDelegationRegistry();
     delete process.env['UMBRA_SUBAGENT_QUESTIONS'];
+    interruptCalls.length = 0;
+    interruptReply = { answer: 'solo el contenido, no el cargador' };
   });
 
   afterAll(() => {
@@ -59,25 +68,36 @@ describe('ask_delegator', () => {
     expect(answer).toContain('The RAG index, which is out of scope for this delegation.');
   });
 
-  it('does not suspend the run when the order does not cover the question', async () => {
-    // The live failure of 2026-08-27: a subagent graph has no checkpointer, so
-    // interrupt() has nothing to resume from. The run stopped for 145 seconds
-    // waiting for an operator who was never going to be asked. The mocked
-    // interrupt above throws if this path is ever reached.
+  it('reaches the operator when the order does not cover the question', async () => {
+    // Reversed on purpose, 2026-08-27. This path shipped disabled on the belief
+    // that a subagent cannot suspend. It can: interrupt() reads its context
+    // from async-local-storage, which inside a nested invoke still carries the
+    // parent's checkpointer. What was broken was the CLI never rendering the
+    // suspension — see presentation/cli/pending-interrupts.ts.
     openDelegation();
 
     const answer = await ask('Which TypeScript compiler version does the build target?');
 
-    expect(answer).toContain('unknowns');
-    expect(answer).not.toContain('must not be reached');
+    expect(interruptCalls).toHaveLength(1);
+    expect(answer).toBe('solo el contenido, no el cargador');
   });
 
-  it('tells the delegate plainly that nothing was answered', async () => {
+  it('marks the question as a question, never as an approval to act', async () => {
+    openDelegation();
+    await ask('Which TypeScript compiler version does the build target?');
+
+    expect(interruptCalls[0]).toMatchObject({ kind: 'delegate_question' });
+  });
+
+  it('tells the delegate plainly when the operator declines to answer', async () => {
+    interruptReply = undefined;
     openDelegation();
 
     const answer = await ask('Which TypeScript compiler version does the build target?');
 
-    expect(answer).toContain('Do not treat this as an answer');
+    // A cancelled prompt is not an answer, and must never read as one.
+    expect(answer).toContain('The operator did not answer');
+    expect(answer).toContain('unknowns');
   });
 
   it('reports having nobody to ask when no delegation is running', async () => {
@@ -88,13 +108,14 @@ describe('ask_delegator', () => {
     expect(answer).toContain('nobody to ask');
   });
 
-  it('keeps the escalation reachable behind the escape hatch', async () => {
-    // The channel is disabled, not removed: whoever makes a subagent suspend
-    // properly needs a way to exercise it. Mirrors UMBRA_SIMPLE_PROMPT=1.
-    process.env['UMBRA_SUBAGENT_QUESTIONS'] = '1';
+  it('lets an operator who finds it intrusive turn the escalation off', async () => {
+    // The mandate half keeps working either way; only the interruption stops.
+    process.env['UMBRA_SUBAGENT_QUESTIONS'] = '0';
     openDelegation();
 
-    await expect(ask('Which TypeScript compiler version does the build target?'))
-      .resolves.toContain('unknowns');
+    const answer = await ask('Which TypeScript compiler version does the build target?');
+
+    expect(interruptCalls).toHaveLength(0);
+    expect(answer).toContain('unknowns');
   });
 });

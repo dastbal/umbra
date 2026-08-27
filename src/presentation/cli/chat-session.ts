@@ -30,6 +30,16 @@ import { showModelMenu } from './model-menu';
 import { isInteractive, selectOutcome, type SelectChoice } from './interactive-select';
 import { askText } from './prompts';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
+import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
+
+/**
+ * Suspensions answered in one turn before the CLI gives the prompt back.
+ *
+ * A backstop, not a budget: each round settles a real question the operator
+ * asked for. A graph that keeps re-suspending without progressing must return
+ * control rather than hold the session.
+ */
+const MAX_INTERRUPT_ROUNDS = 8;
 import { canEditLive, editLine, type Suggestion } from './line-editor';
 import {
   buildSlashCommands,
@@ -341,6 +351,10 @@ export class ChatSession {
         }
       }
 
+      // The stream never reports a suspension, so ask the graph itself before
+      // handing the prompt back. See settlePendingInterrupts.
+      await this.settlePendingInterrupts();
+
       if (shouldRetryEmptyTurn({ hasTextOutput, hasToolActivity, retryCount })) {
         audit.record('empty_response_retry');
         this.renderer.clearThinking();
@@ -476,6 +490,67 @@ export class ChatSession {
    *
    * @param interrupts - The interrupt payload from LangGraph.
    */
+  /**
+   * Answers every suspension the graph is waiting on before the turn ends.
+   *
+   * ## Why this exists
+   *
+   * The stream loop above watches `on_chain_end` for `__interrupt__`, and that
+   * key never arrives. Measured on 2026-08-27 against a real suspended graph: a
+   * tool that calls `interrupt()` emits `on_tool_start` and then
+   * `on_tool_error`, never `on_tool_end`, and the stream finishes normally with
+   * no suspension visible on any event — while `getState` reports the graph
+   * waiting with one pending interrupt.
+   *
+   * The operator therefore saw a spinner that never resolved. The run had
+   * genuinely stopped to ask a question, and nothing ever asked it. That was
+   * the 145-second "hang" of that day, and it applied to **every** `interrupt()`
+   * in this CLI, the ADR-011 security approval gate included.
+   *
+   * State is the authority; the event stream is a view of it that happens to
+   * omit exactly this. So the turn now finishes by asking the graph directly.
+   *
+   * ## Why a loop
+   *
+   * {@link handleHITL} resumes through the same stream, so a second suspension
+   * raised while resuming would be just as invisible. Each round settles one and
+   * looks again. The bound is a backstop: a graph that keeps re-suspending
+   * without progress must end the turn rather than hold the operator forever.
+   */
+  private async settlePendingInterrupts(): Promise<void> {
+    for (let round = 0; round < MAX_INTERRUPT_ROUNDS; round += 1) {
+      const pending = await this.readPendingInterrupts();
+      if (pending.length === 0) return;
+
+      this.renderer.clearThinking();
+      await this.handleHITL(pending);
+    }
+
+    process.stdout.write(
+      `\n  ⚠️  ${this.colorMuted('The run kept suspending; ending the turn. Send another instruction to continue.')}\n`,
+    );
+  }
+
+  /**
+   * Reads the graph's pending suspensions, tolerating a graph without state.
+   *
+   * A mode compiled without a checkpointer has no state to read and no way to
+   * suspend either, so an absent `getState` is a normal condition, never an
+   * error.
+   *
+   * @returns The suspensions awaiting an answer, empty when there are none.
+   */
+  private async readPendingInterrupts(): Promise<PendingInterrupt[]> {
+    const getState = (this.agent as { getState?: (config: unknown) => Promise<unknown> }).getState;
+    if (typeof getState !== 'function') return [];
+
+    try {
+      return readPendingInterrupts(await getState.call(this.agent, this.graphConfig));
+    } catch {
+      return [];
+    }
+  }
+
   private async handleHITL(interrupts: unknown[]): Promise<void> {
     const interrupt = (interrupts as any[])[0]?.value;
     if (!interrupt) return;
