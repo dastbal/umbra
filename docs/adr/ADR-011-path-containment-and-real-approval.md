@@ -262,3 +262,27 @@ covered above.
 - `src/core/infrastructure/config/default-pricing.ts` — `DEFAULT_LLM_PRICING`.
 - `src/bin/cli.ts` — `runGraphMode`, `runGraphChat`, `warnDeprecatedMode`.
 - `.gitignore` — the blanket `*.json` rule replaced by explicit patterns.
+
+---
+
+## Amendment — 2026-08-26
+
+This record treated `deleteFileTool` — a tool the prompt instructed and no tool
+list contained — as an isolated defect. It was an instance of a pattern, and the
+pattern had four:
+
+| Instance | State |
+|---|---|
+| `delete_file` | Fixed here |
+| `ask_human` | Registered nowhere; recorded in `docs/deferred-work.md`, and its prompt mentions removed 2026-08-26 |
+| `task` | Worse: *excluded* from the provider's declarations while three prompts ordered delegation through it. See [ADR-013](./ADR-013-subagent-tool-exclusion-and-provider-diagnostics.md) |
+| `orchestrator` / `analysis` prompts | Still name tools those modes do not declare; in `docs/deferred-work.md` |
+
+Nothing above changes what this ADR decided. What it adds is the reason the class
+of defect kept recurring: **nothing checked that the tools a prompt advertises are
+the tools the model actually receives.**
+`src/core/agent/prompt-tool-contract.spec.ts` now does, for the `simple` mode.
+
+Related files added by the amendment:
+
+- `src/core/agent/prompt-tool-contract.spec.ts` — the prompt/declaration contract.

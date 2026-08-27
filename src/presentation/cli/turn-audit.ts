@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from 'fs';
 import { createHash, randomUUID } from 'crypto';
 import * as path from 'path';
 import { DEFAULT_INTERACTIVE_TOOL_BUDGET } from '../../core/agent/iteration-budget.middleware';
+import { extractProviderDiagnostic, writeProviderDiagnostic } from './provider-diagnostics';
 
 /** Terminal outcome captured for one interactive agent turn. */
 export type TurnAuditOutcome =
@@ -38,6 +39,11 @@ export interface TurnAuditRecord {
   textOutput: boolean;
   outcome: TurnAuditOutcome;
   errorCategory?: 'recursion_limit' | 'provider_400' | 'model_output' | 'other';
+  /**
+   * Workspace-relative path to a redacted provider request snapshot, when one
+   * was captured. A **path**, never the payload: this record stays shareable.
+   */
+  providerDiagnosticFile?: string;
 }
 
 /** Input required to initialize a privacy-safe interactive turn audit. */
@@ -53,6 +59,11 @@ export interface TurnAuditInput {
  * Captures only operational metadata for one turn and writes it as JSONL below
  * `.agent/telemetry/`. Prompts, tool arguments, responses, credentials, and
  * provider payloads are intentionally excluded.
+ *
+ * That exclusion is why a rejected provider request is *not* recorded here. When
+ * one is captured it goes to its own file under `.agent/diagnostics/`, and this
+ * record carries only its path in `providerDiagnosticFile` — so the JSONL stays
+ * safe to hand to someone else, which is what `umbra metrics` reads it as.
  */
 export class TurnAudit {
   private readonly startedAtMs = Date.now();
@@ -105,10 +116,18 @@ export class TurnAudit {
    *
    * @param outcome - Final state of the interactive turn.
    * @param errorMessage - Optional provider/framework message used only for a coarse category.
+   * @param error - Optional thrown value. When it carries a provider request
+   * context, a redacted snapshot is written to its own file and only the path
+   * appears in this record.
    */
-  public record(outcome: TurnAuditOutcome, errorMessage?: string): void {
+  public record(outcome: TurnAuditOutcome, errorMessage?: string, error?: unknown): void {
     if (this.recorded) return;
     this.recorded = true;
+
+    const diagnostic = error === undefined ? undefined : extractProviderDiagnostic(error);
+    const diagnosticFile = diagnostic === undefined
+      ? undefined
+      : writeProviderDiagnostic(this.input.rootDir, this.auditId, diagnostic);
 
     const record: TurnAuditRecord = {
       schemaVersion: 1,
@@ -126,6 +145,7 @@ export class TurnAudit {
       textOutput: this.textOutput,
       outcome,
       ...(errorMessage ? { errorCategory: classifyError(errorMessage) } : {}),
+      ...(diagnosticFile ? { providerDiagnosticFile: diagnosticFile } : {}),
     };
 
     try {

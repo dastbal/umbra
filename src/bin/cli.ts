@@ -24,7 +24,7 @@ import { AgentDB } from "../core/state/db";
 import { ensureAgentConfig, loadAgentConfig } from "../core/config/agent-config";
 import { ensureWorkspaceSkills } from "../core/config/workspace-scaffold";
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
-import { loadTurnAudits, summarizeTurnAudits } from '../core/observability';
+import { loadTurnAudits, summarizeTurnAudits, flushPendingTraces } from '../core/observability';
 import { LLMProvider } from '../core/llm/provider';
 import { GoogleApplicationDefaultAuth } from '../presentation/cli/google-application-default-auth';
 
@@ -41,14 +41,17 @@ const log = {
 /**
  * Ensures clean exit and database closing
  */
-const cleanupAndExit = () => {
+const cleanupAndExit = async () => {
   log.sys("Shutting down... Closing DB connections.");
   AgentDB.close();
+  // Pending LangSmith batches upload in the background; process.exit() would
+  // discard them, which is why failing runs left no trace to read.
+  await flushPendingTraces();
   process.exit(0);
 };
 
-process.on("SIGINT", cleanupAndExit);
-process.on("SIGTERM", cleanupAndExit);
+process.on("SIGINT", () => void cleanupAndExit());
+process.on("SIGTERM", () => void cleanupAndExit());
 
 /**
  * Helper to ask for user confirmation in the CLI.
@@ -493,7 +496,7 @@ async function runGraphChat(): Promise<void> {
           }
           if (input.toLowerCase() === "exit" || input.toLowerCase() === "quit") {
             rl.close();
-            cleanupAndExit();
+            void cleanupAndExit();
           }
 
           try {

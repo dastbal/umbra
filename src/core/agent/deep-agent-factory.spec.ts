@@ -16,7 +16,7 @@ jest.mock('../llm/provider', () => ({
 import { DeepAgentFactory } from './deep-agent-factory';
 
 interface DeepAgentFactoryInternals {
-  registerGeminiHarnessProfile(model: string): void;
+  registerGeminiHarnessProfile(model: string, taskExclusions?: string[]): void;
   resolveRuntimeModel(model: string): unknown;
   resolveRoleModel(model: string): unknown;
   buildSystemPrompt(
@@ -27,6 +27,10 @@ interface DeepAgentFactoryInternals {
 
 describe('DeepAgentFactory model routing', () => {
   const originalAgentModel = process.env.AGENT_MODEL;
+
+  beforeEach(() => {
+    mockRegisterHarnessProfile.mockClear();
+  });
 
   afterEach(() => {
     if (originalAgentModel === undefined) {
@@ -65,6 +69,32 @@ describe('DeepAgentFactory model routing', () => {
         excludedTools: expect.arrayContaining(['ls', 'grep', 'glob']),
       }),
     );
+  });
+
+  it('hides the delegation tool from an agent that has no subagents', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerGeminiHarnessProfile('gemini-3.5-flash');
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'gemini-3.5-flash',
+      expect.objectContaining({ excludedTools: expect.arrayContaining(['task']) }),
+    );
+  });
+
+  it('lets the delegation tool reach the provider when subagents exist', () => {
+    // The regression this guards: `task` was excluded unconditionally, so the
+    // orchestrator's prompt ordered it to delegate through a tool the provider
+    // never received. Vertex answered `UNEXPECTED_TOOL_CALL` and the run died.
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerGeminiHarnessProfile('gemini-3.5-flash', []);
+
+    for (const call of mockRegisterHarnessProfile.mock.calls) {
+      expect(call[1].excludedTools).not.toContain('task');
+      // The schema-incompatible exclusions must survive either way.
+      expect(call[1].excludedTools).toEqual(expect.arrayContaining(['grep', 'glob', 'ls']));
+    }
   });
 
   it('makes one-shot analysis override generic skill-discovery tool instructions', () => {

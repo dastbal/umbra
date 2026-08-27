@@ -1,4 +1,4 @@
-import { readDelegationHistory } from './orchestration-guard.middleware';
+import { describeSubagentRejection, readDelegationHistory } from './orchestration-guard.middleware';
 
 describe('readDelegationHistory', () => {
   it('uses only events after the latest interactive route envelope', () => {
@@ -63,5 +63,37 @@ describe('readDelegationHistory', () => {
 
     expect(history.researcherCalls).toBe(1);
     expect(history.coderCalls).toBe(1);
+  });
+});
+
+describe('describeSubagentRejection', () => {
+  it('names the missing argument instead of blaming the subagent', () => {
+    // The real failure: the model asked for researcher under the wrong key,
+    // because the task declaration never reached the provider (ADR-013).
+    const message = describeSubagentRejection({ context: 'analyze', name: 'researcher', agent: 'researcher' });
+
+    expect(message).toContain("no 'subagent_type' argument");
+    expect(message).toContain('keys received: context, name, agent');
+    expect(message).not.toContain('unregistered subagent');
+  });
+
+  it('names the value when a subagent is genuinely not allowed', () => {
+    const message = describeSubagentRejection({ subagent_type: 'deployer' });
+
+    expect(message).toContain("unregistered subagent 'deployer'");
+    expect(message).toContain('researcher, coder, and verifier');
+  });
+
+  it('produces different messages for the two causes', () => {
+    expect(describeSubagentRejection({ agent: 'researcher' }))
+      .not.toBe(describeSubagentRejection({ subagent_type: 'deployer' }));
+  });
+
+  it('handles a call with no arguments object at all', () => {
+    expect(describeSubagentRejection(undefined)).toContain('no arguments object');
+  });
+
+  it('treats a blank subagent_type as missing, not as an unknown name', () => {
+    expect(describeSubagentRejection({ subagent_type: '   ' })).toContain("no 'subagent_type' argument");
   });
 });

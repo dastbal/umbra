@@ -146,7 +146,8 @@ export class DeepAgentFactory {
   /**
    * Creates a simple deep agent for quick, single-agent tasks.
    *
-   * Includes: write_todos, ask_human, safe filesystem tools, RAG tools.
+   * Includes: write_todos, safe filesystem tools, RAG tools. Actions the
+   * security policy gates raise an operator approval prompt on their own.
    * Does NOT include: Researcher/Coder subagents, context compression.
    *
    * @param config - Optional configuration overrides.
@@ -265,7 +266,9 @@ export class DeepAgentFactory {
     const model = resolveModelForSession(agentConfig.models.supervisor, config.model);
     const enableCompression = config.enableContextCompression ?? true;
 
-    await DeepAgentFactory.bootstrap(rootDir, model, interaction);
+    // hasSubagents: this mode registers researcher/coder/verifier, so `task`
+    // must reach the provider (ADR-013).
+    await DeepAgentFactory.bootstrap(rootDir, model, interaction, true);
 
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator', agentConfig);
@@ -307,6 +310,7 @@ export class DeepAgentFactory {
     rootDir: string,
     model: string,
     interaction?: InteractionService,
+    hasSubagents = false,
   ): Promise<void> {
     // 1. Setup .agent directory
     const agentDir = path.join(rootDir, '.agent');
@@ -322,8 +326,15 @@ export class DeepAgentFactory {
     // for the simple agent (same reason as Gemini: no subagent delegation).
     // We also exclude `grep`, `glob` on Ollama because they cause issues
     // on Windows paths — our `safe_read_file` / `list_files` are safer.
+    //
+    // ADR-013: `task` is excluded only when this agent has NO subagents. It used
+    // to be excluded unconditionally, on both providers, which silently removed
+    // the orchestrator's only way to delegate: the prompt ordered it to route
+    // through `task`, the provider never received the declaration, and the model
+    // invented the call with guessed argument names.
+    const taskExclusions = hasSubagents ? [] : ['task'];
     if (isGeminiModel(model)) {
-      DeepAgentFactory.registerGeminiHarnessProfile(model);
+      DeepAgentFactory.registerGeminiHarnessProfile(model, taskExclusions);
     } else if (isOllamaModel(model)) {
       // ADR-009: Register the Ollama harness profile under the bare "ollama"
       // provider key (not a model-specific key). This is intentional.
@@ -347,7 +358,10 @@ export class DeepAgentFactory {
       //   b) cause Windows path issues (ls, read_file, write_file, edit_file).
       //   c) shouldn't be available in simple agent mode (task).
       registerHarnessProfile('ollama', {
-        excludedTools: ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'task'],
+        excludedTools: [
+          'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file',
+          ...taskExclusions,
+        ],
       });
 
       // ADR-022: Preflight check + model warmup for Ollama (CPU/RAM pressure)
@@ -419,9 +433,12 @@ export class DeepAgentFactory {
    * @param model - Resolved Gemini model identifier.
    * @returns Nothing.
    */
-  private static registerGeminiHarnessProfile(model: string): void {
+  private static registerGeminiHarnessProfile(
+    model: string,
+    taskExclusions: string[] = ['task'],
+  ): void {
     const unsafeTools = DeepAgentFactory.detectGeminiIncompatibleTools();
-    const excludedTools = [...new Set([...unsafeTools, 'task'])];
+    const excludedTools = [...new Set([...unsafeTools, ...taskExclusions])];
 
     registerHarnessProfile(model, { excludedTools });
     registerHarnessProfile(`google:${model}`, { excludedTools });
@@ -818,11 +835,13 @@ Describing a file ≠ creating it. A file only exists on disk after \`safe_write
 - Never mark a todo step done until disk confirmation.
 
 🛑 SAFETY RULES (universal — apply to every task):
-- Never delete files or directories without \`ask_human\` approval.
+- Deleting a file always raises an operator approval prompt on its own; never
+  assume a delete happened until the tool result confirms it.
 - Never write outside the project root. Use RELATIVE PATHS only.
 - Read-Before-Write: always \`safe_read_file\` before overwriting any existing file.
 - Tolerate typos, bad grammar, Spanglish — always infer intent, never reject a request.
-- After the configured correction cycles → use \`ask_human\` for guidance.
+- After the configured correction cycles → stop and report what is blocking you
+  instead of retrying.
 
 📝 OUTPUT FORMAT (always markdown):
 Use \`# Headers\`, \`**bold**\` for key terms, fenced code blocks with language tags.
@@ -835,7 +854,8 @@ After every fix, implementation, or architectural decision, include:
 - **Trade-off**: what's accepted or limited by this choice
 
 For changes touching >5 files OR public API contracts (DTOs, interfaces):
-Use \`ask_human\` BEFORE implementing — explain the plan, impact, and ask for confirmation.
+State the plan and its impact in your answer BEFORE implementing, so the operator
+can stop you before the first write.
 
 Format: "The problem was X because Y. I solved it with Z because [reason]. Trade-off: [limitation]."
 For architecture: "I chose [pattern] over [alternative] because [reason]. Downside: [trade-off]."
@@ -877,11 +897,12 @@ Once you have a plan, execute ALL steps without stopping.
 - After each step: announce done + what comes next → immediately do it.
 - Only stop when ALL todos are done OR a HITL gate fires.
 
-🛑 HITL GATES — use \`ask_human\` ONLY for:
+🛑 GATED ACTIONS — the security policy stops these for operator approval by
+itself; you do not request it, and you must not treat a refusal as retryable:
 - Deleting files or directories
-- Dropping database tables or migrations
-- Modifying infra files (docker-compose, CI/CD, .env.production)
-- After the configured correction cycles
+- Writing project configuration or CI files
+- Writing anywhere outside src, test and docs
+After the configured correction cycles, stop and report what is blocking you.
 Everything else → execute autonomously.`;
     }
 
@@ -952,6 +973,6 @@ For implementation tasks, follow this exact sequence:
 - \`ask_codebase\`: For quick questions you can answer yourself without delegating.
 - \`run_integrity_check\`: Final verification after coder finishes.
 - \`refresh_project_index\`: If RAG seems stale after coder writes files.
-- \`write_todos\`, \`task\`, \`ask_human\`: Standard orchestration tools.`;
+- \`write_todos\`, \`task\`: Standard orchestration tools.`;
   }
 }

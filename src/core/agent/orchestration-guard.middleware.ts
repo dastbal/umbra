@@ -18,9 +18,7 @@ export function createOrchestrationGuard(maxRetries: number) {
 
       const subagent = getGuardedSubagent(request.toolCall.args);
       if (!subagent) {
-        throw new Error(
-          'Orchestration guard rejected an unregistered subagent. Only researcher, coder, and verifier are allowed.',
-        );
+        throw new Error(describeSubagentRejection(request.toolCall.args));
       }
 
       const decision = evaluateDelegation(
@@ -48,6 +46,41 @@ export function readDelegationHistory(messages: readonly unknown[]): DelegationH
     researcherReady: artifacts.researcherStatus === 'ready',
     researcherBlocked: artifacts.researcherStatus === 'blocked',
   };
+}
+
+/**
+ * Explains why a `task` call was rejected, distinguishing the two causes.
+ *
+ * Both used to produce the same sentence — *"unregistered subagent, only
+ * researcher, coder and verifier are allowed"* — including the case where the
+ * argument was simply absent. That message sent a real investigation to the
+ * wrong place: the model had asked for `researcher`, but under the key `agent`
+ * instead of `subagent_type`, because the `task` declaration never reached the
+ * provider and its argument names had to be guessed (ADR-013).
+ *
+ * This changes only the diagnosis. What the guard permits is unchanged.
+ *
+ * @param args - The arguments the model supplied to `task`.
+ * @returns A message naming the actual defect.
+ */
+export function describeSubagentRejection(args: unknown): string {
+  const allowed = 'researcher, coder, and verifier';
+
+  if (!isRecord(args)) {
+    return `Orchestration guard rejected a task call with no arguments object. `
+      + `Call task with subagent_type set to one of ${allowed}.`;
+  }
+
+  const requested = args.subagent_type;
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    const keys = Object.keys(args);
+    const received = keys.length > 0 ? `keys received: ${keys.join(', ')}` : 'no arguments were supplied';
+    return `Orchestration guard rejected a task call with no 'subagent_type' argument (${received}). `
+      + `Set subagent_type to one of ${allowed}.`;
+  }
+
+  return `Orchestration guard rejected an unregistered subagent '${requested.trim()}'. `
+    + `Only ${allowed} are allowed.`;
 }
 
 function getGuardedSubagent(args: unknown): GuardedSubagent | undefined {

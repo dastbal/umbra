@@ -48,6 +48,7 @@ import {
 import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
+import { flushPendingTraces } from '../../core/observability';
 
 /**
  * Builds the rejection decision sent back to the graph.
@@ -238,7 +239,7 @@ export class ChatSession {
     process.stdout.write(buildWelcomeBanner(this.config.mode, this.config.model, this.config.sessionName));
 
     // Handle Ctrl+C gracefully (no readline needed — process-level signal)
-    process.on('SIGINT', () => this.shutdown());
+    process.on('SIGINT', () => void this.shutdown());
 
     // Send first message if provided (from CLI argument)
     if (firstMessage?.trim()) {
@@ -355,7 +356,8 @@ export class ChatSession {
       this.renderer.clearThinking();
 
       if (await this.recoverToolCycle(error, hasToolActivity)) {
-        audit.record('provider_400_recovered', error.message);
+        // Pass the raw error: it carries the request context the message lost.
+        audit.record('provider_400_recovered', error.message, err);
         this.renderer.finalizeTurn();
         this.renderer.showTurnSeparator();
         return;
@@ -390,6 +392,7 @@ export class ChatSession {
       audit.record(
         error.message.includes('Recursion limit') ? 'recursion_limit' : 'error',
         error.message,
+        err,
       );
       this.renderer.finalizeTurn();
       this.renderer.showTurnSeparator();
@@ -677,7 +680,7 @@ export class ChatSession {
       // Record the rejection before tearing the session down, so the graph is
       // never left resumed on an unanswered gate.
       process.stdout.write(colors.danger('  ✗ Rejected (interrupted)\n'));
-      setImmediate(() => this.shutdown());
+      setImmediate(() => void this.shutdown());
       return rejectionDecision();
     }
 
@@ -726,12 +729,23 @@ export class ChatSession {
 
   /**
    * Cleanly shut down the session.
+   *
+   * The farewell is written *before* the trace flush, so the operator sees the
+   * session end immediately and the wait — bounded, usually zero — happens
+   * behind an already-finished screen. The prompt engines restore raw mode in
+   * their own `finally` blocks, so the terminal is never left raw across it.
+   *
+   * Callers fire and forget: every call site is an event handler that already
+   * ignored the return value.
    */
-  private shutdown(): void {
+  private async shutdown(): Promise<void> {
     this.isRunning = false;
     // Erase any half-painted wait line before the farewell lands on top of it
     this.renderer.clearThinking();
     process.stdout.write('\n' + colors.muted('  Session ended. Goodbye!\n\n'));
+    // Without this, process.exit() drops whatever LangSmith has still queued —
+    // and a session that ended on an error is exactly the one worth reading.
+    await flushPendingTraces();
     process.exit(0);
   }
 
@@ -953,7 +967,7 @@ export class ChatSession {
       })),
     });
 
-    if (outcome.status === 'interrupted') { this.shutdown(); return; }
+    if (outcome.status === 'interrupted') { void this.shutdown(); return; }
     if (outcome.status !== 'selected') return;
 
     await outcome.value.run();

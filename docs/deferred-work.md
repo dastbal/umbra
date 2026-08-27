@@ -46,6 +46,25 @@ This is the same shape as the `deleteFileTool` defect
 [ADR-011](./adr/ADR-011-path-containment-and-real-approval.md) recorded: a tool
 advertised to the model and present in no tool list.
 
+> **Amendment — 2026-08-26.** The prompt half of this is now closed, and the
+> shape turned out to be wider than one tool. Recorded rather than rewritten,
+> because the analysis above is still the plan for building `ask_human`.
+>
+> - The **6** mentions (the table says 5; the sixth is the class TSDoc) were
+>   rewritten so no prompt instructs the model to call `ask_human`. The
+>   instructions that named it — "never delete without approval", the HITL gate
+>   list — now describe what actually happens: `AgentSecurityPolicy` stops those
+>   actions and raises the operator prompt itself, with no tool call involved.
+>   **The tool is still unbuilt and this entry still applies**; only the false
+>   advertising is gone.
+> - `task` was the same defect in every mode, and it was worse: it was
+>   *excluded* from the provider's declarations while three prompts ordered the
+>   model to delegate through it. Fixed and recorded in
+>   [ADR-013](./adr/ADR-013-subagent-tool-exclusion-and-provider-diagnostics.md).
+> - `src/core/agent/prompt-tool-contract.spec.ts` now guards the `simple`
+>   prompt: every tool name it uses must be a tool that mode declares. Adding
+>   `ask_human` back to that prompt before the tool exists will fail the suite.
+
 The tool that does exist — `askHumanTool` in
 `src/core/tools/interaction-tools.ts` — returns the placeholder string
 `WAITING FOR HUMAN: <question>`. The component that actually asks is
@@ -107,6 +126,59 @@ The real risk is not price but a model that asks about everything, spending a
 turn each time. That is controlled in the prompt, and the existing
 `use ask_human ONLY for:` list is the right shape — but it has never been
 exercised, because the tool was never callable. Treat that limit as unproven.
+
+---
+
+## One base prompt for three modes that declare different tools
+
+> Recorded 2026-08-26, branch `2.0.0`. Found by the contract test added in
+> [ADR-013](./adr/ADR-013-subagent-tool-exclusion-and-provider-diagnostics.md),
+> and deliberately not fixed there: scoping a prompt changes what the model
+> reads, which is a behaviour change that has to be validated by running the
+> modes, not by a unit test.
+
+### What is broken today
+
+`buildSystemPrompt` composes one shared base — skill discovery, the ADR
+protocol, the evidence protocol, the safety rules — and all three modes receive
+it. But the three modes declare very different tools:
+
+| Mode | Declares | Prompt names, but cannot call |
+|---|---|---|
+| `simple` | 9 tools + `write_todos` | nothing (guarded by the contract test) |
+| `orchestrator` | `ask_codebase`, `refresh_project_index`, `run_integrity_check`, `write_todos`, `task` | `safe_write_file`, `safe_read_file`, `list_files`, `list_adrs` |
+| `analysis` | **nothing** — `tools: []`, manifest-only by design | `safe_write_file` |
+
+The orchestrator's base tells it to *"Call list_files for the relevant directory"*
+and to *"Use safe_read_file on the most relevant files"*. It has neither. Its job
+is to delegate, so the instructions belong to the subagents that do the reading —
+but the model is the one being told.
+
+`analysis` is subtler and only partly a defect: it names tools **to forbid
+them** (*"Do not call list_files"*), which is correct for a manifest-only mode.
+What is wrong there is inherited write guidance — *"A file only exists on disk
+after `safe_write_file` is called"* — in a mode that cannot write at all.
+
+### Why a textual check cannot close it
+
+A prohibition and an instruction look the same to a regex. That is why the
+contract test is scoped to `simple`: extending it to the other two would need
+either a per-mode exception list — five entries, which is how a guard turns into
+decoration — or an understanding of intent the test cannot have.
+
+### Plan
+
+1. Split the base: the shared part keeps only what every mode can act on
+   (output format, safety posture, evidence discipline).
+2. Each mode appends the instructions for the tools **it** declares, taken from
+   the same list the factory passes to `createDeepAgent`, so the two cannot drift.
+3. For `analysis`, keep the prohibitions — they are load-bearing — and drop the
+   write-verification guidance that has no tool behind it.
+4. Extend `prompt-tool-contract.spec.ts` to the other two modes once each
+   prompt's vocabulary matches its declarations, and delete the scoping note in
+   that file's TSDoc.
+5. Validate by running `umbra orchestrate` and `umbra analyze` and reading the
+   traces — a prompt change is only verified by what the model then does.
 
 ---
 
