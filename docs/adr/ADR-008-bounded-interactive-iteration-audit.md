@@ -7,7 +7,7 @@ Date: 2026-08-25
 
 ## Status
 
-Accepted — 2026-08-25
+Accepted — amended 2026-08-27
 
 ## Context
 
@@ -83,6 +83,26 @@ flowchart LR
 - The middleware is applied to the single-agent `DeepAgentFactory#create` path.
   The orchestrated multi-agent path keeps its separate delegation and retry
   controls.
+
+  > **Amendment — 2026-08-27.** This consequence was recorded as neutral and was
+  > not. The delegation and retry controls bound how often work is delegated;
+  > they bound nothing about what a delegate spends once it starts. Worse, the
+  > recursion limit this record treats as a per-request ceiling is not one:
+  > `deepagents` spreads the parent config into a fresh `subagent.invoke`, so
+  > each delegate begins with the same numeric allowance again. A turn configured
+  > for 50 transitions can therefore spend 50 in the orchestrator plus 50 in each
+  > delegation.
+  >
+  > Observed live on 2026-08-27: a Researcher consumed an entire private
+  > allowance — eighteen tool calls, six of them semantic searches — and the run
+  > ended on `Recursion limit of 50 reached` with no handoff. The orchestrator
+  > learned nothing until the exception arrived.
+  >
+  > The orchestrated path now shares one budget for the whole turn, enforced
+  > inside each subagent. Recorded in
+  > [ADR-014](./ADR-014-delegation-mandate-shared-budget-and-question-channel.md).
+  > Nothing in this record is removed: the single-agent decision it describes is
+  > unchanged and still in force.
 
 ### Negative
 
