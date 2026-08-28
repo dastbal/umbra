@@ -4,8 +4,8 @@
  * Interactive terminal menu for switching the active LLM model at runtime.
  *
  * Renders a two-level menu:
- * 1. Provider selection: Vertex AI (cloud) or Ollama (local)
- * 2. Model selection: curated Vertex presets OR auto-detected Ollama models
+ * 1. Provider selection: Gemini, Claude on Vertex AI, or Ollama
+ * 2. Model selection: curated cloud presets or auto-detected Ollama models
  *
  * Triggered by typing `/model` in the chat session.
  *
@@ -35,9 +35,14 @@
  */
 
 import { ModelSwitcher } from '../../core/config/model-switcher';
+import {
+  isVertexAnthropicModel,
+  isGoogleCloudProjectId,
+  resolveVertexProject,
+} from '../../core/config/model-resolver';
 import { colors, box } from './theme';
 import { isInteractive, selectOutcome, SelectChoice } from './interactive-select';
-import { askNumber as askNumberPrompt } from './prompts';
+import { askNumber as askNumberPrompt, askText } from './prompts';
 import chalk from 'chalk';
 
 /**
@@ -108,7 +113,8 @@ async function chooseFromList<T>(
  * Displays the interactive model selection menu and returns the selected model.
  *
  * Shows a two-level menu: first pick a provider, then pick a specific model.
- * The selection is automatically persisted to `.env` via `ModelSwitcher.saveModelToEnv()`.
+ * The selection is automatically persisted to `.env`; Claude selections also
+ * persist their required Google Cloud project in the same write.
  *
  * @param currentModel - The currently active model string (highlighted as "active").
  * @param envFilePath - Absolute path to the `.env` file to update. Defaults to `process.cwd()/.env`.
@@ -124,14 +130,23 @@ export async function showModelMenu(
 
   // ── Step 1: Provider Selection ─────────────────────────────────────────────
   const isCurrentOllama = currentModel.startsWith('ollama:');
-  const providers: SelectChoice<'vertex' | 'ollama'>[] = [
+  const isCurrentClaude = isVertexAnthropicModel(currentModel);
+  const providers: SelectChoice<'vertex-gemini' | 'vertex-anthropic' | 'ollama'>[] = [
     {
-      label: '⚡  Vertex AI  (Gemini cloud — requires Google credentials)',
-      value: 'vertex',
-      active: !isCurrentOllama,
+      // The distinguishing word leads each row. Both cloud providers share the
+      // same Vertex AI transport, so starting both labels with it made them
+      // scan as the same option; the shared part moves to the parenthetical.
+      label: '⚡  Gemini  (Google — via Vertex AI)',
+      value: 'vertex-gemini',
+      active: !isCurrentOllama && !isCurrentClaude,
     },
     {
-      label: '🦙  Ollama     (Local models — free, no API key needed)',
+      label: '🟠  Claude  (Anthropic — via Vertex AI)',
+      value: 'vertex-anthropic',
+      active: isCurrentClaude,
+    },
+    {
+      label: '🦙  Ollama  (Local — free, no API key needed)',
       value: 'ollama',
       active: isCurrentOllama,
     },
@@ -144,11 +159,45 @@ export async function showModelMenu(
   }
 
   // ── Step 2: Model Selection ────────────────────────────────────────────────
-  if (selectedProvider === 'vertex') {
+  if (selectedProvider === 'vertex-gemini') {
     return showVertexModelMenu(currentModel, envFilePath);
+  } else if (selectedProvider === 'vertex-anthropic') {
+    return showVertexClaudeModelMenu(currentModel, envFilePath);
   } else {
     return showOllamaModelMenu(currentModel, envFilePath);
   }
+}
+
+/**
+ * Shows Claude models hosted by Google Vertex AI.
+ *
+ * @param currentModel - Currently active model for highlighting.
+ * @param envFilePath - Path to `.env` for persistence.
+ * @returns The selected model result, or null when cancelled.
+ */
+async function showVertexClaudeModelMenu(
+  currentModel: string,
+  envFilePath?: string,
+): Promise<ModelMenuResult | null> {
+  const choices: SelectChoice<string>[] = ModelSwitcher.getVertexClaudeModels().map(
+    (entry) => ({
+      label: entry.label,
+      value: entry.name,
+      active: entry.name === currentModel,
+    }),
+  );
+
+  const selected = await chooseFromList('Select Claude Model', choices);
+  if (selected === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
+  const projectId = await requestVertexProjectId();
+  if (projectId === null) return null;
+
+  process.env.GOOGLE_CLOUD_PROJECT = projectId;
+  return applyModelSelection(selected, envFilePath, projectId);
 }
 
 // ── Private: Vertex AI model submenu ─────────────────────────────────────────
@@ -250,16 +299,24 @@ async function showOllamaModelMenu(
  *
  * @param modelString - Full model string to set (e.g., "ollama:gemma4").
  * @param envFilePath - Path to `.env` file.
+ * @param vertexProjectId - Project to persist atomically for Claude on Vertex.
  * @returns The `ModelMenuResult` with save status.
  */
 function applyModelSelection(
   modelString: string,
   envFilePath?: string,
+  vertexProjectId?: string,
 ): ModelMenuResult {
   console.log('');
   console.log(`  ${colors.accent('✅')} ${chalk.white('Switching to')} ${colors.primary.bold(modelString)}`);
 
-  const saved = ModelSwitcher.saveModelToEnv(modelString, envFilePath);
+  const saved = vertexProjectId
+    ? ModelSwitcher.saveClaudeVertexSelectionToEnv(
+        modelString,
+        vertexProjectId,
+        envFilePath,
+      )
+    : ModelSwitcher.saveModelToEnv(modelString, envFilePath);
 
   if (saved) {
     console.log(`  ${colors.muted('💾 Saved to .env')}`);
@@ -271,6 +328,39 @@ function applyModelSelection(
   console.log('');
 
   return { model: modelString, saved };
+}
+
+/**
+ * Resolves the project required by Anthropic's Vertex client.
+ *
+ * Existing valid configuration is reused without prompting. When it is absent
+ * or malformed, the operator gets one focused question before any model switch
+ * is persisted or restarted.
+ *
+ * @returns A valid Google Cloud project ID, or null when cancelled/invalid.
+ */
+async function requestVertexProjectId(): Promise<string | null> {
+  const configured = resolveVertexProject();
+  if (configured && isGoogleCloudProjectId(configured)) return configured;
+
+  console.log('');
+  console.log(colors.warning('  Claude on Vertex needs the Google Cloud project ID.'));
+  console.log(colors.muted('  Use the ID from the project selector, not its display name.'));
+
+  const answer = await askText({
+    prompt: colors.primary.bold('  Google Cloud project ID: '),
+  });
+  const projectId = answer?.trim() ?? '';
+  if (!projectId) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+  if (!isGoogleCloudProjectId(projectId)) {
+    console.log(colors.danger('  ✗ Invalid Google Cloud project ID. Nothing was changed.\n'));
+    return null;
+  }
+
+  return projectId;
 }
 
 // ── Private: UI Helpers ───────────────────────────────────────────────────────

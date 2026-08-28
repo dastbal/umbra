@@ -10,6 +10,7 @@ import {
   resolveModelForSession,
   isGeminiModel,
   isOllamaModel,
+  isVertexAnthropicModel,
 } from '../config/model-resolver';
 import {
   askCodebaseTool,
@@ -41,6 +42,11 @@ import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import { createIterationBudgetMiddleware } from './iteration-budget.middleware';
 import * as path from 'path';
 import * as fs from 'fs';
+
+/** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
+const REPLACED_BUILTIN_TOOLS = [
+  'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file',
+] as const;
 
 // ── Architecture Decision Records ──────────────────────────────────────────────
 //
@@ -338,6 +344,8 @@ export class DeepAgentFactory {
     const taskExclusions = hasSubagents ? [] : ['task'];
     if (isGeminiModel(model)) {
       DeepAgentFactory.registerGeminiHarnessProfile(model, taskExclusions);
+    } else if (isVertexAnthropicModel(model)) {
+      DeepAgentFactory.registerAnthropicHarnessProfile(taskExclusions);
     } else if (isOllamaModel(model)) {
       // ADR-009: Register the Ollama harness profile under the bare "ollama"
       // provider key (not a model-specific key). This is intentional.
@@ -362,7 +370,7 @@ export class DeepAgentFactory {
       //   c) shouldn't be available in simple agent mode (task).
       registerHarnessProfile('ollama', {
         excludedTools: [
-          'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file',
+          ...REPLACED_BUILTIN_TOOLS,
           ...taskExclusions,
         ],
       });
@@ -445,6 +453,25 @@ export class DeepAgentFactory {
 
     registerHarnessProfile(model, { excludedTools });
     registerHarnessProfile(`google:${model}`, { excludedTools });
+  }
+
+  /**
+   * Registers provider-wide exclusions for Claude models.
+   *
+   * A base `anthropic` profile composes with DeepAgents' exact built-in Claude
+   * profiles, preserving their prompt guidance while replacing unsafe built-in
+   * filesystem tools with Umbra's guarded equivalents. `task` is excluded only
+   * when the current agent has no subagents.
+   *
+   * @param taskExclusions - Delegation exclusions for the current topology.
+   * @returns Nothing.
+   */
+  private static registerAnthropicHarnessProfile(
+    taskExclusions: string[] = ['task'],
+  ): void {
+    registerHarnessProfile('anthropic', {
+      excludedTools: [...REPLACED_BUILTIN_TOOLS, ...taskExclusions],
+    });
   }
 
   /**
@@ -569,7 +596,7 @@ export class DeepAgentFactory {
     // grep, glob: Zod union types → Gemini rejects their schema at parse time.
     // ls, read_file, write_file, edit_file: Windows path bugs + no backup safety.
     // The auto-scan below catches any FUTURE tools deepagents may add with union types.
-    const baselineExcluded = ['grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file'];
+    const baselineExcluded: string[] = [...REPLACED_BUILTIN_TOOLS];
 
     // Attempt schema conversion for each built-in deepagent tool.
     // Tools that throw 'Gemini cannot handle union types' are added to the list.

@@ -11,8 +11,8 @@
  * - `detectOllamaModels()` shells out to `ollama list` to discover installed models.
  *   This is the most reliable way to get real-time model availability without
  *   maintaining a static list.
- * - `saveModelToEnv()` reads the existing `.env`, patches the `AGENT_MODEL` line,
- *   and writes it back. This preserves all other env vars untouched.
+ * - Persistence reads the existing `.env`, patches only the selected keys, and
+ *   writes it back once. This preserves every unrelated variable untouched.
  * - We use `child_process.execSync` (not `spawn`) because `ollama list` is fast (<1s)
  *   and we want a synchronous result to keep the interactive menu simple.
  *
@@ -133,6 +133,43 @@ export class ModelSwitcher {
     modelString: string,
     envFilePath?: string,
   ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      { AGENT_MODEL: modelString },
+      envFilePath,
+    );
+  }
+
+  /**
+   * Persists a Claude-on-Vertex selection as one complete configuration.
+   *
+   * Writing the model and project together prevents
+   * `/model` from leaving a selected Claude model that cannot start after a
+   * partial save.
+   *
+   * @param modelString - Full `vertex-anthropic:*` model identifier.
+   * @param projectId - Google Cloud project where the partner model is enabled.
+   * @param envFilePath - Absolute path to the `.env` file to update.
+   * @returns True when both values were saved, otherwise false.
+   */
+  public static saveClaudeVertexSelectionToEnv(
+    modelString: string,
+    projectId: string,
+    envFilePath?: string,
+  ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      {
+        AGENT_MODEL: modelString,
+        GOOGLE_CLOUD_PROJECT: projectId,
+      },
+      envFilePath,
+    );
+  }
+
+  /** Updates selected environment keys while preserving the rest of the file. */
+  private static saveEnvironmentValues(
+    values: Readonly<Record<string, string>>,
+    envFilePath?: string,
+  ): boolean {
     const filePath = envFilePath ?? path.join(process.cwd(), '.env');
 
     try {
@@ -143,15 +180,19 @@ export class ModelSwitcher {
         content = fs.readFileSync(filePath, 'utf-8');
       }
 
-      const agentModelLine = `AGENT_MODEL=${modelString}`;
+      for (const [key, value] of Object.entries(values)) {
+        if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n]/.test(value)) {
+          return false;
+        }
+        const line = `${key}=${value}`;
+        const pattern = new RegExp(`^${key}=.*`, 'm');
 
-      if (/^AGENT_MODEL=.*/m.test(content)) {
-        // Replace existing AGENT_MODEL line
-        content = content.replace(/^AGENT_MODEL=.*/m, agentModelLine);
-      } else {
-        // Append at the end, ensuring a newline before if needed
-        const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-        content = `${content}${separator}${agentModelLine}\n`;
+        if (pattern.test(content)) {
+          content = content.replace(pattern, line);
+        } else {
+          const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+          content = `${content}${separator}${line}\n`;
+        }
       }
 
       fs.writeFileSync(filePath, content, 'utf-8');
@@ -205,6 +246,32 @@ export class ModelSwitcher {
       { name: 'gemini-2.5-flash-lite',  label: 'Gemini 2.5 Flash Lite   (fast & cheap)' },
       { name: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash        (balanced)' },
       { name: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro          (most capable 2.5)' },
+    ];
+  }
+
+  /**
+   * Returns the curated Claude models available through Google Vertex AI.
+   *
+   * These presets are intentionally separate from {@link getVertexModels}:
+   * both use Google infrastructure and ADC, but Gemini and Anthropic require
+   * different LangChain transports and provider-specific tool handling.
+   *
+   * @returns Enabled Claude presets ordered from lowest to highest capability.
+   */
+  public static getVertexClaudeModels(): Array<{ name: string; label: string }> {
+    return [
+      {
+        name: 'vertex-anthropic:claude-haiku-4-5@20251001',
+        label: 'Claude Haiku 4.5  (fast & economical)',
+      },
+      {
+        name: 'vertex-anthropic:claude-sonnet-5',
+        label: 'Claude Sonnet 5     ⭐ (recommended)',
+      },
+      {
+        name: 'vertex-anthropic:claude-opus-5',
+        label: 'Claude Opus 5       (maximum capability)',
+      },
     ];
   }
 }

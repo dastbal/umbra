@@ -7,8 +7,8 @@
 
 Umbra is an autonomous engineering orchestrator for **NestJS** projects. It
 analyzes, plans, writes, and verifies code with specialized subagents through a
-secure streaming CLI. It supports **Google Gemini (Vertex AI)** and local
-**Ollama** models.
+secure streaming CLI. It supports **Google Gemini**, **Anthropic Claude through
+Vertex AI**, and local **Ollama** models.
 
 > Requires Node.js 20 or later. Version 2 blocks agent access to credentials,
 > `.git`, arbitrary shell commands, and paths outside the workspace.
@@ -22,6 +22,7 @@ secure streaming CLI. It supports **Google Gemini (Vertex AI)** and local
 - [Getting Started with NestJS](#getting-started-with-nestjs)
   - [Option A — Ollama (Local, Free, No API Key) 🦙](#option-a--ollama-local-free-no-api-key-)
   - [Option B — Google Gemini (Cloud)](#option-b--google-gemini-cloud)
+  - [Option C — Anthropic Claude through Vertex AI](#option-c--anthropic-claude-through-vertex-ai)
 - [CLI — Interactive Streaming Sessions](#cli--interactive-streaming-sessions)
   - [Session Management](#session-management)
   - [Switching Models — `/model` command](#switching-models---model-command)
@@ -56,6 +57,7 @@ This library empowers your NestJS applications with an autonomous AI agent capab
 - ⚙️ **Autonomous Execution:** Executes full plans without requiring manual `yes/no` confirmations.
 - 🩹 **Self-Healing:** Recovers automatically from corrupted session states.
 - 🦙 **Local LLM Support:** Full integration with Ollama, allowing use of models like Gemma4, Qwen3.6, Llama3.2 locally — free, offline, and no API key needed.
+- 🟠 **Claude on Vertex AI:** Uses Haiku 4.5, Sonnet 5, or Opus 5 with Google ADC and Google Cloud billing.
 
 ## Safe first run
 
@@ -87,7 +89,7 @@ returns a non-zero exit code when the configured default health threshold fails.
 *   **Domain-Driven Design (DDD) Support:** Understands and can generate code following DDD principles.
 *   **Architecture Aware:** Can analyze and refactor code while respecting architectural boundaries.
 *   **TDD Workflow:** Integrates seamlessly with Jest for Test-Driven Development.
-*   **Multiple LLM Backends:** Supports Google Gemini (cloud) and Ollama (local).
+*   **Multiple LLM Backends:** Supports Google Gemini, Claude partner models on Vertex AI, and Ollama locally.
 *   **Codebase Indexing (RAG):** Enables the agent to understand your project's structure and code through semantic search.
 *   **Safety First:** Robust file system safety, HITL approvals for destructive actions.
 *   **Efficient CLI:** Real-time token streaming and interactive model switching.
@@ -144,7 +146,7 @@ umbra deep
 
 That's it! No Google account or API key needed.
 
-> **Tip:** Inside the agent session, type `/model` to interactively switch between Ollama models or even to Gemini cloud models if you configure them.
+> **Tip:** Inside the agent session, type `/model` to interactively switch between Ollama, Gemini, and enabled Claude models.
 
 ---
 
@@ -185,6 +187,33 @@ GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/your/service-account.json
 # Choose your Gemini model
 AGENT_MODEL=gemini-2.5-flash-lite
 ```
+
+---
+
+### Option C — Anthropic Claude through Vertex AI
+
+Claude uses the same Google Application Default Credentials as Gemini, but the
+model must first be enabled for your project in Vertex AI Model Garden. Usage is
+billed by Google Cloud; a Claude web subscription does not cover Vertex API use.
+
+```dotenv
+# Project where the Claude models are enabled
+GOOGLE_CLOUD_PROJECT=YOUR_GCP_PROJECT_ID
+GOOGLE_CLOUD_LOCATION=global
+
+# Fast and economical
+AGENT_MODEL=vertex-anthropic:claude-haiku-4-5@20251001
+
+# Other enabled choices:
+# AGENT_MODEL=vertex-anthropic:claude-sonnet-5
+# AGENT_MODEL=vertex-anthropic:claude-opus-5
+```
+
+For local development, authenticate once with
+`umbra auth login --project YOUR_GCP_PROJECT_ID`. Then run `umbra deep` or choose
+**Claude (Vertex AI)** from `/model`. If `GOOGLE_CLOUD_PROJECT` is missing, the
+selector asks for the project ID and saves it together with the model before it
+restarts the agent.
 
 ---
 
@@ -252,9 +281,10 @@ You: /model
 ╰────────────────────────────────────────────────────╯
 
   Select Provider:
-  1. ⚡  Vertex AI  (Gemini cloud — requires Google credentials)
-  2. 🦙  Ollama     (Local models — free, no API key needed)  ← active
-  Provider: 2
+  1. ⚡  Vertex AI       (Gemini cloud — Google credentials)
+  2. 🟠  Claude Vertex   (Anthropic models — Google credentials)
+  3. 🦙  Ollama          (Local models — free, no API key needed)  ← active
+  Provider: 3
 
   Detecting Ollama models... ✓ (4 found)
 
@@ -276,7 +306,7 @@ The selected model is automatically saved to your `.env` file for future session
 
 | Command | Description | State |
 |---|---|---|
-| `/model` | Switch the active LLM model interactively (Ollama or Vertex AI) | — |
+| `/model` | Switch the active LLM model interactively (Ollama, Gemini, or Claude on Vertex AI) | — |
 | `/mentor` | Toggle deep mentor mode — Forced Output Contract, trade-off analysis, Socratic gates | `[ON]` / `[OFF]` |
 | `/help` | Show all available slash commands with their current state | — |
 | `Ctrl+C` | Exit the session cleanly | — |
@@ -339,6 +369,18 @@ $env:AGENT_MODEL="gemini-2.5-flash";      umbra deep
 
 # Max capability (architecture, complex refactors)
 $env:AGENT_MODEL="gemini-2.5-pro";        umbra orchestrate
+
+# ── Claude through Vertex AI (cloud) ──────────────────────────────
+$env:GOOGLE_CLOUD_PROJECT="YOUR_GCP_PROJECT_ID"
+
+# Fast and economical
+$env:AGENT_MODEL="vertex-anthropic:claude-haiku-4-5@20251001"; umbra deep
+
+# Recommended for coding and agentic workflows
+$env:AGENT_MODEL="vertex-anthropic:claude-sonnet-5";  umbra deep
+
+# Maximum capability
+$env:AGENT_MODEL="vertex-anthropic:claude-opus-5";    umbra orchestrate
 ```
 
 ```bash
@@ -350,6 +392,10 @@ AGENT_MODEL=ollama:qwen3.6 umbra deep
 # Gemini examples
 AGENT_MODEL=gemini-2.5-flash-lite umbra deep
 AGENT_MODEL=gemini-2.5-pro umbra orchestrate
+
+# Claude through Vertex AI examples
+GOOGLE_CLOUD_PROJECT=YOUR_GCP_PROJECT_ID AGENT_MODEL=vertex-anthropic:claude-haiku-4-5@20251001 umbra deep
+GOOGLE_CLOUD_PROJECT=YOUR_GCP_PROJECT_ID AGENT_MODEL=vertex-anthropic:claude-sonnet-5 umbra deep
 ```
 
 **Available Model Tiers:**
@@ -366,8 +412,14 @@ AGENT_MODEL=gemini-2.5-pro umbra orchestrate
 | `flash`    | `gemini-3.5-flash`       | ⚡ Cloud    | Balanced speed + quality (recommended) |
 | `pro`      | `gemini-2.5-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
 | `3.5-lite` | `gemini-3.5-flash-lite`  | ⚡ Cloud    | Fast, high-volume workloads            |
+| `claude-fast` | `vertex-anthropic:claude-haiku-4-5@20251001` | 🟠 Vertex | Fast, economical Claude work |
+| `claude` | `vertex-anthropic:claude-sonnet-5` | 🟠 Vertex | Coding and agentic workflows |
+| `claude-max` | `vertex-anthropic:claude-opus-5` | 🟠 Vertex | Architecture and hard problems |
 
-> **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This ensures a stable and high-quality codebase index even when switching between local Ollama and cloud Gemini models.
+The `/model` menu still displays **Claude Haiku 4.5**. Its dated suffix is the
+Vertex transport version confirmed for that model and is selected automatically.
+
+> **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This keeps one stable codebase index when switching among Ollama, Gemini, and Claude.
 
 ---
 
@@ -509,6 +561,7 @@ graph TD
         F --> G[LLMProvider];
         G -- Ollama --> H(OllamaChatAdapter);
         G -- Gemini --> I(ChatVertexAI);
+        G -- Claude on Vertex --> R(ChatAnthropic + AnthropicVertex);
         F -- Simple Agent --> J(createDeepAgent);
         F -- Orchestrator --> K(createDeepAgent);
         K --> L[Researcher Subagent];
@@ -542,7 +595,7 @@ graph TD
 
 *   **CLI:** Handles user interaction, model switching (`/model`), and session management.
 *   **Agent Core:** `DeepAgentFactory` orchestrates agent creation, routing requests to either a simple `DeepAgent` or a multi-subagent `Orchestrator`.
-*   **LLM Integration:** `LLMProvider` routes requests to `OllamaChatAdapter` for local models or `ChatVertexAI` for cloud models.
+*   **LLM Integration:** `LLMProvider` routes local models to `OllamaChatAdapter`, Gemini to `ChatVertexAI`, and Vertex-hosted Claude to `ChatAnthropic` with Anthropic's Vertex client.
 *   **Services & Tools:** Provides core functionalities like safe file operations, RAG indexing, conversation persistence (SQLite), and the underlying LLM tooling.
 
 ---
@@ -672,9 +725,11 @@ The library follows a clean, modular structure:
 |   | Zero-code tracing: all LLM calls, tool calls, LangGraph steps | ✅ Done |
 |   | Configure with 3 env vars: LANGCHAIN_TRACING_V2, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT | ✅ Done |
 |   | No-op when env vars are absent (safe for library consumers) | ✅ Done |
+| **v2.0.1** | **Claude partner models through Vertex AI** | ✅ **Done** |
+|   | Haiku 4.5, Sonnet 5, and Opus 5 routing and `/model` presets | ✅ Done |
+|   | Google ADC transport, Anthropic harness profile, and packaged pricing | ✅ Done |
 | **Future** | SSE HTTP API (`/agent/stream`) | ⏳ Planned |
 |   | Agent self-evolution — write new skills from patterns it discovers | ⏳ Planned |
-|   | Anthropic Claude support (`@langchain/anthropic`) | ⏳ Planned |
 |   | LangGraph state-level mentor toggle (true per-session stateful mode) | ⏳ Planned |
 
 ---

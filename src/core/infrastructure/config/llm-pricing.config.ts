@@ -51,7 +51,13 @@ export class LlmPricingConfig implements PricingRegistry {
    * Translates the price-per-million JSON into the Pricing domain object.
    */
   getPricingForModel(modelName: string): Pricing | undefined {
-    const raw = this.pricingData[modelName];
+    const providerNeutralName = modelName.startsWith('vertex-anthropic:')
+      ? modelName.slice('vertex-anthropic:'.length)
+      : modelName;
+    const stablePricingName = providerNeutralName.replace(/@\d{8}$/, '');
+    const raw = this.pricingData[modelName]
+      ?? this.pricingData[providerNeutralName]
+      ?? this.pricingData[stablePricingName];
     if (!raw) {
       // Warn once per model: this is called for every usage report, and a silent
       // `undefined` here is exactly how cost tracking used to report zero.

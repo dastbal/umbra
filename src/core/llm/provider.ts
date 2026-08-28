@@ -6,6 +6,7 @@
  * ## Provider Routing
  * The provider is inferred from the model string:
  * - `"gemini-*"`, `"google:*"`, `"google-vertexai:*"` → Vertex AI (`ChatVertexAI`)
+ * - `"vertex-anthropic:*"` → Claude on Vertex AI (`ChatAnthropic` + `AnthropicVertex`)
  * - `"ollama:*"` → Local Ollama (`OllamaChatAdapter` — a `ChatOllama` wrapper
  *   that serializes non-string tool message content before sending to Ollama API)
  *
@@ -30,13 +31,20 @@
  * ```
  */
 
+import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
+import { ChatAnthropic } from '@langchain/anthropic';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { ChatVertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
 import { OllamaChatAdapter } from './ollama-adapter';
 import { VertexChatAdapter } from './vertex-chat-adapter';
 import {
   isOllamaModel,
   isGeminiModel,
+  isVertexAnthropicModel,
+  getVertexAnthropicModelName,
+  rejectsTemperature,
   resolveVertexLocation,
+  resolveVertexProject,
 } from '../config/model-resolver';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
@@ -70,6 +78,7 @@ export class LLMProvider {
    *
    * Routes to:
    * - `ChatVertexAI` for Gemini/Google models (`gemini-*`, `google:*`, `google-vertexai:*`)
+   * - `ChatAnthropic` for Claude on Vertex AI (`vertex-anthropic:*`)
    * - `ChatOllama` for local Ollama models (`ollama:*`)
    *
    * Both implement `BaseChatModel` from `@langchain/core`, so they are
@@ -80,13 +89,16 @@ export class LLMProvider {
    * @returns A configured `BaseChatModel` ready for use.
    * @throws {Error} If using a Vertex AI model without valid credentials.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public static createChatModel(
     model: string,
     temperature = 0,
-  ): any {
+  ): BaseChatModel {
     if (isOllamaModel(model)) {
       return LLMProvider.createOllamaModel(model, temperature);
+    }
+
+    if (isVertexAnthropicModel(model)) {
+      return LLMProvider.createVertexAnthropicModel(model, temperature);
     }
 
     if (isGeminiModel(model) || !model.includes(':')) {
@@ -98,7 +110,7 @@ export class LLMProvider {
     const provider = model.split(':')[0];
     throw new Error(
       `Unsupported LLM provider: "${provider}". ` +
-      `Supported providers: "ollama", "gemini-*" (Vertex AI). ` +
+      `Supported providers: "ollama", "gemini-*", "vertex-anthropic". ` +
       `Set AGENT_MODEL in your .env file.`,
     );
   }
@@ -270,6 +282,47 @@ export class LLMProvider {
 
     // Normalize to absolute path — the Google SDK requires this.
     process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredentialsPath;
+  }
+
+  /**
+   * Creates Claude through Anthropic's official Google Vertex AI client.
+   *
+   * The returned object is a real `ChatAnthropic` instance rather than a custom
+   * subclass. DeepAgents uses that class identity to enable Anthropic prompt
+   * caching and provider-specific message handling.
+   *
+   * @param model - Full `vertex-anthropic:*` model identifier.
+   * @param temperature - Sampling temperature.
+   * @returns A configured ChatAnthropic model backed by AnthropicVertex.
+   * @throws Error when ADC or the explicit Google Cloud project is missing.
+   */
+  private static createVertexAnthropicModel(
+    model: string,
+    temperature: number,
+  ): ChatAnthropic {
+    LLMProvider.ensureVertexCredentials();
+    const projectId = resolveVertexProject();
+    if (!projectId) {
+      throw new Error(
+        '❌ GOOGLE_CLOUD_PROJECT is required for Claude on Vertex AI. ' +
+        'Set it to the project where the Claude model is enabled.',
+      );
+    }
+
+    const region = resolveVertexLocation();
+    const vertexClient = new AnthropicVertex({ projectId, region, maxRetries: 0 });
+    const modelName = getVertexAnthropicModelName(model);
+
+    // The Claude 5 generation rejects `temperature` outright (HTTP 400), so the
+    // parameter is omitted rather than sent and retried — a retry would cost a
+    // second paid request for a failure that is fully predictable from the
+    // model identifier. Claude 4.5 still honors it and keeps receiving it.
+    return new ChatAnthropic({
+      model: modelName,
+      ...(rejectsTemperature(modelName) ? {} : { temperature }),
+      maxRetries: 0,
+      createClient: () => vertexClient,
+    });
   }
 
   /**

@@ -1,6 +1,5 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { ChatVertexAI } from '@langchain/google-vertexai';
-import { isGeminiModel, resolveVertexLocation } from './model-resolver';
+import { LLMProvider } from '../llm/provider';
 
 /**
  * @module ModelFactory
@@ -12,11 +11,8 @@ import { isGeminiModel, resolveVertexLocation } from './model-resolver';
  * `createSummarizationMiddleware` from deepagents, which needs an actual LLM
  * object to call when summarizing long conversation histories.
  *
- * **Currently supported providers:**
- * - Gemini / Vertex AI (`gemini-*` prefix) — uses `GOOGLE_APPLICATION_CREDENTIALS`
- *
- * Additional providers (Ollama, Anthropic, Google GenAI) can be added later
- * by installing the corresponding `@langchain/*` package and extending `create()`.
+ * Model construction is delegated to `LLMProvider` so summarization uses the
+ * same provider routing, credentials, region, and adapters as the main agent.
  *
  * @example
  * ```ts
@@ -37,23 +33,6 @@ export class ModelFactory {
    * @throws Error if the provider is not yet supported.
    */
   public static create(modelName: string, temperature = 0): BaseChatModel {
-    if (isGeminiModel(modelName)) {
-      // Vertex AI is our primary Gemini provider (enterprise, uses service account auth).
-      // No API key needed — relies on GOOGLE_APPLICATION_CREDENTIALS env var.
-      return new ChatVertexAI({
-        model: modelName,
-        temperature,
-        location: resolveVertexLocation(),
-      }) as unknown as BaseChatModel;
-    }
-
-    // For model strings deepagents itself understands (e.g., Ollama, Anthropic),
-    // we return a lightweight proxy so the middleware can still call it.
-    // deepagents will resolve the actual model at runtime via its own harness.
-    throw new Error(
-      `ModelFactory: Provider not yet configured for model "${modelName}". ` +
-      `Currently supports Gemini/Vertex AI models (gemini-* prefix). ` +
-      `To add support, install the provider's @langchain/* package and extend ModelFactory.create().`,
-    );
+    return LLMProvider.createChatModel(modelName, temperature);
   }
 }

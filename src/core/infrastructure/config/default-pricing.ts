@@ -16,6 +16,7 @@ export interface ModelPricingEntry {
  * A project-local `llm-pricing.json` still overrides these values per model.
  *
  * @see LlmPricingConfig
+ * @see https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
  */
 export const DEFAULT_LLM_PRICING: Readonly<Record<string, ModelPricingEntry>> = {
   'gemini-3.1-pro-preview': { inputMillion: 2.00, outputMillion: 12.00 },
@@ -27,5 +28,8 @@ export const DEFAULT_LLM_PRICING: Readonly<Record<string, ModelPricingEntry>> = 
   'gemini-2.5-flash-lite': { inputMillion: 0.10, outputMillion: 0.40 },
   'gemini-2.0-flash': { inputMillion: 0.15, outputMillion: 0.60 },
   'gemini-2.0-flash-lite-001': { inputMillion: 0.075, outputMillion: 0.30 },
+  'claude-haiku-4-5': { inputMillion: 1.00, outputMillion: 5.00 },
+  'claude-sonnet-5': { inputMillion: 2.00, outputMillion: 10.00 },
+  'claude-opus-5': { inputMillion: 5.00, outputMillion: 25.00 },
   'text-embedding-004': { inputMillion: 0.025, outputMillion: 0.00 },
 };

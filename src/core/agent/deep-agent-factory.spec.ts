@@ -16,6 +16,7 @@ jest.mock('../llm/provider', () => ({
 import { DeepAgentFactory } from './deep-agent-factory';
 
 interface DeepAgentFactoryInternals {
+  registerAnthropicHarnessProfile(taskExclusions?: string[]): void;
   registerGeminiHarnessProfile(model: string, taskExclusions?: string[]): void;
   resolveRuntimeModel(model: string): unknown;
   resolveRoleModel(model: string): unknown;
@@ -95,6 +96,34 @@ describe('DeepAgentFactory model routing', () => {
       // The schema-incompatible exclusions must survive either way.
       expect(call[1].excludedTools).toEqual(expect.arrayContaining(['grep', 'glob', 'ls']));
     }
+  });
+
+  it('registers Claude tool exclusions under the Anthropic provider profile', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerAnthropicHarnessProfile();
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'anthropic',
+      expect.objectContaining({
+        excludedTools: expect.arrayContaining([
+          'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'task',
+        ]),
+      }),
+    );
+  });
+
+  it('keeps Claude delegation available when subagents exist', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerAnthropicHarnessProfile([]);
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'anthropic',
+      expect.objectContaining({
+        excludedTools: expect.not.arrayContaining(['task']),
+      }),
+    );
   });
 
   it('makes one-shot analysis override generic skill-discovery tool instructions', () => {

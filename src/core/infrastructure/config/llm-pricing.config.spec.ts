@@ -36,6 +36,27 @@ describe('LlmPricingConfig', () => {
     }
   });
 
+  it('ships the published global Vertex prices for enabled Claude models', () => {
+    const config = new LlmPricingConfig();
+
+    const haiku = config.getPricingForModel('claude-haiku-4-5');
+    expect(haiku!.promptTokenCost.amount).toBeCloseTo(1 / 1_000_000, 12);
+    expect(haiku!.completionTokenCost.amount).toBeCloseTo(5 / 1_000_000, 12);
+
+    const sonnet = config.getPricingForModel('claude-sonnet-5');
+    expect(sonnet!.promptTokenCost.amount).toBeCloseTo(2 / 1_000_000, 12);
+    expect(sonnet!.completionTokenCost.amount).toBeCloseTo(10 / 1_000_000, 12);
+
+    const opus = config.getPricingForModel('claude-opus-5');
+    expect(opus!.promptTokenCost.amount).toBeCloseTo(5 / 1_000_000, 12);
+    expect(opus!.completionTokenCost.amount).toBeCloseTo(25 / 1_000_000, 12);
+
+    expect(config.getPricingForModel('vertex-anthropic:claude-haiku-4-5@20251001'))
+      .toEqual(expect.objectContaining({
+        modelName: 'vertex-anthropic:claude-haiku-4-5@20251001',
+      }));
+  });
+
   it('lets a project-local file override one model without dropping the rest', () => {
     writeFileSync(
       join(cwd, 'llm-pricing.json'),
