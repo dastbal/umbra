@@ -440,3 +440,142 @@ trace to read.
 3. If it is high, replace only the matcher: a cheap model given the mandate and
    the question, returning the relevant sections. Keep the quotation rule; the
    model selects, it does not answer.
+
+---
+
+## A preflight that offers to fix each missing prerequisite
+
+> Recorded 2026-08-28, branch `2.0.1`. David's own request, raised while the
+> Project Id failure was still unexplained: *"si le doy deep y ve que no tiene
+> permiso, lo primero que debería pedir es conectarse — que él mismo me ayude y
+> corra lo de auth"*.
+
+### The idea
+
+`umbra deep` should establish its prerequisites **before** touching the network,
+and when one is missing, offer to fix it in place rather than failing with the
+underlying library's error.
+
+### Why it was not built with ADR-017
+
+The specific prerequisite that prompted the request turned out to be already
+satisfied: the login *had* run, and the project it stored was simply never read.
+[ADR-017](./adr/ADR-017-prerequisites-resolved-not-guessed.md) reads it, so
+`umbra deep` now works without asking anything. Offering to re-run a login that
+had already succeeded would have papered over the real defect.
+
+**The general shape still applies, and is worth more than the one case.** What
+shipped fixes one prerequisite. Nothing stops the next one — a missing Ollama
+daemon, an unreadable `.env`, a revoked credential — from surfacing as a raw
+library error again.
+
+### The mechanism to reuse — do not invent one
+
+`umbra doctor` already enumerates prerequisites and reports pass/fail per check
+(`src/bin/cli.ts`, the `doctor` command). It is the check registry this needs.
+What it lacks is a remedy attached to each check, and a caller that runs it
+before the session starts.
+
+The prompt surface also already exists: `confirm` in
+`src/presentation/cli/prompts.ts`, which `umbra auth login` uses for its own
+"opens your browser, continue?" gate ([ADR-012](./adr/ADR-012-arrow-key-selection-prompts.md)).
+
+### Plan
+
+1. Give each `doctor` check an optional remedy: a label and an action.
+2. Run the checks at the start of `deep` and `orchestrate`. Only report anything
+   when a check fails — a passing preflight must stay silent, or it becomes
+   noise on every start.
+3. For a failing check with a remedy, ask once, then re-run that check.
+4. `--no-preflight` for CI and embedded use. A prompt that cannot be answered is
+   worse than the original error.
+5. Note the ordering hazard: today RAG indexing runs before the first message,
+   so the preflight has to come before indexing, not before inference.
+
+### Cost
+
+Free when everything passes — the checks are local. The risk is startup latency
+if a remedy is attempted automatically; step 3 exists to keep it operator-driven.
+
+---
+
+## Indexing should be transactional, and reindex only what is missing
+
+> Recorded 2026-08-28, branch `2.0.1`. Produced by the ideation ritual's
+> "borrow from another discipline" lens (a database), while diagnosing the run
+> that reported `✅ Indexing Complete.` after fourteen failed batches.
+
+### The idea
+
+A database does not commit a partial transaction and call it a success. Indexing
+should either report exactly what is missing, or be resumable so the gap closes
+on the next run without redoing the work that succeeded.
+
+### What is fixed already, and what is not
+
+[ADR-017](./adr/ADR-017-prerequisites-resolved-not-guessed.md) stopped the lie:
+a run with failed batches now reports `⚠️ Indexing finished with gaps` instead of
+a green line. **It does not close the gap.** The chunks whose batches failed are
+absent from the vector store, and the file registry has already marked their
+files as processed — so the next run reports `✨ Project is up to date.` over an
+index that is not.
+
+That second half is the more interesting defect and it is untouched.
+
+### The mechanism to reuse
+
+`src/core/rag/indexer.ts` — `embedAndSaveBatches` now returns
+`{ embeddedBatches, failedBatches }`, which is the hook. The registry that
+decides what needs reprocessing is in the same module (`isFileChanged`).
+
+### Plan
+
+1. Establish what the registry records and when. The bug is that a file is
+   marked processed before its vectors are known to be stored.
+2. Record failed chunks, not just a count — enough to retry precisely.
+3. Make `isFileChanged` (or a sibling) treat a file with missing vectors as
+   needing work, so a later run heals the index with no operator action.
+4. Decide whether automatic retry belongs here at all. In the observed run every
+   failure had the same cause, so retrying would have multiplied a certain
+   failure fourteen times — the value is in *resuming later*, not retrying now.
+5. Validate by failing embeddings deliberately, fixing the cause, and confirming
+   the second run indexes exactly the missing chunks.
+
+---
+
+## Umbra should not require Google to run at all
+
+> Recorded 2026-08-28, branch `2.0.1`. The heretical candidate from the ideation
+> ritual. **Contradicts an accepted decision and is recorded as a proposal, not
+> a plan.**
+
+### The heresy
+
+The rule is written in `src/core/llm/provider.ts`: *"Embeddings are **always**
+Vertex AI, regardless of which chat model is active."*
+[ADR-010](./adr/ADR-010-umbra-public-package-and-cli.md) reinforces the shape by
+shipping ADC auth commands as part of the package.
+
+The consequence nobody chose: a **100% Ollama** user — the configuration the
+README advertises as *"free, offline, and no API key needed"* — still cannot
+index a project without Google credentials and a Google Cloud project. The
+fourteen `Unable to detect a Project Id` errors that produced ADR-017 hit a
+Gemini user, but the identical crash reaches the user who picked Ollama
+specifically to avoid the cloud.
+
+The proposal: embeddings follow the chat provider. Local chat, local embeddings.
+Google becomes an option rather than a floor.
+
+### What would make it worthless
+
+The recorded rationale still stands and has to be faced, not dismissed: Ollama
+embedding models are materially worse, and switching embedding models invalidates
+the whole index — every switch means a full reindex. A per-provider index, or a
+recorded embedding-model identity that forces a reindex on change, is the real
+cost of this idea and the reason it is a proposal.
+
+### Where it would touch
+
+`src/core/llm/provider.ts` (`getEmbeddingsModel`), `src/core/rag/` (index
+identity and invalidation). If it is ever accepted, it supersedes the module
+rule above and amends ADR-010's packaging claim.

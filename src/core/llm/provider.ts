@@ -150,9 +150,100 @@ export class LLMProvider {
       LLMProvider.ensureVertexCredentials();
       LLMProvider.embeddingsInstance = new VertexAIEmbeddings({
         model: 'text-embedding-004',
+        // Passed explicitly rather than left to Google's auto-detection. ADC
+        // user credentials carry no project id, so the library falls back to
+        // reading gcloud's own config — which is absent or unreadable on a
+        // machine where the gcloud CLI is broken. Every chunk then failed with
+        // "Unable to detect a Project Id", once per chunk.
+        ...LLMProvider.vertexProjectField(),
       });
     }
     return LLMProvider.embeddingsInstance;
+  }
+
+  /**
+   * Supplies the Google Cloud project to a Vertex client, when configured.
+   *
+   * Claude's route required the project from the start and failed loudly
+   * without it. Gemini and embeddings instead relied on Google's auto-detection
+   * and produced a raw library error in any project whose `.env` omits
+   * `GOOGLE_CLOUD_PROJECT` — the common case for a consumer of the package.
+   *
+   * The field is omitted when unset so auto-detection still works where it
+   * does work (a service account file carries its own project).
+   *
+   * @returns A partial client config carrying the project, or an empty object.
+   */
+  private static vertexProjectField(): { authOptions?: { projectId: string } } {
+    const projectId = LLMProvider.resolveProjectId();
+    return projectId ? { authOptions: { projectId } } : {};
+  }
+
+  /**
+   * Publishes the resolved project into the environment Google's clients read.
+   *
+   * `GOOGLE_CLOUD_PROJECT` is the variable `google-auth-library` consults during
+   * project detection, and it is the only lever that reaches every Google client
+   * — including the ones Umbra does not construct itself. Setting it once here
+   * is why a consumer project needs no Google settings of its own after
+   * `umbra auth login --project X`.
+   *
+   * Nothing is overwritten: an explicitly configured project always wins. This
+   * mirrors what `ensureVertexCredentials` already does with the credentials
+   * path, which the Google SDK likewise requires in the environment.
+   *
+   * @returns Nothing.
+   */
+  private static publishProjectToEnvironment(): void {
+    if (process.env.GOOGLE_CLOUD_PROJECT?.trim()) return;
+
+    const projectId = LLMProvider.readAdcQuotaProject();
+    if (projectId) process.env.GOOGLE_CLOUD_PROJECT = projectId;
+  }
+
+  /**
+   * Resolves the Google Cloud project, falling back to what the login wrote.
+   *
+   * `GOOGLE_CLOUD_PROJECT` wins when set. When it is not — the normal case in a
+   * consumer project whose `.env` has no Google settings — the project is read
+   * from the local ADC file's `quota_project_id`, which is exactly what
+   * `umbra auth login --project X` stores there.
+   *
+   * That fallback exists because Google's own detection does not use it: an
+   * `authorized_user` ADC file carries `quota_project_id` and **no**
+   * `project_id`, so the library reports "Unable to detect a Project Id" even
+   * though the project the operator just authorized is sitting in the file.
+   * Verified against a real ADC file on 2026-08-28.
+   *
+   * @returns The project id, or undefined when nothing declares one.
+   */
+  public static resolveProjectId(): string | undefined {
+    return resolveVertexProject() ?? LLMProvider.readAdcQuotaProject();
+  }
+
+  /**
+   * Reads `quota_project_id` from the local ADC file.
+   *
+   * Only that one field is read; no credential material is loaded, logged, or
+   * returned. A missing, unreadable or malformed file yields undefined rather
+   * than an error — the caller's job is to report the absence in its own words.
+   *
+   * @returns The quota project id, or undefined.
+   */
+  private static readAdcQuotaProject(): string | undefined {
+    try {
+      const adcPath = LLMProvider.getApplicationDefaultCredentialsPath();
+      if (!fs.existsSync(adcPath)) return undefined;
+      const parsed = JSON.parse(fs.readFileSync(adcPath, 'utf-8')) as {
+        quota_project_id?: unknown;
+      };
+      const quotaProject = parsed.quota_project_id;
+      return typeof quotaProject === 'string' && quotaProject.trim()
+        ? quotaProject.trim()
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -183,6 +274,7 @@ export class LLMProvider {
       model: process.env.GOOGLE_CLOUD_MODEL_NAME ?? 'gemini-2.5-flash-lite',
       temperature: 0,
       location: resolveVertexLocation(),
+      ...LLMProvider.vertexProjectField(),
     });
   }
 
@@ -199,6 +291,7 @@ export class LLMProvider {
       model: config?.modelName ?? process.env.GOOGLE_CLOUD_MODEL_NAME ?? 'gemini-2.5-flash-lite',
       temperature: config?.temperature ?? 0,
       location: resolveVertexLocation(),
+      ...LLMProvider.vertexProjectField(),
     });
   }
 
@@ -259,6 +352,7 @@ export class LLMProvider {
       model,
       temperature,
       location: resolveVertexLocation(),
+      ...LLMProvider.vertexProjectField(),
       ...LLMProvider.geminiReasoningFields(model),
     });
   }
@@ -310,6 +404,11 @@ export class LLMProvider {
    * @throws {Error} If the credentials file does not exist at the resolved path.
    */
   private static ensureVertexCredentials(): void {
+    // Credentials and project are established together: every Vertex path goes
+    // through here, and ADC alone is not enough — an authorized_user file
+    // authenticates the caller but declares no project.
+    LLMProvider.publishProjectToEnvironment();
+
     const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
     if (!credentialsPath && fs.existsSync(LLMProvider.getApplicationDefaultCredentialsPath())) {
@@ -355,7 +454,7 @@ export class LLMProvider {
     temperature: number,
   ): ChatAnthropic {
     LLMProvider.ensureVertexCredentials();
-    const projectId = resolveVertexProject();
+    const projectId = LLMProvider.resolveProjectId();
     if (!projectId) {
       throw new Error(
         '❌ GOOGLE_CLOUD_PROJECT is required for Claude on Vertex AI. ' +

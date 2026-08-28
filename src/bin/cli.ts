@@ -386,6 +386,11 @@ program
           ? `Decision-record index created: ${scaffold.adrPath}`
           : `Decision-record index already exists: ${scaffold.adrPath}`,
       );
+      if (scaffold.addedIgnoreRules.length > 0) {
+        log.sys(
+          `Local agent state ignored: ${scaffold.addedIgnoreRules.join(', ')}`,
+        );
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       log.error(

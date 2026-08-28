@@ -21,6 +21,80 @@ export interface WorkspaceScaffoldResult {
   preservedSkills: string[];
   /** Whether this invocation created the ADR index. */
   createdAdrIndex: boolean;
+  /** Ignore rules added to the project's `.gitignore` by this invocation. */
+  addedIgnoreRules: string[];
+}
+
+/**
+ * Machine-local agent state that must never reach the consumer's repository.
+ *
+ * Deliberately narrow. `skills/` and `docs/adr/` are **not** here: ADR-012
+ * decided that the shipped working guides and the decision-record index are
+ * scaffolded into the consumer project *to be versioned there*, so ignoring
+ * them would quietly undo an accepted decision. What is listed is only what a
+ * second machine would regenerate anyway — session history, the RAG index, and
+ * the vector store.
+ */
+export const AGENT_LOCAL_STATE_IGNORES: readonly string[] = [
+  '.agent/',
+  'deep_agent_history.db',
+  'deep_agent_history.db-shm',
+  'deep_agent_history.db-wal',
+  'interactive-turns.jsonl',
+] as const;
+
+/** Header that marks Umbra's block in a consumer `.gitignore`. */
+const IGNORE_BLOCK_HEADER = '# Umbra — local agent state (safe to delete)';
+
+/**
+ * Adds the agent's local-state rules to the project's `.gitignore`.
+ *
+ * Running `umbra init` left roughly two dozen untracked files in the consumer's
+ * working tree — session databases, the RAG index, write-ahead logs — all of
+ * which regenerate on their own and none of which mean anything on another
+ * machine. Committing them was the default outcome of the next `git add -A`.
+ *
+ * Only missing rules are appended, and nothing already in the file is rewritten
+ * or reordered: a `.gitignore` is the consumer's file, not ours. A project
+ * without one gets a new file containing only this block.
+ *
+ * @param rootDir - Absolute path of the target project.
+ * @returns The rules actually added, empty when everything was already ignored.
+ */
+export function ensureAgentStateIgnored(rootDir: string): string[] {
+  const ignorePath = path.join(rootDir, '.gitignore');
+
+  let existing = '';
+  try {
+    if (fs.existsSync(ignorePath)) existing = fs.readFileSync(ignorePath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  const present = new Set(
+    existing
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#')),
+  );
+
+  // A trailing-slash rule and its bare form mean the same thing to git, so a
+  // project that already ignores `.agent` must not gain a second `.agent/`.
+  const missing = AGENT_LOCAL_STATE_IGNORES.filter(
+    (rule) => !present.has(rule) && !present.has(rule.replace(/\/$/, '')),
+  );
+  if (missing.length === 0) return [];
+
+  const separator = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+  const block = `${separator}\n${IGNORE_BLOCK_HEADER}\n${missing.join('\n')}\n`;
+
+  try {
+    fs.appendFileSync(ignorePath, block, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  return [...missing];
 }
 
 /**
@@ -110,6 +184,7 @@ export function ensureWorkspaceSkills(
     installedSkills: installedSkills.sort(),
     preservedSkills: preservedSkills.sort(),
     createdAdrIndex,
+    addedIgnoreRules: ensureAgentStateIgnored(resolvedRoot),
   };
 }
 

@@ -15,6 +15,19 @@ jest.mock('@anthropic-ai/vertex-sdk', () => ({
   AnthropicVertex: mockAnthropicVertex,
 }));
 
+// The two readers the ADC fallback uses are replaced wholesale rather than
+// spied on: `fs`'s own properties are not configurable, so `jest.spyOn` throws
+// "Cannot redefine property". Everything else in `fs` stays real.
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs');
+  return {
+    ...actual,
+    existsSync: jest.fn(actual.existsSync),
+    readFileSync: jest.fn(actual.readFileSync),
+  };
+});
+
+import * as fs from 'fs';
 import { LLMProvider } from './provider';
 
 describe('LLMProvider Claude on Vertex routing', () => {
@@ -32,6 +45,12 @@ describe('LLMProvider Claude on Vertex routing', () => {
     process.env.GOOGLE_APPLICATION_CREDENTIALS = __filename;
     delete process.env.AGENT_REASONING;
     delete process.env.AGENT_REASONING_DISPLAY;
+    // Default: no ADC file, so tests that do not stub it see only the env var.
+    stubAdcFile(null);
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
   });
 
   afterAll(() => {
@@ -163,8 +182,58 @@ describe('LLMProvider Claude on Vertex routing', () => {
     expect(options).not.toHaveProperty('thinking');
   });
 
-  it('fails before creating a client when the GCP project is missing', () => {
+  it('falls back to the project the ADC login stored, with no env var set', () => {
+    // `umbra auth login --project X` writes `quota_project_id` into the ADC
+    // file, and Google's own detection ignores that field — an authorized_user
+    // file has no `project_id`. Reading it is what makes a consumer project
+    // work without adding Google settings to its .env.
     delete process.env.GOOGLE_CLOUD_PROJECT;
+    stubAdcFile({ quota_project_id: 'from-adc-login' });
+
+    LLMProvider.createChatModel('vertex-anthropic:claude-sonnet-5');
+
+    expect(mockAnthropicVertex).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 'from-adc-login' }),
+    );
+  });
+
+  it('publishes the ADC project into the environment Google clients read', () => {
+    // `GOOGLE_CLOUD_PROJECT` is the only lever that reaches every Google
+    // client, including the ones Umbra does not construct. Passing the project
+    // per client was not enough: `@langchain/google-vertexai` has no `project`
+    // option, and the raw "Unable to detect a Project Id" survived until this
+    // variable was set. Found by a live run, not by a unit test.
+    delete process.env.GOOGLE_CLOUD_PROJECT;
+    stubAdcFile({ quota_project_id: 'from-adc-login' });
+
+    LLMProvider.createChatModel('vertex-anthropic:claude-sonnet-5');
+
+    expect(process.env.GOOGLE_CLOUD_PROJECT).toBe('from-adc-login');
+  });
+
+  it('never overwrites a project the operator configured', () => {
+    process.env.GOOGLE_CLOUD_PROJECT = 'from-env';
+    stubAdcFile({ quota_project_id: 'from-adc-login' });
+
+    LLMProvider.createChatModel('vertex-anthropic:claude-sonnet-5');
+
+    expect(process.env.GOOGLE_CLOUD_PROJECT).toBe('from-env');
+  });
+
+  it('prefers an explicit project over the ADC fallback', () => {
+    process.env.GOOGLE_CLOUD_PROJECT = 'from-env';
+    stubAdcFile({ quota_project_id: 'from-adc-login' });
+
+    LLMProvider.createChatModel('vertex-anthropic:claude-sonnet-5');
+
+    expect(mockAnthropicVertex).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 'from-env' }),
+    );
+  });
+
+  it('fails before creating a client when no source declares a project', () => {
+    delete process.env.GOOGLE_CLOUD_PROJECT;
+    stubAdcFile(null);
 
     expect(() => LLMProvider.createChatModel(
       'vertex-anthropic:claude-sonnet-5',
@@ -172,6 +241,28 @@ describe('LLMProvider Claude on Vertex routing', () => {
     expect(mockAnthropicVertex).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Controls what the provider sees when it looks for the local ADC file.
+ *
+ * The real file on the developer's machine holds a real project, which would
+ * make these expectations depend on whose machine runs them. Only the ADC path
+ * is intercepted: the credentials-present check must keep seeing this spec file,
+ * which is what `GOOGLE_APPLICATION_CREDENTIALS` points at.
+ *
+ * @param contents - Parsed ADC contents to serve, or null for "no file".
+ */
+function stubAdcFile(contents: Record<string, unknown> | null): void {
+  const isAdcPath = (target: unknown): boolean =>
+    String(target).includes('application_default_credentials.json');
+
+  (fs.existsSync as jest.Mock).mockImplementation((target: unknown) =>
+    isAdcPath(target) ? contents !== null : true,
+  );
+  (fs.readFileSync as jest.Mock).mockImplementation((target: unknown) =>
+    isAdcPath(target) ? JSON.stringify(contents ?? {}) : '',
+  );
+}
 
 /** Restores one process environment variable to its pre-test value. */
 function restoreEnvironment(name: string, value: string | undefined): void {
