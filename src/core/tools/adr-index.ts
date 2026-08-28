@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { agentPath } from '../config/agent-directory';
 
 const CACHE_VERSION = 1;
 const ADR_FILE_PATTERN = /^(ADR-\d{3,})-.+\.md$/i;
@@ -61,7 +62,7 @@ interface AdrCandidate {
 export function buildAdrIndex(rootDir: string, refresh = false): AdrIndex {
   const resolvedRoot = path.resolve(rootDir);
   const candidates = discoverAdrs(resolvedRoot);
-  const cachePath = path.join(resolvedRoot, '.agent', 'adr-index.json');
+  const cachePath = agentPath(resolvedRoot, 'adr-index.json');
   const cache = refresh ? undefined : readCache(cachePath);
 
   if (cache !== undefined && matchesCandidates(cache.entries, candidates)) {

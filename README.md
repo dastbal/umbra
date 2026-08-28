@@ -297,7 +297,7 @@ Manage conversation history and context using session IDs.
 | `umbra deep "Your task"`     | Starts an ephemeral session with an initial human message.            |
 | `umbra deep --session session-name "Your task"` | Starts/resumes a named session with an initial message. |
 
-> **Note:** Session data is stored in `.agent/deep_agent_history.db` and `.agent/orchestrator_history.db`.
+> **Note:** Session data is stored in `.umbra/deep_agent_history.db` and `.umbra/orchestrator_history.db`.
 
 ---
 
@@ -480,7 +480,7 @@ Run this once inside the project you want the agent to operate on:
 umbra init
 ```
 
-The command is idempotent and creates `.agent/agent.config.json` only when it is
+The command is idempotent and creates `.umbra/agent.config.json` only when it is
 missing. The file is local runtime state (and remains ignored by Git), so each
 project can choose its own model routing and safety limits. The first iteration
 keeps one delegation level and one writer: Researcher is read-only, Coder is the
@@ -491,7 +491,7 @@ For interactive `deep` work, the default recursion budget is 50 graph
 transitions (hard maximum 60). A per-turn middleware allows at most eight tool
 attempts; after that it removes tools from the next model call so the model must
 synthesize the evidence already collected. Each interactive turn also appends
-privacy-safe metrics to `.agent/telemetry/interactive-turns.jsonl` and adds its
+privacy-safe metrics to `.umbra/telemetry/interactive-turns.jsonl` and adds its
 audit ID, model, mode, and budgets to the matching LangSmith trace. The local
 record never stores prompts, tool arguments, response content, credentials, or
 raw provider errors.
@@ -531,7 +531,7 @@ umbra orchestrate --model gemini-2.5-pro --session architecture-review
 
 The precedence is: explicit `--model` > `AGENT_MODEL` > project role profile.
 The role profiles and safety limits are visible and editable in
-`.agent/agent.config.json`; `umbra init` never overwrites an existing file.
+`.umbra/agent.config.json`; `umbra init` never overwrites an existing file.
 
 ### Deep Agent (`deep`) — Single Autonomous Agent
 
@@ -655,7 +655,7 @@ This library is built with NestJS in mind. It understands NestJS conventions for
 
 ### Safety Features
 
-*   **`safe_write_file`:** Before writing any file, the agent creates a timestamped backup in `.agent/backups/`. This ensures you can always revert to the previous version if the agent's changes are not as expected.
+*   **`safe_write_file`:** Before writing any file, the agent creates a timestamped backup in `.umbra/backups/`. This ensures you can always revert to the previous version if the agent's changes are not as expected.
 *   **Project Root Sandboxing:** The agent operates strictly within the project's root directory. It cannot access or modify files outside this scope.
 *   **Human-in-the-Loop (HITL):** For potentially destructive operations (e.g., deleting files/directories, dropping database tables, modifying infrastructure files like `docker-compose.yml` or `.env.production`), the agent will pause and explicitly ask for your approval.
 
@@ -720,7 +720,7 @@ The library follows a clean, modular structure:
 │   └── mentor-mode.md            # Deep mentor: Forced Output Contract + Socratic gates
 ├── AGENTS.md                     # ⭐ Project context for AI agents (read-only)
 ├── ANTIGRAVITY.md                # ADR log & work history for the human developer
-├── .agent/                       # Agent runtime data
+├── .umbra/                       # Agent runtime data
 │   ├── deep_agent_history.db     # SQLite DB for named deep agent sessions
 │   ├── orchestrator_history.db   # SQLite DB for named orchestrator sessions
 │   ├── index.meta.json           # Timestamp for RAG index freshness

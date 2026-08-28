@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { AGENT_DIR_NAME } from '../config/agent-directory';
 import {
   buildAdrIndex,
   formatAdrIndex,
@@ -40,7 +41,7 @@ describe('ADR index', () => {
     ]);
     expect(output).not.toContain('Long body');
     expect(output).not.toContain('notes.md');
-    expect(fs.existsSync(path.join(rootDir, '.agent', 'adr-index.json'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, AGENT_DIR_NAME, 'adr-index.json'))).toBe(true);
   });
 
   it('reuses the cache until an ADR changes', () => {

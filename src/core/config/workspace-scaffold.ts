@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { AGENT_DIR_NAME, LEGACY_AGENT_DIR_NAME } from './agent-directory';
 
 /**
  * Marker file used to identify the packaged skill library.
@@ -36,7 +37,11 @@ export interface WorkspaceScaffoldResult {
  * the vector store.
  */
 export const AGENT_LOCAL_STATE_IGNORES: readonly string[] = [
-  '.agent/',
+  `${AGENT_DIR_NAME}/`,
+  // The pre-rename workspace is still ignored. A project that has not been
+  // started since the rename still holds one, and it must not be committed in
+  // the window before the migration moves it.
+  `${LEGACY_AGENT_DIR_NAME}/`,
   'deep_agent_history.db',
   'deep_agent_history.db-shm',
   'deep_agent_history.db-wal',

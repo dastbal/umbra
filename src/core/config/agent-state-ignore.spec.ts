@@ -49,7 +49,7 @@ describe('ensureAgentStateIgnored', () => {
     ensureAgentStateIgnored(projectDir);
 
     expect(readIgnore().startsWith(existing)).toBe(true);
-    expect(readIgnore()).toContain('.agent/');
+    expect(readIgnore()).toContain('.umbra/');
   });
 
   it('is idempotent — a second run adds nothing', () => {
@@ -88,6 +88,6 @@ describe('ensureAgentStateIgnored', () => {
 
     // Without the separator, the first rule would be glued onto `dist`.
     expect(readIgnore()).toContain('dist\n');
-    expect(readIgnore()).not.toContain('dist.agent');
+    expect(readIgnore()).not.toContain('dist.umbra');
   });
 });

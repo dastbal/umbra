@@ -42,6 +42,12 @@ import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import { createIterationBudgetMiddleware } from './iteration-budget.middleware';
 import * as path from 'path';
 import * as fs from 'fs';
+import {
+  AGENT_DIR_NAME,
+  LEGACY_AGENT_DIR_NAME,
+  agentPath,
+  migrateLegacyAgentDirectory,
+} from '../config/agent-directory';
 
 /** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
 const REPLACED_BUILTIN_TOOLS = [
@@ -321,8 +327,25 @@ export class DeepAgentFactory {
     interaction?: InteractionService,
     hasSubagents = false,
   ): Promise<void> {
-    // 1. Setup .agent directory
-    const agentDir = path.join(rootDir, '.agent');
+    // 1. Setup the workspace directory
+    //
+    // A project last used before the rename still holds `.agent/`, with its RAG
+    // index, session history and backups inside. Moving it here — before
+    // anything reads or writes the workspace — is what makes the rename a
+    // rename rather than a silent reset to an empty index.
+    const migration = migrateLegacyAgentDirectory(rootDir);
+    if (migration.migrated) {
+      interaction?.logInfo(
+        `Workspace moved: ${LEGACY_AGENT_DIR_NAME}/ → ${AGENT_DIR_NAME}/ (index and history preserved)`,
+      );
+    } else if (migration.reason === 'both-exist') {
+      interaction?.logInfo(
+        `Both ${LEGACY_AGENT_DIR_NAME}/ and ${AGENT_DIR_NAME}/ exist; using ${AGENT_DIR_NAME}/. ` +
+        `The old directory was left untouched — delete it once you are sure.`,
+      );
+    }
+
+    const agentDir = agentPath(rootDir);
     if (!fs.existsSync(agentDir)) fs.mkdirSync(agentDir, { recursive: true });
 
     // 2. Register provider-specific harness profile
@@ -657,7 +680,7 @@ export class DeepAgentFactory {
     agentType: 'simple' | 'orchestrator' = 'simple',
   ): boolean {
     const dbFile = agentType === 'orchestrator' ? 'orchestrator_history.db' : 'deep_agent_history.db';
-    const dbPath = path.join(rootDir, '.agent', dbFile);
+    const dbPath = agentPath(rootDir, dbFile);
 
     if (!fs.existsSync(dbPath)) return false;
 
@@ -716,7 +739,7 @@ export class DeepAgentFactory {
 
     /** Maximum age (ms) before the index is considered stale and rebuilt. */
     const FRESH_TTL_MS = 5 * 60 * 1000; // 5 minutes
-    const metaPath = path.join(rootDir, '.agent', 'index.meta.json');
+    const metaPath = agentPath(rootDir, 'index.meta.json');
 
     let isStale = true;
     if (fs.existsSync(metaPath)) {
@@ -775,7 +798,7 @@ export class DeepAgentFactory {
     rootDir: string,
     type: 'simple' | 'orchestrator' | 'analysis' = 'simple',
   ): SqliteSaver {
-    const agentDir = path.join(rootDir, '.agent');
+    const agentDir = agentPath(rootDir);
     const dbFile = type === 'orchestrator'
       ? 'orchestrator_history.db'
       : type === 'analysis'

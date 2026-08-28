@@ -8,13 +8,14 @@ import { resolveWorkspacePath } from '../security';
 import { authorizeFileAction, evaluateFileAction, formatAuthorizationFailure } from './utils/authorize';
 import { requestApproval, rethrowIfSuspension } from './utils/approval';
 import { wrapUntrustedFileContent, stripUntrustedFrame } from './utils/untrusted-content';
+import { agentPath } from '../config/agent-directory';
 
 let indexTimer: NodeJS.Timeout | null = null;
 
 const createBackup = (filePath: string) => {
   log.debug(`Starting backup process for file: ${filePath}`);
   const rootDir = process.cwd();
-  const backupDir = path.join(rootDir, ".agent", "backups");
+  const backupDir = agentPath(rootDir, "backups");
   if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
   const realPath = path.resolve(rootDir, filePath);
   if (fs.existsSync(realPath)) {

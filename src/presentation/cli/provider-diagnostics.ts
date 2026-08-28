@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import * as path from 'path';
+import { AGENT_DIR_NAME, agentPath } from '../../core/config/agent-directory';
 
 /** Upper bound on the captured request body, in characters. */
 const MAX_BODY_CHARS = 200_000;
@@ -89,11 +90,11 @@ export function writeProviderDiagnostic(
   diagnostic: ProviderDiagnostic,
 ): string | undefined {
   try {
-    const directory = path.join(rootDir, '.agent', 'diagnostics');
+    const directory = agentPath(rootDir, 'diagnostics');
     mkdirSync(directory, { recursive: true });
     const fileName = `${auditId}.json`;
     writeFileSync(path.join(directory, fileName), `${JSON.stringify(diagnostic, null, 2)}\n`, 'utf8');
-    return path.join('.agent', 'diagnostics', fileName);
+    return path.join(AGENT_DIR_NAME, 'diagnostics', fileName);
   } catch {
     // Diagnostics are best effort; they must never affect agent execution.
     return undefined;

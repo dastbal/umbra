@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { TurnAuditRecord } from '../../presentation/cli/turn-audit';
+import { agentPath } from '../config/agent-directory';
 
 /** Aggregate, privacy-safe operational metrics derived from local turn audits. */
 export interface AgentMetrics {
@@ -16,7 +17,7 @@ export interface AgentMetrics {
 
 /** Loads audit records created since the supplied date without exposing raw content. */
 export function loadTurnAudits(rootDir: string, since: Date): TurnAuditRecord[] {
-  const auditPath = path.join(rootDir, '.agent', 'telemetry', 'interactive-turns.jsonl');
+  const auditPath = agentPath(rootDir, 'telemetry', 'interactive-turns.jsonl');
   if (!fs.existsSync(auditPath)) return [];
 
   return fs.readFileSync(auditPath, 'utf8')

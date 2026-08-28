@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { TurnAudit, type TurnAuditRecord } from './turn-audit';
+import { AGENT_DIR_NAME } from '../../core/config/agent-directory';
 
 describe('TurnAudit', () => {
   it('persists safe metrics without prompts, tool arguments, or raw errors', () => {
@@ -20,7 +21,7 @@ describe('TurnAudit', () => {
       audit.record('recursion_limit', 'Recursion limit of 50 reached with secret-like text');
 
       const line = readFileSync(
-        join(rootDir, '.agent', 'telemetry', 'interactive-turns.jsonl'),
+        join(rootDir, AGENT_DIR_NAME, 'telemetry', 'interactive-turns.jsonl'),
         'utf8',
       ).trim();
       const record = JSON.parse(line) as TurnAuditRecord;

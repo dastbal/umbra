@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { extractProviderDiagnostic, writeProviderDiagnostic } from './provider-diagnostics';
+import { AGENT_DIR_NAME } from '../../core/config/agent-directory';
 
 /**
  * Builds an error shaped exactly like the one `@langchain/google-common` throws:
@@ -73,11 +74,11 @@ describe('provider diagnostics', () => {
     beforeEach(() => { rootDir = mkdtempSync(join(tmpdir(), 'diag-')); });
     afterEach(() => { rmSync(rootDir, { recursive: true, force: true }); });
 
-    it('writes the snapshot under .agent/diagnostics and returns its path', () => {
+    it('writes the snapshot under the workspace diagnostics directory and returns its path', () => {
       const diagnostic = extractProviderDiagnostic(googleRequestError())!;
       const relative = writeProviderDiagnostic(rootDir, 'audit-1', diagnostic);
 
-      expect(relative).toBe(join('.agent', 'diagnostics', 'audit-1.json'));
+      expect(relative).toBe(join(AGENT_DIR_NAME, 'diagnostics', 'audit-1.json'));
       const written = readFileSync(join(rootDir, relative!), 'utf8');
       expect(written).toContain('hola');
       expect(written).not.toContain('AIzaSyTOTALLY-SECRET-KEY');
@@ -86,7 +87,7 @@ describe('provider diagnostics', () => {
     it('keeps the payload out of the shareable telemetry file', () => {
       const diagnostic = extractProviderDiagnostic(googleRequestError())!;
       writeProviderDiagnostic(rootDir, 'audit-2', diagnostic);
-      expect(existsSync(join(rootDir, '.agent', 'telemetry', 'interactive-turns.jsonl'))).toBe(false);
+      expect(existsSync(join(rootDir, AGENT_DIR_NAME, 'telemetry', 'interactive-turns.jsonl'))).toBe(false);
     });
 
     it('returns undefined instead of throwing when the write fails', () => {

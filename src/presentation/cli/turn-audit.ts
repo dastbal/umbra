@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'crypto';
 import * as path from 'path';
 import { DEFAULT_INTERACTIVE_TOOL_BUDGET } from '../../core/agent/iteration-budget.middleware';
 import { extractProviderDiagnostic, writeProviderDiagnostic } from './provider-diagnostics';
+import { agentPath } from '../../core/config/agent-directory';
 
 /** Terminal outcome captured for one interactive agent turn. */
 export type TurnAuditOutcome =
@@ -149,7 +150,7 @@ export class TurnAudit {
     };
 
     try {
-      const telemetryDir = path.join(this.input.rootDir, '.agent', 'telemetry');
+      const telemetryDir = agentPath(this.input.rootDir, 'telemetry');
       mkdirSync(telemetryDir, { recursive: true });
       appendFileSync(path.join(telemetryDir, 'interactive-turns.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
     } catch {

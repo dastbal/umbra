@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureAgentConfig, loadAgentConfig, parseAgentConfig } from './agent-config';
+import { AGENT_DIR_NAME } from './agent-directory';
 
 describe('parseAgentConfig', () => {
   it('applies safe defaults for an empty configuration', () => {
@@ -43,7 +44,7 @@ describe('parseAgentConfig', () => {
     try {
       expect(loadAgentConfig(rootDir).permissions.singleWriter).toBe(true);
 
-      const configDir = join(rootDir, '.agent');
+      const configDir = join(rootDir, AGENT_DIR_NAME);
       mkdirSync(configDir);
       writeFileSync(
         join(configDir, 'agent.config.json'),
@@ -60,7 +61,7 @@ describe('parseAgentConfig', () => {
   it('fails loudly when the project config contains invalid JSON', () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'nestjs-agent-config-invalid-'));
     try {
-      const configDir = join(rootDir, '.agent');
+      const configDir = join(rootDir, AGENT_DIR_NAME);
       mkdirSync(configDir);
       writeFileSync(join(configDir, 'agent.config.json'), '{invalid', 'utf8');
 

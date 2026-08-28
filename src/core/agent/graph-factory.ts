@@ -7,6 +7,7 @@ import { SupervisorConfig } from "./graph/types";
 import { createResearcherGraph } from "./graph/researcher.graph";
 import { createCoderGraph } from "./graph/coder.graph";
 import { createSupervisorGraph } from "./graph/supervisor.graph";
+import { agentPath } from '../config/agent-directory';
 
 /**
  * Factory class to instantiate the LangGraph Multi-Agent implementation.
@@ -17,7 +18,7 @@ export class GraphAgentFactory {
     const interactor = interaction || new InteractionService();
     const threadId = config.threadId || "cli-session";
     const rootDir = process.cwd();
-    const agentDir = path.join(rootDir, ".agent");
+    const agentDir = agentPath(rootDir);
     if (!fs.existsSync(agentDir)) fs.mkdirSync(agentDir, { recursive: true });
 
     // isolation of history databases

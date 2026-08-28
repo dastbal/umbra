@@ -14,13 +14,14 @@ import {
 } from "../tools";
 import * as path from "path";
 import * as fs from "fs";
+import { agentPath } from '../config/agent-directory';
 
 export class AgentFactory {
   public static async create(threadId: string = "cli-session", interaction?: InteractionService) {
     const rootDir = process.cwd();
 
     // Configuración de directorios
-    const agentDir = path.join(rootDir, ".agent");
+    const agentDir = agentPath(rootDir);
     if (!fs.existsSync(agentDir)) fs.mkdirSync(agentDir, { recursive: true });
 
     // 1. Persistencia (Checkpointer)

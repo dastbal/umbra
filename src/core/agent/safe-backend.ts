@@ -1,6 +1,7 @@
 import { FilesystemBackend } from 'deepagents';
 import * as fs from 'fs';
 import * as path from 'path';
+import { agentPath } from '../config/agent-directory';
 
 /**
  * 🛡️ SAFE BACKEND
@@ -32,7 +33,7 @@ export class SafeFilesystemBackend extends FilesystemBackend {
     // 1. AQUI AGREGAMOS LA ASIGNACIÓN QUE FALTABA
     this.rootDir = rootDir;
 
-    this.backupDir = path.join(rootDir, '.agent', 'backups');
+    this.backupDir = agentPath(rootDir, 'backups');
     if (!fs.existsSync(this.backupDir)) {
       fs.mkdirSync(this.backupDir, { recursive: true });
     }

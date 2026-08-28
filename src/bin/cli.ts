@@ -22,6 +22,11 @@ import { resolveModelForSession } from "../core/config/model-resolver";
 import { Command as LangGraphCommand } from "@langchain/langgraph";
 import { AgentDB } from "../core/state/db";
 import { ensureAgentConfig, loadAgentConfig } from "../core/config/agent-config";
+import {
+  AGENT_DIR_NAME,
+  LEGACY_AGENT_DIR_NAME,
+  migrateLegacyAgentDirectory,
+} from "../core/config/agent-directory";
 import { ensureWorkspaceSkills } from "../core/config/workspace-scaffold";
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
 import {
@@ -360,6 +365,13 @@ program
     "Create the idempotent project-local multi-agent policy, working guides, and decision-record index",
   )
   .action(() => {
+    // Before anything reads or writes the workspace: a project last used under
+    // the previous directory name keeps its index, history and backups.
+    const migration = migrateLegacyAgentDirectory(process.cwd());
+    if (migration.migrated) {
+      log.sys(`Workspace moved: ${LEGACY_AGENT_DIR_NAME}/ → ${AGENT_DIR_NAME}/`);
+    }
+
     try {
       const result = ensureAgentConfig(process.cwd());
       const state = result.created ? "created" : "already exists";

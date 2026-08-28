@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
+import { agentPath } from './agent-directory';
 
 const roleModelsSchema = z
   .object({
@@ -105,7 +106,7 @@ export function parseAgentConfig(input: unknown): AgentConfig {
  * @throws {Error} When the file contains invalid JSON or violates the policy schema.
  */
 export function loadAgentConfig(rootDir: string): AgentConfig {
-  const configPath = path.join(rootDir, '.agent', 'agent.config.json');
+  const configPath = agentPath(rootDir, 'agent.config.json');
   if (!fs.existsSync(configPath)) return parseAgentConfig({});
 
   let parsed: unknown;
@@ -129,7 +130,7 @@ export function loadAgentConfig(rootDir: string): AgentConfig {
  * @returns Path, creation status, and validated configuration.
  */
 export function ensureAgentConfig(rootDir: string): AgentConfigInitResult {
-  const configPath = path.join(rootDir, '.agent', 'agent.config.json');
+  const configPath = agentPath(rootDir, 'agent.config.json');
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
 
   if (fs.existsSync(configPath)) {
