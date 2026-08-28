@@ -1,3 +1,4 @@
+import { GraphInterrupt } from '@langchain/langgraph';
 import {
   createOrchestrationGuard,
   describeSubagentRejection,
@@ -5,7 +6,22 @@ import {
   readTurnKey,
 } from './orchestration-guard.middleware';
 import { currentTurn, resetDelegationRegistry } from './delegation/delegation-registry';
-import { GraphInterrupt } from '@langchain/langgraph';
+
+/** A delegation as it now reaches the guard: the order is the arguments. */
+const order = {
+  userRequest: 'crear un modulo de calculadora please',
+  objective: 'Create a NestJS calculator module following the project patterns.',
+  knownContext: ['The project follows DDD with four layers.'],
+  inScope: ['A new module under src/'],
+  outOfScope: ['The existing payment module.'],
+  definitionOfDone: 'A research artifact describing the files to create.',
+  conventions: ['Controllers return DTOs, never entities.'],
+};
+
+const call = (id: string, subagent: string, args: Record<string, unknown> = order) => ({
+  content: '',
+  tool_calls: [{ id, name: 'delegate', args: { subagent, ...args } }],
+});
 
 describe('readDelegationHistory', () => {
   it('uses only events after the latest interactive route envelope', () => {
@@ -13,7 +29,7 @@ describe('readDelegationHistory', () => {
       {
         content: '[ORCHESTRATION_ROUTE trusted=true complexity=large implementation=true]\nOld request',
       },
-      { tool_calls: [{ name: 'task', args: { subagent_type: 'researcher' } }] },
+      call('old', 'researcher'),
       {
         content: '[ORCHESTRATION_ROUTE trusted=true complexity=small implementation=false]\nNew question',
       },
@@ -28,11 +44,11 @@ describe('readDelegationHistory', () => {
       {
         content: '[ORCHESTRATION_ROUTE trusted=true complexity=large implementation=true]\nImplement feature',
       },
-      { tool_calls: [{ id: 'research', name: 'task', args: { subagent_type: 'researcher' } }] },
+      call('research', 'researcher'),
       { tool_call_id: 'research', content: '{"status":"ready"}' },
-      { tool_calls: [{ id: 'coder', name: 'task', args: { subagent_type: 'coder' } }] },
+      call('coder', 'coder'),
       { tool_call_id: 'coder', content: '{"status":"ready"}' },
-      { tool_calls: [{ id: 'verify', name: 'task', args: { subagent_type: 'verifier' } }] },
+      call('verify', 'verifier'),
       { tool_call_id: 'verify', content: '{"status":"failed","testsPassed":false}' },
     ]);
 
@@ -48,9 +64,9 @@ describe('readDelegationHistory', () => {
       {
         content: '[ORCHESTRATION_ROUTE trusted=true complexity=large implementation=true]\nImplement feature',
       },
-      { tool_calls: [{ id: 'research', name: 'task', args: { subagent_type: 'researcher' } }] },
+      call('research', 'researcher'),
       { tool_call_id: 'research', content: '{"status":"ready"}' },
-      { tool_calls: [{ id: 'verify', name: 'task', args: { subagent_type: 'verifier' } }] },
+      call('verify', 'verifier'),
       { tool_call_id: 'verify', content: '{"status":"blocked"}' },
     ]);
 
@@ -64,9 +80,10 @@ describe('readDelegationHistory', () => {
       {
         content: '[ORCHESTRATION_ROUTE trusted=true complexity=large implementation=true]\nImplement feature',
       },
-      { tool_calls: [{ name: 'task', args: { subagent_type: 'Researcher' } }] },
-      { tool_calls: [{ name: 'task', args: { subagent_type: 'Coder' } }] },
-      { tool_calls: [{ name: 'task', args: { subagent_type: 'Verifier' } }] },
+      call('r', 'Researcher'),
+      { tool_call_id: 'r', content: '{"status":"ready"}' },
+      call('c', 'Coder'),
+      { tool_call_id: 'c', content: '{"status":"ready"}' },
     ]);
 
     expect(history.researcherCalls).toBe(1);
@@ -75,9 +92,11 @@ describe('readDelegationHistory', () => {
 });
 
 describe('describeSubagentRejection', () => {
+  // Retained from ADR-013. The provider now validates `subagent` before the
+  // guard runs, so this message is unreachable through a declared call — it
+  // survives for a caller that bypasses the declaration, and because a wrong
+  // diagnosis once sent a real investigation to the wrong place.
   it('names the missing argument instead of blaming the subagent', () => {
-    // The real failure: the model asked for researcher under the wrong key,
-    // because the task declaration never reached the provider (ADR-013).
     const message = describeSubagentRejection({ context: 'analyze', name: 'researcher', agent: 'researcher' });
 
     expect(message).toContain("no 'subagent_type' argument");
@@ -92,52 +111,26 @@ describe('describeSubagentRejection', () => {
     expect(message).toContain('researcher, coder, and verifier');
   });
 
-  it('produces different messages for the two causes', () => {
-    expect(describeSubagentRejection({ agent: 'researcher' }))
-      .not.toBe(describeSubagentRejection({ subagent_type: 'deployer' }));
-  });
-
   it('handles a call with no arguments object at all', () => {
     expect(describeSubagentRejection(undefined)).toContain('no arguments object');
   });
-
-  it('treats a blank subagent_type as missing, not as an unknown name', () => {
-    expect(describeSubagentRejection({ subagent_type: '   ' })).toContain("no 'subagent_type' argument");
-  });
 });
-
 
 describe('the guard at the moment of delegation', () => {
   const LIMITS = { maxRetries: 2, maxAgentTurns: 50 };
 
   const routeEnvelope = {
     content: '[ORCHESTRATION_ROUTE trusted=true complexity=medium implementation=true]\n'
-      + 'Required route: researcher -> coder -> verifier.\nImprove the skills',
+      + 'Required route: researcher -> coder -> verifier.\nCreate a calculator module',
   };
-
-  const order = {
-    userRequest: 'quiero que mejores los skills tuyos y me sugieras cambios',
-    objective: 'Review every guide under skills/ and propose concrete changes.',
-    knownContext: ['The route is medium complexity and permits implementation.'],
-    inScope: ['The markdown guides under skills/'],
-    outOfScope: ['The general architecture of the project, which is settled.'],
-    definitionOfDone: 'A research artifact listing each skill and its proposed change.',
-    conventions: ['Everything written into the repository is in English.'],
-  };
-
-  /** The assistant message LangGraph has already appended when the guard runs. */
-  const inFlightCall = (id: string, subagent: string, description: unknown = JSON.stringify(order)) => ({
-    content: '',
-    tool_calls: [{ id, name: 'task', args: { description, subagent_type: subagent } }],
-  });
 
   const requestFor = (
     id: string,
     subagent: string,
     messages: unknown[],
-    description: unknown = JSON.stringify(order),
+    args: Record<string, unknown> = order,
   ) => ({
-    toolCall: { id, name: 'task', args: { description, subagent_type: subagent } },
+    toolCall: { id, name: 'delegate', args: { subagent, ...args } },
     state: { messages },
     runtime: { configurable: { thread_id: 'thread-guard' } },
   });
@@ -148,7 +141,7 @@ describe('the guard at the moment of delegation', () => {
     // Reproduces the live failure: on turn one, with no researcher having run,
     // the guard saw its own pending request and refused it.
     const history = readDelegationHistory(
-      [routeEnvelope, inFlightCall('call-1', 'researcher')],
+      [routeEnvelope, call('call-1', 'researcher')],
       'call-1',
     );
 
@@ -162,7 +155,7 @@ describe('the guard at the moment of delegation', () => {
     // nothing and no longer counts.
     const history = readDelegationHistory([
       routeEnvelope,
-      inFlightCall('call-1', 'researcher'),
+      call('call-1', 'researcher'),
       { tool_call_id: 'call-1', content: '{"status":"ready"}' },
     ]);
 
@@ -174,12 +167,30 @@ describe('the guard at the moment of delegation', () => {
     const handler = jest.fn().mockResolvedValue('delegated');
 
     const result = await guard.wrapToolCall!(
-      requestFor('call-1', 'researcher', [routeEnvelope, inFlightCall('call-1', 'researcher')]) as never,
+      requestFor('call-1', 'researcher', [routeEnvelope, call('call-1', 'researcher')]) as never,
       handler as never,
     );
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(result).toBe('delegated');
+  });
+
+  it('records the order and the grant where the delegation tool will find them', async () => {
+    // The guard decides; the tool dispatches. The mandate is how one reaches
+    // the other, since a tool sees arguments and never the ledger.
+    const guard = createOrchestrationGuard(LIMITS);
+
+    await guard.wrapToolCall!(
+      requestFor('call-1', 'researcher', [routeEnvelope, call('call-1', 'researcher')]) as never,
+      jest.fn().mockImplementation(async () => {
+        const ledger = currentTurn('thread-guard')!;
+        const mandate = ledger.mandates.get(ledger.activeDelegationId!);
+
+        expect(mandate?.userRequest).toBe(order.userRequest);
+        expect(mandate?.budget.toolCalls).toBe(14);
+        return 'delegated';
+      }) as never,
+    );
   });
 
   it('still refuses a second researcher delegation in the same request', async () => {
@@ -189,9 +200,9 @@ describe('the guard at the moment of delegation', () => {
     await expect(guard.wrapToolCall!(
       requestFor('call-2', 'researcher', [
         routeEnvelope,
-        inFlightCall('call-1', 'researcher'),
+        call('call-1', 'researcher'),
         { tool_call_id: 'call-1', content: '{"status":"ready"}' },
-        inFlightCall('call-2', 'researcher'),
+        call('call-2', 'researcher'),
       ]) as never,
       handler as never,
     )).rejects.toThrow(/already ran/);
@@ -203,7 +214,7 @@ describe('the guard at the moment of delegation', () => {
     // Reversed on purpose, 2026-08-27. The earlier rule counted every request,
     // so a Researcher killed by the recursion limit had spent the turn's only
     // researcher slot and the orchestrator was told "already ran" with no
-    // research in hand. Runaway retries are now held by the budget pool, which
+    // research in hand. Runaway retries are held by the budget pool, which
     // charges every attempt to the same turn allowance.
     const guard = createOrchestrationGuard(LIMITS);
     const handler = jest.fn().mockResolvedValue('delegated');
@@ -211,8 +222,8 @@ describe('the guard at the moment of delegation', () => {
     await guard.wrapToolCall!(
       requestFor('call-2', 'researcher', [
         routeEnvelope,
-        inFlightCall('call-1', 'researcher'),
-        inFlightCall('call-2', 'researcher'),
+        call('call-1', 'researcher'),
+        call('call-2', 'researcher'),
       ]) as never,
       handler as never,
     );
@@ -220,79 +231,21 @@ describe('the guard at the moment of delegation', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses an order that carries no context, without ending the turn', async () => {
-    // The impoverished order that caused the sweep: the delegate would have
-    // received a micro-task and never seen what the user actually asked.
+  it('refuses an order that carries nothing to act on, without ending the turn', async () => {
+    // The schema makes the fields present. Whether `objective` says anything is
+    // what remains for the guard, and it is handed back to be rewritten.
     const guard = createOrchestrationGuard(LIMITS);
     const handler = jest.fn().mockResolvedValue('delegated');
-    const poorDescription = 'List all files in the skills/ directory';
+    const empty = { ...order, objective: '   ', knownContext: [] };
 
     const result = await guard.wrapToolCall!(
-      requestFor(
-        'call-1',
-        'researcher',
-        [routeEnvelope, inFlightCall('call-1', 'researcher', poorDescription)],
-        poorDescription,
-      ) as never,
+      requestFor('call-1', 'researcher', [routeEnvelope, call('call-1', 'researcher', empty)], empty) as never,
       handler as never,
     );
 
     expect(handler).not.toHaveBeenCalled();
-    expect(String((result as { content: string }).content)).toContain('userRequest');
-  });
-
-  it('hands the delegate prose, not the json the orchestrator wrote', async () => {
-    const guard = createOrchestrationGuard(LIMITS);
-    const handler = jest.fn().mockResolvedValue('delegated');
-
-    await guard.wrapToolCall!(
-      requestFor('call-1', 'researcher', [routeEnvelope, inFlightCall('call-1', 'researcher')]) as never,
-      handler as never,
-    );
-
-    const delivered = handler.mock.calls[0][0].toolCall.args.description as string;
-
-    expect(delivered).toContain('request, verbatim');
-    expect(delivered).toContain(order.userRequest);
-    expect(delivered).toContain('Out of scope');
-    expect(delivered).not.toContain('"userRequest"');
-  });
-
-  it('tells the delegate how much budget it was granted', async () => {
-    const guard = createOrchestrationGuard(LIMITS);
-    const handler = jest.fn().mockResolvedValue('delegated');
-
-    await guard.wrapToolCall!(
-      requestFor('call-1', 'researcher', [routeEnvelope, inFlightCall('call-1', 'researcher')]) as never,
-      handler as never,
-    );
-
-    expect(handler.mock.calls[0][0].toolCall.args.description).toContain('14 tool attempts');
-  });
-
-  it('carries the findings of one delegate into the order of the next', async () => {
-    const guard = createOrchestrationGuard(LIMITS);
-    const researcher = jest.fn().mockResolvedValue(
-      '{"status":"ready","findings":["skills/ holds six markdown guides"]}',
-    );
-    const coder = jest.fn().mockResolvedValue('done');
-
-    await guard.wrapToolCall!(
-      requestFor('call-1', 'researcher', [routeEnvelope, inFlightCall('call-1', 'researcher')]) as never,
-      researcher as never,
-    );
-    await guard.wrapToolCall!(
-      requestFor('call-2', 'coder', [
-        routeEnvelope,
-        inFlightCall('call-1', 'researcher'),
-        { tool_call_id: 'call-1', content: '{"status":"ready"}' },
-        inFlightCall('call-2', 'coder'),
-      ]) as never,
-      coder as never,
-    );
-
-    expect(coder.mock.calls[0][0].toolCall.args.description)
-      .toContain('skills/ holds six markdown guides');
+    expect(String((result as { content: string }).content)).toContain('objective');
+    expect(String((result as { content: string }).content)).toContain('delegate call');
   });
 
   it('stops delegating once only the reserve is left', async () => {
@@ -307,11 +260,11 @@ describe('the guard at the moment of delegation', () => {
     });
 
     await guard.wrapToolCall!(
-      requestFor('call-1', 'researcher', [routeEnvelope, inFlightCall('call-1', 'researcher')]) as never,
+      requestFor('call-1', 'researcher', [routeEnvelope, call('call-1', 'researcher')]) as never,
       handler as never,
     );
     const second = await guard.wrapToolCall!(
-      requestFor('call-2', 'researcher', [routeEnvelope, inFlightCall('call-2', 'researcher')]) as never,
+      requestFor('call-2', 'researcher', [routeEnvelope, call('call-2', 'researcher')]) as never,
       handler as never,
     );
 
@@ -338,25 +291,10 @@ describe('a suspended delegation is paused, not finished', () => {
       + 'Required route: researcher -> coder -> verifier.\nAsk a subagent how it is',
   };
 
-  const order = {
-    userRequest: 'puede preguntarle a un subagente como esta please',
-    objective: 'Determine how a status check could be implemented.',
-    knownContext: ['The route permits implementation.'],
-    inScope: ['The subagent definitions'],
-    outOfScope: [],
-    definitionOfDone: 'A research artifact.',
-    conventions: [],
-  };
-
   const requestFor = (id: string, messages: unknown[]) => ({
-    toolCall: { id, name: 'task', args: { description: JSON.stringify(order), subagent_type: 'researcher' } },
+    toolCall: { id, name: 'delegate', args: { subagent: 'researcher', ...order } },
     state: { messages },
     runtime: { configurable: { thread_id: 'thread-suspend' } },
-  });
-
-  const inFlightCall = (id: string) => ({
-    content: '',
-    tool_calls: [{ id, name: 'task', args: { description: JSON.stringify(order), subagent_type: 'researcher' } }],
   });
 
   beforeEach(() => resetDelegationRegistry());
@@ -369,7 +307,7 @@ describe('a suspended delegation is paused, not finished', () => {
     const suspend = jest.fn().mockRejectedValue(new GraphInterrupt([]));
 
     await expect(guard.wrapToolCall!(
-      requestFor('call-1', [routeEnvelope, inFlightCall('call-1')]) as never,
+      requestFor('call-1', [routeEnvelope, call('call-1', 'researcher')]) as never,
       suspend as never,
     )).rejects.toBeDefined();
 
@@ -384,7 +322,7 @@ describe('a suspended delegation is paused, not finished', () => {
     const fail = jest.fn().mockRejectedValue(new Error('the provider rejected the request'));
 
     await expect(guard.wrapToolCall!(
-      requestFor('call-1', [routeEnvelope, inFlightCall('call-1')]) as never,
+      requestFor('call-1', [routeEnvelope, call('call-1', 'researcher')]) as never,
       fail as never,
     )).rejects.toThrow('the provider rejected');
 
@@ -399,107 +337,10 @@ describe('a suspended delegation is paused, not finished', () => {
     const handler = jest.fn().mockResolvedValue('{"status":"ready"}');
 
     await guard.wrapToolCall!(
-      requestFor('call-1', [routeEnvelope, inFlightCall('call-1')]) as never,
+      requestFor('call-1', [routeEnvelope, call('call-1', 'researcher')]) as never,
       handler as never,
     );
 
     expect(currentTurn('thread-suspend')?.activeDelegationId).toBeUndefined();
-  });
-});
-
-describe('a model that flattens the order into the call', () => {
-  const LIMITS = { maxRetries: 2, maxAgentTurns: 50 };
-
-  const routeEnvelope = {
-    content: '[ORCHESTRATION_ROUTE trusted=true complexity=medium implementation=true]\n'
-      + 'Required route: researcher -> coder -> verifier.\nCreate a calculator module',
-  };
-
-  const orderFields = {
-    userRequest: 'crear un modulo de calculadora please',
-    objective: 'Create a NestJS calculator module following the project patterns.',
-    knownContext: ['The project follows DDD with four layers.'],
-    inScope: ['A new module under src/'],
-    outOfScope: ['The existing payment module.'],
-    definitionOfDone: 'A research artifact describing the files to create.',
-    conventions: ['Controllers return DTOs, never entities.'],
-  };
-
-  const inFlightCall = (id: string, args: Record<string, unknown>) => ({
-    content: '',
-    tool_calls: [{ id, name: 'task', args }],
-  });
-
-  const requestFor = (id: string, args: Record<string, unknown>, messages: unknown[]) => ({
-    toolCall: { id, name: 'task', args },
-    state: { messages },
-    runtime: { configurable: { thread_id: 'thread-flat' } },
-  });
-
-  beforeEach(() => resetDelegationRegistry());
-
-  it('hands the call back instead of ending the turn when subagent_type is lost', async () => {
-    // Observed live on 2026-08-27 with gemini-2.5-flash-lite. Flattening the
-    // order into the call dropped subagent_type, and a thrown refusal killed
-    // the session over a message the model only had to rewrite.
-    const guard = createOrchestrationGuard(LIMITS);
-    const handler = jest.fn();
-    const flattened = { ...orderFields, description: 'Research the module' };
-
-    const result = await guard.wrapToolCall!(
-      requestFor('call-1', flattened, [routeEnvelope, inFlightCall('call-1', flattened)]) as never,
-      handler as never,
-    );
-
-    const content = String((result as { content: string }).content);
-
-    expect(handler).not.toHaveBeenCalled();
-    expect(content).toContain('subagent_type');
-    expect(content).toContain('exactly two arguments');
-  });
-
-  it('tells the model where the order fields belong', async () => {
-    const guard = createOrchestrationGuard(LIMITS);
-    const flattened = { ...orderFields, description: 'Research the module' };
-
-    const result = await guard.wrapToolCall!(
-      requestFor('call-1', flattened, [routeEnvelope, inFlightCall('call-1', flattened)]) as never,
-      jest.fn() as never,
-    );
-
-    expect(String((result as { content: string }).content)).toContain('INSIDE the description string');
-  });
-
-  it('accepts an order written as arguments once the subagent is named', async () => {
-    // The order itself was complete and correct; only its placement was wrong.
-    // Refusing it over placement would be pedantry paid for by the operator.
-    const guard = createOrchestrationGuard(LIMITS);
-    const handler = jest.fn().mockResolvedValue('delegated');
-    const flattened = { ...orderFields, subagent_type: 'researcher' };
-
-    await guard.wrapToolCall!(
-      requestFor('call-1', flattened, [routeEnvelope, inFlightCall('call-1', flattened)]) as never,
-      handler as never,
-    );
-
-    const delivered = handler.mock.calls[0][0].toolCall.args.description as string;
-
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(delivered).toContain(orderFields.userRequest);
-    expect(delivered).toContain('The existing payment module.');
-  });
-
-  it('accepts an order placed in description as an object rather than a string', async () => {
-    const guard = createOrchestrationGuard(LIMITS);
-    const handler = jest.fn().mockResolvedValue('delegated');
-    const nested = { subagent_type: 'researcher', description: orderFields };
-
-    await guard.wrapToolCall!(
-      requestFor('call-1', nested, [routeEnvelope, inFlightCall('call-1', nested)]) as never,
-      handler as never,
-    );
-
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler.mock.calls[0][0].toolCall.args.description).toContain(orderFields.objective);
   });
 });

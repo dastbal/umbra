@@ -11,10 +11,6 @@ import {
 import {
   assertMandateComplete,
   IncompleteMandateError,
-  MANDATE_TEMPLATE,
-  parseMandateOrder,
-  readFlattenedOrder,
-  renderMandate,
   type Mandate,
 } from './delegation/mandate';
 import {
@@ -27,6 +23,15 @@ import {
 import { classifyDelegationOutcome } from './delegation/delegation-outcome';
 
 const ROUTE_MARKER = '[ORCHESTRATION_ROUTE';
+
+/**
+ * The tool a delegation travels through.
+ *
+ * Named once, because the guard reads it in two places — authorizing a call and
+ * counting past ones — and two spellings of the same name is how a guard starts
+ * agreeing with itself about the wrong thing.
+ */
+export const DELEGATION_TOOL = 'delegate';
 
 /**
  * Questions a delegate may put to the operator before it must answer with what
@@ -73,17 +78,14 @@ export function createOrchestrationGuard(limits: GuardLimits) {
   return createMiddleware({
     name: 'OrchestrationGuard',
     wrapToolCall: async (request, handler) => {
-      if (request.toolCall.name !== 'task') return handler(request);
+      if (request.toolCall.name !== DELEGATION_TOOL) return handler(request);
 
+      // The provider validated the shape before this ran: `subagent` is a
+      // required enum on the tool's own schema. A call that reaches here without
+      // one could only come from a caller bypassing the declaration.
       const subagent = getGuardedSubagent(request.toolCall.args);
       if (!subagent) {
-        // Repairable, not terminal. Observed live on 2026-08-27: a model asked
-        // to put a JSON order inside `description` read the field list as the
-        // argument list, flattened the order into the call, and lost
-        // `subagent_type` on the way. Throwing ended the turn over a message the
-        // model only had to rewrite — the same mistake the mandate gate had
-        // already learned not to make.
-        return refuseSubagent(request.toolCall.id, request.toolCall.args);
+        throw new Error(describeSubagentRejection(request.toolCall.args));
       }
 
       // The assistant message holding this call is already in `state.messages`
@@ -99,8 +101,7 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       const ledger = openTurnForRequest(request, limits.maxAgentTurns);
       if (!ledger) return handler(request);
 
-      const order = parseMandateOrder(readDescription(request.toolCall.args))
-        ?? readFlattenedOrder(request.toolCall.args);
+      const order = request.toolCall.args;
       try {
         assertMandateComplete(order);
       } catch (error: unknown) {
@@ -122,7 +123,7 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       ledger.activeDelegationId = delegationId;
 
       try {
-        const result = await handler(withRenderedMandate(request, mandate, ledger));
+        const result = await handler(request);
         harvestFindings(ledger, result);
         closeDelegation(ledger, delegationId);
         return result;
@@ -260,68 +261,20 @@ function closeDelegation(ledger: DelegationLedger, delegationId: string): void {
   ledger.activeDelegationId = undefined;
 }
 
-function readDescription(args: unknown): unknown {
-  return isRecord(args) ? args.description : undefined;
-}
-
 /**
- * Replaces the JSON order with the prose the delegate will actually read.
+ * Hands back an order the provider accepted but that carries too little to act on.
  *
- * The findings gathered earlier in this turn are appended, so a delegate never
- * repeats an investigation another delegate already completed — the cheapest
- * budget saving available, since it costs nothing to hand over.
+ * The schema enforces that the fields are **present**; it cannot judge whether
+ * `objective` says anything. Judging content is what remains here, and it is
+ * returned as a tool result rather than thrown: a message the model can rewrite
+ * must never end the turn.
  */
-function withRenderedMandate(request: unknown, mandate: Mandate, ledger: DelegationLedger): never {
-  const typed = request as { toolCall: { args?: Record<string, unknown> } };
-  const inherited = ledger.findings.length > 0
-    ? `\n\n## Already established this turn — inherit it, do not re-verify\n\n`
-      + ledger.findings.map((finding) => `- ${finding}`).join('\n')
-    : '';
-
-  return {
-    ...(request as object),
-    toolCall: {
-      ...typed.toolCall,
-      args: { ...typed.toolCall.args, description: `${renderMandate(mandate)}${inherited}` },
-    },
-  } as never;
-}
-
 function refuseRepairably(toolCallId: string | undefined, error: IncompleteMandateError): ToolMessage {
   return new ToolMessage({
     tool_call_id: toolCallId ?? '',
-    content:
-      `${error.message}\n\nIssue the order again with this shape, as JSON, in 'description':\n\n`
-      + `${MANDATE_TEMPLATE}`,
-  });
-}
+    content: `${error.message}
 
-/**
- * Hands back a delegation whose subagent could not be identified.
- *
- * Carries the exact call shape rather than only the diagnosis: the failure this
- * exists for is a model that got the *order* right and the *envelope* wrong, and
- * telling it what was missing without telling it where to put things invites the
- * same call again.
- */
-function refuseSubagent(toolCallId: string | undefined, args: unknown): ToolMessage {
-  return new ToolMessage({
-    tool_call_id: toolCallId ?? '',
-    content:
-      `${describeSubagentRejection(args)}
-
-`
-      + `Call task with exactly two arguments and no others:
-`
-      + `  subagent_type: "researcher" | "coder" | "verifier"
-`
-      + `  description:   a STRING whose entire content is the JSON order
-
-`
-      + `The order fields go INSIDE the description string, never at the top level `
-      + `of the call:
-
-${MANDATE_TEMPLATE}`,
+Fill those arguments on the delegate call and issue it again.`,
   });
 }
 
@@ -359,8 +312,8 @@ function harvestFindings(ledger: DelegationLedger, result: unknown): void {
 }
 
 function getGuardedSubagent(args: unknown): GuardedSubagent | undefined {
-  if (!isRecord(args) || typeof args.subagent_type !== 'string') return undefined;
-  const normalized = args.subagent_type.trim().toLowerCase();
+  if (!isRecord(args) || typeof args.subagent !== 'string') return undefined;
+  const normalized = args.subagent.trim().toLowerCase();
   return normalized === 'researcher' || normalized === 'coder' || normalized === 'verifier'
     ? normalized
     : undefined;
@@ -455,7 +408,7 @@ function readTaskCalls(message: unknown, inFlightToolCallId?: string): TaskCall[
   if (!isRecord(message) || !Array.isArray(message.tool_calls)) return [];
 
   return message.tool_calls.flatMap((toolCall) => {
-    if (!isRecord(toolCall) || toolCall.name !== 'task') return [];
+    if (!isRecord(toolCall) || toolCall.name !== DELEGATION_TOOL) return [];
     // The call being authorized is not part of its own history.
     if (inFlightToolCallId !== undefined && toolCall.id === inFlightToolCallId) return [];
     const subagent = getGuardedSubagent(toolCall.args);

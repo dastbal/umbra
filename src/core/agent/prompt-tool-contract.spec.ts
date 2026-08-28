@@ -112,9 +112,18 @@ describe('the deep prompt only names tools the model can actually call', () => {
   });
 
   it('keeps the orchestrator prompt naming its delegation tool', () => {
-    // If `task` ever leaves this prompt the routing instructions are dead text;
-    // if it leaves the declarations, ADR-013 happens again.
-    expect(internals.buildSystemPrompt('C:\\project', 'orchestrator')).toContain('task');
+    // If the delegation tool ever leaves this prompt the routing instructions
+    // are dead text; if it leaves the declarations, ADR-013 happens again.
+    expect(internals.buildSystemPrompt('C:\project', 'orchestrator')).toContain('delegate');
+  });
+
+  it('no longer routes the orchestrator through the deepagents task tool', () => {
+    // The orchestrator declares `delegate` and excludes `task`. A prompt still
+    // ordering a `task` call would instruct a tool the model cannot see — the
+    // defect ADR-013 recorded, in the opposite direction.
+    const prompt = internals.buildSystemPrompt('C:\project', 'orchestrator');
+
+    expect(prompt).not.toMatch(new RegExp('`task`|\\btask\\('));
   });
 });
 

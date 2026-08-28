@@ -39,6 +39,8 @@ import { LLMProvider } from '../llm/provider';
 import { OllamaChatAdapter } from '../llm/ollama-adapter';
 import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
+import { buildSubagentGraphs } from './delegation/subagent-registry';
+import { createDelegateTool } from './delegation/delegate.tool';
 import {
   DEFAULT_INTERACTIVE_TOOL_BUDGET,
   createIterationBudgetMiddleware,
@@ -291,7 +293,7 @@ export class DeepAgentFactory {
 
     // hasSubagents: this mode registers researcher/coder/verifier, so `task`
     // must reach the provider (ADR-013).
-    await DeepAgentFactory.bootstrap(rootDir, model, interaction, true);
+    await DeepAgentFactory.bootstrap(rootDir, model, interaction, false);
 
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator', agentConfig);
@@ -299,6 +301,15 @@ export class DeepAgentFactory {
     // Same Ollama adapter pattern as create() — pass BaseChatModel for Ollama,
     // string for Vertex AI.
     const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
+
+    // The delegates are compiled here rather than handed to deepagents, because
+    // the delegation tool's schema is the mandate and a tool with our schema has
+    // to own its dispatch (ADR-021).
+    const delegateTool = createDelegateTool(buildSubagentGraphs({
+      researcher: createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
+      coder: createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
+      verifier: createVerifierSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
+    }));
 
     return createDeepAgent({
       model: modelParam as any,
@@ -308,15 +319,11 @@ export class DeepAgentFactory {
         maxRetries: agentConfig.limits.maxRetries,
         maxAgentTurns: agentConfig.limits.maxAgentTurns,
       })] as any[],
-      subagents: [
-        createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
-        createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
-        createVerifierSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
-      ],
       tools: [                           // ADR-002
         askCodebaseTool,
         refreshIndexTool,
         integrityCheckTool,
+        delegateTool,
       ] as any[],
     });
   }
@@ -1067,47 +1074,32 @@ before it enters this graph. Obey it exactly:
 
 For implementation tasks, follow this exact sequence:
 1. Call \`write_todos\` with the full plan (Analysis → Implementation → Verification).
-2. Call \`task\` with subagent "researcher", passing a complete ORDER (see below).
-3. Call \`task\` with subagent "coder", passing a complete ORDER that includes the
+2. Call \`delegate\` with subagent "researcher", passing a complete ORDER (see below).
+3. Call \`delegate\` with subagent "coder", passing a complete ORDER that includes the
    researcher handoff in \`knownContext\`.
-4. Call \`task\` with subagent "verifier" after the Coder finishes.
+4. Call \`delegate\` with subagent "verifier" after the Coder finishes.
    - The verifier is read-only and runs focused tests plus the TypeScript integrity check.
 5. If verification fails, allow at most the configured correction cycles, then call the verifier again.
 6. Report to the user: what was built, decisions and trade-offs, changed files, evidence, risks, and next steps.
 
 📦 EVERY DELEGATION CARRIES ITS ORDER — THIS IS NOT OPTIONAL
-A subagent cannot see this conversation. It receives one message: the \`description\`
-you write. Whatever you leave out, it cannot look up — it can only guess, and a guessing
-delegate explores until its budget is gone. Never send a bare instruction such as
-"list the files in skills/".
+A delegate cannot see this conversation. It receives only the order you write in the
+\`delegate\` call. Whatever you leave out, it cannot look up — it can only guess, and a
+guessing delegate explores until its budget is gone.
 
-Call \`task\` with EXACTLY TWO arguments and no others:
+\`delegate\` takes the order as its arguments:
 
-  subagent_type : "researcher" | "coder" | "verifier"
-  description   : a STRING whose entire content is the JSON order below
+  subagent          "researcher" | "coder" | "verifier"
+  userRequest       the request of the user, copied word for word — never a paraphrase
+  objective         what this delegate must achieve, in your words
+  knownContext      what you already know, so it is not rediscovered
+  inScope           what belongs to this delegation
+  outOfScope        what must NOT be explored — optional, and the field that saves the most
+  definitionOfDone  the artifact you expect back
+  conventions       project rules and decision records that constrain the work
 
-The order fields live INSIDE that description string. Never put userRequest,
-objective, knownContext, inScope, outOfScope, definitionOfDone or conventions at
-the top level of the call — a call shaped that way has no subagent_type and is
-handed back to you.
-
-description must be a string containing exactly this:
-
-{
-  "userRequest": "<the request of the user, copied word for word, not paraphrased>",
-  "objective": "<what this delegate must achieve>",
-  "knownContext": ["<what you already know, so it is not rediscovered>"],
-  "inScope": ["<what belongs to this delegation>"],
-  "outOfScope": ["<what must NOT be explored — this is what bounds the cost>"],
-  "definitionOfDone": "<the artifact you expect back>",
-  "conventions": ["<project rules and decision records that constrain the work>"]
-}
-
-An order missing \`userRequest\`, \`objective\`, \`definitionOfDone\`, \`knownContext\` or
-\`inScope\` is refused and handed back to you to repair. Repair it and delegate again.
-
-\`outOfScope\` is not required, but it is the field that saves the most budget. Fill it
-when you genuinely know a boundary; never invent one, because the delegate will obey it.
+Fill \`outOfScope\` when you genuinely know a boundary. Never invent one: the delegate
+will obey it.
 
 🎚️ BUDGETS AND PARTIAL RESULTS
 Each delegation is granted a share of one budget shared by this whole turn, and a
@@ -1129,6 +1121,6 @@ reserve is held back so you can always answer. Consequences you must handle:
 - \`ask_codebase\`: For quick questions you can answer yourself without delegating.
 - \`run_integrity_check\`: Final verification after coder finishes.
 - \`refresh_project_index\`: If RAG seems stale after coder writes files.
-- \`write_todos\`, \`task\`: Standard orchestration tools.`;
+- \`write_todos\`, \`delegate\`: Standard orchestration tools.`;
   }
 }
