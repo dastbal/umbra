@@ -17,7 +17,7 @@
  *
  * @example
  * ```bash
- * # .env.development
+ * # .env
  * AGENT_MODEL=gemini-2.5-flash-lite      # fast and cheap (default)
  * AGENT_MODEL=gemini-2.5-pro             # for architecture tasks
  * AGENT_MODEL=ollama:llama3.2            # local, no API costs
