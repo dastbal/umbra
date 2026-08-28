@@ -40,6 +40,14 @@ import {
   isGoogleCloudProjectId,
   resolveVertexProject,
 } from '../../core/config/model-resolver';
+import {
+  ReasoningDisplaySupport,
+  ReasoningLevel,
+  describeReasoning,
+  resolveConfiguredReasoningDisplay,
+  resolveConfiguredReasoningLevel,
+  resolveReasoningLevel,
+} from '../../core/config/reasoning-profile';
 import { colors, box } from './theme';
 import { isInteractive, selectOutcome, SelectChoice } from './interactive-select';
 import { askNumber as askNumberPrompt, askText } from './prompts';
@@ -131,7 +139,7 @@ export async function showModelMenu(
   // ── Step 1: Provider Selection ─────────────────────────────────────────────
   const isCurrentOllama = currentModel.startsWith('ollama:');
   const isCurrentClaude = isVertexAnthropicModel(currentModel);
-  const providers: SelectChoice<'vertex-gemini' | 'vertex-anthropic' | 'ollama'>[] = [
+  const providers: SelectChoice<'vertex-gemini' | 'vertex-anthropic' | 'ollama' | 'setup'>[] = [
     {
       // The distinguishing word leads each row. Both cloud providers share the
       // same Vertex AI transport, so starting both labels with it made them
@@ -150,6 +158,11 @@ export async function showModelMenu(
       value: 'ollama',
       active: isCurrentOllama,
     },
+    { label: '── configuration ──', separator: true },
+    {
+      label: '⚙️   Setup   (Google Cloud project and location)',
+      value: 'setup',
+    },
   ];
 
   const selectedProvider = await chooseFromList('Select Provider', providers);
@@ -159,6 +172,10 @@ export async function showModelMenu(
   }
 
   // ── Step 2: Model Selection ────────────────────────────────────────────────
+  if (selectedProvider === 'setup') {
+    return showSetupMenu(envFilePath);
+  }
+
   if (selectedProvider === 'vertex-gemini') {
     return showVertexModelMenu(currentModel, envFilePath);
   } else if (selectedProvider === 'vertex-anthropic') {
@@ -197,7 +214,7 @@ async function showVertexClaudeModelMenu(
   if (projectId === null) return null;
 
   process.env.GOOGLE_CLOUD_PROJECT = projectId;
-  return applyModelSelection(selected, envFilePath, projectId);
+  return await applyModelSelection(selected, envFilePath, projectId);
 }
 
 // ── Private: Vertex AI model submenu ─────────────────────────────────────────
@@ -233,7 +250,7 @@ async function showVertexModelMenu(
     return null;
   }
 
-  return applyModelSelection(selected, envFilePath);
+  return await applyModelSelection(selected, envFilePath);
 }
 
 // ── Private: Ollama model submenu ─────────────────────────────────────────────
@@ -289,7 +306,235 @@ async function showOllamaModelMenu(
   }
 
   const fullModelString = ModelSwitcher.toOllamaString(selected);
-  return applyModelSelection(fullModelString, envFilePath);
+  return await applyModelSelection(fullModelString, envFilePath);
+}
+
+// ── Private: Reasoning submenu ────────────────────────────────────────────────
+
+/**
+ * What the operator chose on the reasoning screen.
+ */
+interface ReasoningChoice {
+  /** The level to persist, or undefined to leave the model's own default. */
+  level?: ReasoningLevel;
+  /** Whether the model's reasoning should be shown in the terminal. */
+  showReasoning: boolean;
+}
+
+/**
+ * One row on the reasoning screen.
+ *
+ * The display toggle shares the list with the levels because both answer the
+ * same question — how much thinking do I want, and do I want to see it — and
+ * splitting them into two screens would make the cheap, reversible half feel
+ * like a separate decision.
+ */
+type ReasoningRow =
+  | { kind: 'level'; level: ReasoningLevel }
+  | { kind: 'default' }
+  | { kind: 'toggle-display' };
+
+/** Human-readable guidance per level, shown as the row hint. */
+const LEVEL_HINTS: Readonly<Record<ReasoningLevel, string>> = {
+  minimal: 'barely thinks — cheapest, fastest',
+  low: 'quick answers, simple tasks',
+  medium: 'balanced',
+  high: 'provider default — most coding work',
+  xhigh: 'hard problems, agentic runs',
+  max: 'correctness over cost',
+};
+
+/** Why the display row is or is not actionable, in the operator's words. */
+const DISPLAY_HINTS: Readonly<Record<ReasoningDisplaySupport, string>> = {
+  controllable: 'visibility only — thinking is billed either way',
+  'forced-on': 'always shown once a level is set — cannot be turned off',
+  unavailable: 'not available for this model',
+};
+
+/**
+ * Renders the display row's checkbox for each support state.
+ *
+ * A forced-on model shows a filled box the operator cannot clear, which is
+ * honest about the state; an unavailable one shows an empty box it cannot fill.
+ *
+ * @param support - How much control Umbra has over showing reasoning.
+ * @param showReasoning - The current toggle state, when it is controllable.
+ * @returns The checkbox glyph to render.
+ */
+function displayCheckbox(support: ReasoningDisplaySupport, showReasoning: boolean): string {
+  if (support === 'forced-on') return '☑';
+  if (support === 'unavailable') return '☐';
+  return showReasoning ? '☑' : '☐';
+}
+
+/**
+ * Asks how hard the selected model should think, and whether to show it.
+ *
+ * Only the levels the chosen model actually accepts are offered, so a
+ * selection can never produce the `400` that an unsupported level returns. A
+ * model with no reasoning controls says so and is not prompted.
+ *
+ * The screen re-renders when the display toggle is used, so the operator sees
+ * the new state before committing to a level.
+ *
+ * @param model - The model just selected.
+ * @returns The chosen reasoning settings, or null when cancelled.
+ */
+async function chooseReasoning(model: string): Promise<ReasoningChoice | null> {
+  const profile = describeReasoning(model);
+
+  if (profile.mechanism === 'none') {
+    console.log('');
+    console.log(colors.muted('  Reasoning: not available for this model.'));
+    return { level: undefined, showReasoning: false };
+  }
+
+  const controllable = profile.display === 'controllable';
+  const activeLevel = resolveReasoningLevel(model, resolveConfiguredReasoningLevel());
+  let showReasoning = controllable && resolveConfiguredReasoningDisplay();
+
+  // Loop so the display toggle can be flipped without leaving the screen.
+  for (;;) {
+    const rows: SelectChoice<ReasoningRow>[] = [
+      ...profile.levels.map((level) => ({
+        label: `${level.padEnd(8)}`,
+        value: { kind: 'level' as const, level },
+        hint: LEVEL_HINTS[level],
+        active: level === activeLevel,
+      })),
+      {
+        label: 'default ',
+        value: { kind: 'default' as const },
+        hint: 'let the model decide',
+        active: activeLevel === undefined,
+      },
+      { label: '── show reasoning ──', separator: true },
+      {
+        label: `${displayCheckbox(profile.display, showReasoning)}  Show the model's reasoning`,
+        value: { kind: 'toggle-display' as const },
+        hint: DISPLAY_HINTS[profile.display],
+        disabled: !controllable,
+      },
+    ];
+
+    const picked = await chooseFromList('Reasoning', rows);
+    if (picked === null) return null;
+
+    if (picked.kind === 'toggle-display') {
+      showReasoning = !showReasoning;
+      continue;
+    }
+
+    return {
+      level: picked.kind === 'level' ? picked.level : undefined,
+      showReasoning,
+    };
+  }
+}
+
+// ── Private: Setup submenu ────────────────────────────────────────────────────
+
+/**
+ * Shows the Google Cloud settings that no other screen can reach.
+ *
+ * The project ID is otherwise only asked for when it is missing, so an ID
+ * entered wrongly once could only be fixed by editing `.env` by hand. The
+ * region has never been reachable from the CLI at all.
+ *
+ * Reasoning is deliberately absent: it is chosen when a model is chosen, and a
+ * second path to the same value is how two paths drift apart.
+ *
+ * @param envFilePath - Path to `.env` for persistence.
+ * @returns Always null — setup changes configuration, never the model.
+ */
+async function showSetupMenu(envFilePath?: string): Promise<null> {
+  const project = resolveVertexProject() ?? '(not set)';
+  const location = process.env.GOOGLE_CLOUD_LOCATION?.trim() || 'global';
+
+  const action = await chooseFromList<'project' | 'location'>('Setup', [
+    {
+      label: 'Google Cloud project',
+      value: 'project',
+      hint: project,
+    },
+    {
+      label: 'Vertex AI location  ',
+      value: 'location',
+      hint: location,
+    },
+  ]);
+
+  if (action === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
+  if (action === 'project') {
+    console.log('');
+    console.log(colors.muted('  Use the ID from the project selector, not its display name.'));
+    const answer = await askText({
+      prompt: colors.primary.bold('  Google Cloud project ID: '),
+    });
+    const projectId = answer?.trim() ?? '';
+    if (!projectId) {
+      console.log(colors.muted('  Cancelled.\n'));
+      return null;
+    }
+    if (!isGoogleCloudProjectId(projectId)) {
+      console.log(colors.danger('  ✗ Invalid Google Cloud project ID. Nothing was changed.\n'));
+      return null;
+    }
+    reportSetupSave(
+      ModelSwitcher.saveVertexSettingsToEnv({ projectId }, envFilePath),
+      'GOOGLE_CLOUD_PROJECT',
+      projectId,
+    );
+    process.env.GOOGLE_CLOUD_PROJECT = projectId;
+    return null;
+  }
+
+  console.log('');
+  console.log(colors.muted('  "global" is recommended. A specific region can hit its own quota.'));
+  const answer = await askText({
+    prompt: colors.primary.bold('  Vertex AI location: '),
+  });
+  const chosen = answer?.trim() ?? '';
+  if (!chosen) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+  if (!/^[a-z][a-z0-9-]*$/.test(chosen)) {
+    console.log(colors.danger('  ✗ Invalid location. Nothing was changed.\n'));
+    return null;
+  }
+  reportSetupSave(
+    ModelSwitcher.saveVertexSettingsToEnv(
+      { projectId: resolveVertexProject() ?? '', location: chosen },
+      envFilePath,
+    ),
+    'GOOGLE_CLOUD_LOCATION',
+    chosen,
+  );
+  process.env.GOOGLE_CLOUD_LOCATION = chosen;
+  return null;
+}
+
+/**
+ * Reports the outcome of a setup write.
+ *
+ * @param saved - Whether the write succeeded.
+ * @param key - The environment key that was written.
+ * @param value - The value that was written.
+ */
+function reportSetupSave(saved: boolean, key: string, value: string): void {
+  console.log('');
+  if (saved) {
+    console.log(`  ${colors.accent('✅')} ${chalk.white(key)} ${colors.muted('=')} ${colors.primary.bold(value)}`);
+    console.log(`  ${colors.muted('💾 Saved to .env')}`);
+  } else {
+    console.log(`  ${colors.warning(`⚠️  Could not save to .env — set ${key} manually.`)}`);
+  }
+  console.log('');
 }
 
 // ── Private: Apply selection ──────────────────────────────────────────────────
@@ -302,21 +547,40 @@ async function showOllamaModelMenu(
  * @param vertexProjectId - Project to persist atomically for Claude on Vertex.
  * @returns The `ModelMenuResult` with save status.
  */
-function applyModelSelection(
+async function applyModelSelection(
   modelString: string,
   envFilePath?: string,
   vertexProjectId?: string,
-): ModelMenuResult {
+): Promise<ModelMenuResult | null> {
+  // Reasoning is asked here, after the model is known, because this is the only
+  // point in the flow where the legal levels are known. Asking earlier — or
+  // from a separate command — would allow persisting a level the selected model
+  // rejects, which is the same class of failure as a saved model with no
+  // project: valid when written, broken on the next start.
+  const reasoning = await chooseReasoning(modelString);
+  if (reasoning === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
   console.log('');
   console.log(`  ${colors.accent('✅')} ${chalk.white('Switching to')} ${colors.primary.bold(modelString)}`);
+  if (reasoning.level) {
+    console.log(`  ${colors.muted(`   reasoning: ${reasoning.level}`)}`);
+  }
+  if (reasoning.showReasoning) {
+    console.log(`  ${colors.muted('   reasoning shown in the terminal')}`);
+  }
 
-  const saved = vertexProjectId
-    ? ModelSwitcher.saveClaudeVertexSelectionToEnv(
-        modelString,
-        vertexProjectId,
-        envFilePath,
-      )
-    : ModelSwitcher.saveModelToEnv(modelString, envFilePath);
+  const saved = ModelSwitcher.saveSelectionToEnv(
+    {
+      model: modelString,
+      reasoningLevel: reasoning.level,
+      showReasoning: reasoning.showReasoning,
+      projectId: vertexProjectId,
+    },
+    envFilePath,
+  );
 
   if (saved) {
     console.log(`  ${colors.muted('💾 Saved to .env')}`);

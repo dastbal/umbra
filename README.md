@@ -25,6 +25,7 @@ Vertex AI**, and local **Ollama** models.
   - [Option C — Anthropic Claude through Vertex AI](#option-c--anthropic-claude-through-vertex-ai)
 - [CLI — Interactive Streaming Sessions](#cli--interactive-streaming-sessions)
   - [Session Management](#session-management)
+  - [Reasoning — how hard the model thinks](#reasoning--how-hard-the-model-thinks)
   - [Switching Models — `/model` command](#switching-models---model-command)
   - [LLM Switching via env var](#llm-switching-via-env-var)
 - [Agent Modes](#agent-modes)
@@ -211,9 +212,47 @@ AGENT_MODEL=vertex-anthropic:claude-haiku-4-5@20251001
 
 For local development, authenticate once with
 `umbra auth login --project YOUR_GCP_PROJECT_ID`. Then run `umbra deep` or choose
-**Claude (Vertex AI)** from `/model`. If `GOOGLE_CLOUD_PROJECT` is missing, the
-selector asks for the project ID and saves it together with the model before it
-restarts the agent.
+**Claude** from `/model`. If `GOOGLE_CLOUD_PROJECT` is missing, the selector asks
+for the project ID and saves it together with the model before it restarts the
+agent. Once set, both the project and the Vertex location can be changed from
+**Setup** at the bottom of the `/model` provider list.
+
+---
+
+### Reasoning — how hard the model thinks
+
+Every cloud model exposes a knob for reasoning depth, and no two providers name
+it the same. Umbra calls it **Reasoning** everywhere and translates per model,
+so the same six levels read the same regardless of who serves the model.
+
+The level is chosen at the end of `/model`, right after the model itself, and
+the picklist offers **only the levels that model accepts** — which is what makes
+it impossible to save a setting the model would reject. See
+[ADR-016](./docs/adr/ADR-016-one-reasoning-vocabulary-across-providers.md).
+
+```dotenv
+# low | medium | high | xhigh | max | minimal — empty means the model default
+AGENT_REASONING=xhigh
+
+# Show the model's reasoning in the terminal (Claude 5 only)
+AGENT_REASONING_DISPLAY=false
+```
+
+| Model family | Levels offered | Show reasoning |
+|---|---|---|
+| Claude Sonnet 5, Opus 5 | `low` `medium` `high` `xhigh` `max` | your choice |
+| Claude Haiku 4.5 | `low` `medium` `high` | always on once a level is set |
+| Gemini 3.5, 3.1 | `minimal` `low` `medium` `high` | not available |
+| Gemini 2.5 | `low` `medium` `high` | always on once a level is set |
+| Ollama | — | — |
+
+Three things worth knowing before you turn it up:
+
+- Lower levels cost less and answer faster. `high` is the provider default.
+- A level saved for one model is **clamped down**, never up, when you switch to a
+  model that lacks it — `max` on Claude Opus 5 becomes `high` on Gemini 3.5.
+- On **Claude Haiku 4.5**, setting a level gives up `temperature: 0`. The API
+  rejects both together.
 
 ---
 
@@ -281,21 +320,34 @@ You: /model
 ╰────────────────────────────────────────────────────╯
 
   Select Provider:
-  1. ⚡  Vertex AI       (Gemini cloud — Google credentials)
-  2. 🟠  Claude Vertex   (Anthropic models — Google credentials)
-  3. 🦙  Ollama          (Local models — free, no API key needed)  ← active
-  Provider: 3
+  1. ⚡  Gemini  (Google — via Vertex AI)
+  2. 🟠  Claude  (Anthropic — via Vertex AI)  ← active
+  3. 🦙  Ollama  (Local — free, no API key needed)
 
-  Detecting Ollama models... ✓ (4 found)
+  ── configuration ──
+  4. ⚙️   Setup   (Google Cloud project and location)
+  Provider: 2
 
-  Select Ollama Model:
-  1. gemma4:26b  (17 GB)
-  2. gemma4:e2b  (7.2 GB)
-  3. gemma4:e4b  (9.6 GB)
-  4. gemma4      (9.6 GB)
-  Model: 1
+  Select Claude Model:
+  1. Claude Haiku 4.5  (fast & economical)
+  2. Claude Sonnet 5     ⭐ (recommended)  ← active
+  3. Claude Opus 5       (maximum capability)
+  Model: 3
 
-  ✅ Switching to ollama:gemma4:26b
+  Reasoning:
+  1. low       (quick answers, simple tasks)
+  2. medium    (balanced)
+  3. high      (provider default — most coding work)  ← active
+  4. xhigh     (hard problems, agentic runs)
+  5. max       (correctness over cost)
+  6. default   (let the model decide)
+
+  ── show reasoning ──
+  7. ☐  Show the model's reasoning  (visibility only — thinking is billed either way)
+  Select: 4
+
+  ✅ Switching to vertex-anthropic:claude-opus-5
+     reasoning: xhigh
   💾 Saved to .env
   🔄 Restarting agent with new model...
 ```
@@ -306,7 +358,7 @@ The selected model is automatically saved to your `.env` file for future session
 
 | Command | Description | State |
 |---|---|---|
-| `/model` | Switch the active LLM model interactively (Ollama, Gemini, or Claude on Vertex AI) | — |
+| `/model` | Switch the active LLM model, its reasoning level, or the Google Cloud setup | — |
 | `/mentor` | Toggle deep mentor mode — Forced Output Contract, trade-off analysis, Socratic gates | `[ON]` / `[OFF]` |
 | `/help` | Show all available slash commands with their current state | — |
 | `Ctrl+C` | Exit the session cleanly | — |

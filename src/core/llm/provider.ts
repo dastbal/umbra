@@ -46,6 +46,14 @@ import {
   resolveVertexLocation,
   resolveVertexProject,
 } from '../config/model-resolver';
+import {
+  ReasoningLevel,
+  describeReasoning,
+  reasoningBudgetTokens,
+  resolveConfiguredReasoningDisplay,
+  resolveConfiguredReasoningLevel,
+  resolveReasoningLevel,
+} from '../config/reasoning-profile';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -56,6 +64,17 @@ import * as os from 'os';
 const rootDir = process.cwd();
 dotenv.config({ path: path.join(rootDir, '.env') });
 dotenv.config({ path: path.join(rootDir, '.env.development') });
+
+/**
+ * Effort levels Anthropic accepts in `output_config.effort`.
+ *
+ * Declared here rather than imported because `@langchain/anthropic`'s own
+ * `OutputConfig` type omits `xhigh`, which the underlying Anthropic SDK and the
+ * live Vertex endpoint both accept — verified returning HTTP 200 on
+ * `claude-sonnet-5` on 2026-08-28. Narrowing Umbra to LangChain's stale type
+ * would drop a working level; this keeps it while staying explicit about why.
+ */
+type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 /**
  * Multi-provider LLM factory.
@@ -240,7 +259,42 @@ export class LLMProvider {
       model,
       temperature,
       location: resolveVertexLocation(),
+      ...LLMProvider.geminiReasoningFields(model),
     });
+  }
+
+  /**
+   * Translates Umbra's reasoning configuration into Gemini request fields.
+   *
+   * Gemini splits the same intent the way Claude does, along the same line:
+   * the 3.x generation takes a named `thinkingLevel`, while 2.5 accepts only a
+   * token budget and rejects the named form with an explicit `400`. Both
+   * generations expose the reasoning text through `includeThoughts`.
+   *
+   * @param model - The bare Gemini model name, for capability lookup.
+   * @returns Partial ChatVertexAI fields; empty when unconfigured.
+   */
+  private static geminiReasoningFields(model: string): {
+    thinkingLevel?: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
+    thinkingBudget?: number;
+  } {
+    const { mechanism } = describeReasoning(model);
+    if (mechanism === 'none') return {};
+
+    const level = resolveReasoningLevel(model, resolveConfiguredReasoningLevel());
+    if (!level) return {};
+
+    // No `includeThoughts` is sent. `@langchain/google-common` does not accept
+    // it as a parameter — it derives the flag from the token budget
+    // (`utils/gemini.js`:896), so passing one is silently dropped. Umbra
+    // therefore reports Gemini's display as not under its control rather than
+    // offering a switch that would do nothing. See ADR-016.
+    if (mechanism === 'thinking-level') {
+      return { thinkingLevel: level.toUpperCase() as 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' };
+    }
+
+    const budgetTokens = reasoningBudgetTokens(level);
+    return budgetTokens === undefined ? {} : { thinkingBudget: budgetTokens };
   }
 
   /**
@@ -312,17 +366,88 @@ export class LLMProvider {
     const region = resolveVertexLocation();
     const vertexClient = new AnthropicVertex({ projectId, region, maxRetries: 0 });
     const modelName = getVertexAnthropicModelName(model);
+    const reasoning = LLMProvider.anthropicReasoningFields(model);
 
-    // The Claude 5 generation rejects `temperature` outright (HTTP 400), so the
-    // parameter is omitted rather than sent and retried — a retry would cost a
-    // second paid request for a failure that is fully predictable from the
-    // model identifier. Claude 4.5 still honors it and keeps receiving it.
+    // Two independent reasons to drop `temperature`, and both are hard 400s.
+    //
+    // The Claude 5 generation removed the parameter outright. Claude 4.5 still
+    // honors it — but not while thinking is enabled: Anthropic rejects the pair
+    // with "temperature is not supported when thinking is enabled". So a Haiku
+    // 4.5 selection with a reasoning level configured must also give up
+    // deterministic sampling; it cannot have both.
+    //
+    // Neither case is sent-and-retried. Both are predictable from the request
+    // Umbra is about to build, and a retry would spend a second paid call to
+    // learn what is already known here.
+    const omitTemperature = rejectsTemperature(modelName) || reasoning.thinking !== undefined;
+
     return new ChatAnthropic({
       model: modelName,
-      ...(rejectsTemperature(modelName) ? {} : { temperature }),
+      ...(omitTemperature ? {} : { temperature }),
+      // Cast confined to this spread: LangChain's `ChatAnthropicInput` omits
+      // `xhigh` from `outputConfig.effort`, so its type would reject a level
+      // the API accepts. `anthropicReasoningFields` carries its own explicit
+      // return type, so the fields themselves are still checked — only
+      // LangChain's stale union is bypassed.
+      ...(reasoning as object),
       maxRetries: 0,
       createClient: () => vertexClient,
     });
+  }
+
+  /**
+   * Translates Umbra's reasoning configuration into Anthropic request fields.
+   *
+   * The two Claude mechanisms need different shapes for the same intent:
+   * the Claude 5 generation takes a named level in `outputConfig.effort` and
+   * only returns readable reasoning when `display` is set to `summarized`,
+   * while Claude 4.5 takes a token budget and returns its reasoning text
+   * whenever thinking is enabled at all.
+   *
+   * Nothing is sent when the operator has configured nothing. That keeps the
+   * provider default intact instead of Umbra silently choosing a depth.
+   *
+   * @param model - Full `vertex-anthropic:*` identifier, for capability lookup.
+   * @returns Partial ChatAnthropic fields; empty when unconfigured.
+   */
+  private static anthropicReasoningFields(model: string): {
+    outputConfig?: { effort: AnthropicEffort };
+    thinking?:
+      | { type: 'adaptive'; display?: 'summarized' }
+      | { type: 'enabled'; budget_tokens: number; display?: 'summarized' };
+  } {
+    const { mechanism, display } = describeReasoning(model);
+    const level = resolveReasoningLevel(model, resolveConfiguredReasoningLevel());
+    const showReasoning = display === 'controllable' && resolveConfiguredReasoningDisplay();
+
+    if (mechanism === 'effort') {
+      return {
+        // The cast is safe by construction: `resolveReasoningLevel` returns
+        // only levels the model declares, and an `effort` model declares
+        // exactly the five Anthropic accepts. `minimal` cannot reach here —
+        // the live endpoint rejects it, and no effort model offers it.
+        ...(level ? { outputConfig: { effort: level as AnthropicEffort } } : {}),
+        ...(showReasoning
+          ? { thinking: { type: 'adaptive' as const, display: 'summarized' as const } }
+          : {}),
+      };
+    }
+
+    if (mechanism === 'thinking-budget') {
+      const budgetTokens = level ? reasoningBudgetTokens(level) : undefined;
+      // Claude 4.5 carries depth and visibility in the same object, so a
+      // display-only request still needs a budget to have anything to show.
+      if (!budgetTokens) return {};
+      return {
+        thinking: {
+          type: 'enabled' as const,
+          budget_tokens: budgetTokens,
+          ...(showReasoning ? { display: 'summarized' as const } : {}),
+        },
+      };
+    }
+
+    return {};
   }
 
   /**

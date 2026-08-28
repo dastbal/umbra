@@ -258,6 +258,22 @@ export function getVertexAnthropicModelName(model: string): string {
 const CLAUDE_5_GENERATION = /^claude-[a-z]+-5(@\d{8})?$/;
 
 /**
+ * Reports whether a bare Claude model identifier belongs to the Claude 5
+ * generation.
+ *
+ * Exported because two independent concerns depend on this one fact — which
+ * sampling parameter the model accepts, and which reasoning parameter it
+ * accepts. Keeping it in one place stops the two from drifting apart when a
+ * new model family appears.
+ *
+ * @param modelName - A bare Claude identifier, e.g. `claude-sonnet-5`.
+ * @returns True for the Claude 5 generation, false for 4.5 and earlier.
+ */
+export function isClaude5Generation(modelName: string): boolean {
+  return CLAUDE_5_GENERATION.test(modelName.trim().toLowerCase());
+}
+
+/**
  * Reports whether a Claude model rejects the `temperature` sampling parameter.
  *
  * The Claude 5 generation removed `temperature`; sending it returns HTTP 400
@@ -276,7 +292,7 @@ export function rejectsTemperature(model: string): boolean {
     ? getVertexAnthropicModelName(model)
     : model.trim();
 
-  return CLAUDE_5_GENERATION.test(modelName.toLowerCase());
+  return isClaude5Generation(modelName);
 }
 
 /**

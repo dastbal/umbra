@@ -165,6 +165,63 @@ export class ModelSwitcher {
     );
   }
 
+  /**
+   * Persists a complete model selection, including its reasoning settings.
+   *
+   * Model, reasoning level and reasoning display are written in one pass for
+   * the same reason the Claude project is: a partial save can leave a
+   * configuration that no longer starts. A model whose reasoning level was
+   * cleared must not keep the previous model's level in `.env`, so an
+   * unconfigured level is written as an empty value rather than skipped —
+   * leaving the old line in place is what would carry a stale setting forward.
+   *
+   * @param selection - The full selection to persist.
+   * @param envFilePath - Absolute path to the `.env` file to update.
+   * @returns True when every value was saved, otherwise false.
+   */
+  public static saveSelectionToEnv(
+    selection: {
+      model: string;
+      reasoningLevel?: string;
+      showReasoning?: boolean;
+      projectId?: string;
+    },
+    envFilePath?: string,
+  ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      {
+        AGENT_MODEL: selection.model,
+        AGENT_REASONING: selection.reasoningLevel ?? '',
+        AGENT_REASONING_DISPLAY: selection.showReasoning ? 'true' : 'false',
+        ...(selection.projectId ? { GOOGLE_CLOUD_PROJECT: selection.projectId } : {}),
+      },
+      envFilePath,
+    );
+  }
+
+  /**
+   * Writes the Google Cloud settings that Vertex requires, on their own.
+   *
+   * Used by the setup screen, where the operator changes infrastructure
+   * configuration without selecting a model.
+   *
+   * @param settings - Project and optional location to persist.
+   * @param envFilePath - Absolute path to the `.env` file to update.
+   * @returns True when the values were saved, otherwise false.
+   */
+  public static saveVertexSettingsToEnv(
+    settings: { projectId: string; location?: string },
+    envFilePath?: string,
+  ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      {
+        GOOGLE_CLOUD_PROJECT: settings.projectId,
+        ...(settings.location ? { GOOGLE_CLOUD_LOCATION: settings.location } : {}),
+      },
+      envFilePath,
+    );
+  }
+
   /** Updates selected environment keys while preserving the rest of the file. */
   private static saveEnvironmentValues(
     values: Readonly<Record<string, string>>,
