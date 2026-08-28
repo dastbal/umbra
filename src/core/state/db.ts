@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import { agentPath } from '../config/agent-directory';
 
 /**
  * Singleton Database Manager.
@@ -22,7 +23,7 @@ export class AgentDB {
   public static getInstance(): Database.Database {
     if (!this.instance) {
       const rootDir = process.cwd();
-      const dbDir = path.join(rootDir, '.agent'); // Hidden folder in project root
+      const dbDir = agentPath(rootDir); // Hidden folder in project root
       const dbPath = path.join(dbDir, 'memory.db');
 
       // Ensure directory exists

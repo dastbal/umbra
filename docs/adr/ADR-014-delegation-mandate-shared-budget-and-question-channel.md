@@ -1,0 +1,467 @@
+# ADR-014: Give a delegation an order, a shared budget, and a way to ask
+
+Category: Orchestration and runtime behavior
+
+Author: Claude, with David
+
+Date: 2026-08-27
+
+## Status
+
+Accepted — amended 2× 2026-08-27
+
+## Context
+
+An `umbra orchestrate` session on 2026-08-27 failed twice in a row, in two
+different ways, on the same user request: *"quiero que mejores los skills tuyos,
+revisalos y sugerime cambios"*.
+
+The first attempt died immediately on `Researcher already ran for this request;
+use its handoff.` — with no researcher having run. That symptom had a known
+cause, fixed in commit `5c0e476`: the guard was counting the delegation it was
+authorizing.
+
+The second attempt got past the guard and died differently. The Researcher
+issued six semantic searches — architecture, modules, repositories, DTOs, error
+handling, authentication — interleaved with `write_todos`, and ended on
+`Recursion limit of 50 reached without hitting a stop condition`. Eighteen tool
+calls, no handoff, nothing usable.
+
+Reading the source of `deepagents@dist/index.js` explained all of it, and none
+of the explanations were about the guard.
+
+**A subagent receives one message, and it is not the conversation.**
+`createTaskTool` builds the delegate's state and then overwrites its history:
+
+```js
+subagentState.messages = [new HumanMessage({ content: description })];
+```
+
+Everything the delegate can ever know is the `description` string. In the failed
+run that string was `"List all files in the skills/ directory"` — the
+orchestrator's own narrowing of the request. The Researcher never saw what the
+user actually asked, had no channel to ask about it, and did the only thing left:
+it explored, looking for the intent it had not been given.
+
+**The recursion limit is not a turn budget.** The same function spreads the
+parent's config into the delegate's invocation and starts a fresh graph run:
+
+```js
+const subagentConfig = { ...config, configurable: { ...config.configurable, ls_agent_type: "subagent" } };
+const result = await subagent.invoke(subagentState, subagentConfig);
+```
+
+`recursionLimit` travels in that spread, and a fresh `invoke` means a fresh
+allowance. A turn configured for 50 transitions can spend 50 in the orchestrator
+plus 50 in each delegation. The Researcher did not overrun a shared ceiling; it
+consumed an entire private one while the orchestrator learned nothing until the
+exception surfaced.
+
+[ADR-008](./ADR-008-bounded-interactive-iteration-audit.md) bounded the
+single-agent path and recorded, as a neutral consequence, that *"the orchestrated
+multi-agent path keeps its separate delegation and retry controls"*. Those
+controls bound how often work is delegated. Nothing bounded what a delegate spent
+once it started.
+
+**A crashed delegate consumed the turn permanently.** `evaluateDelegation`
+permits a Researcher only while `researcherCalls === 0`, and the count was of
+*requests*, not of results. A Researcher killed by the recursion limit had
+therefore spent the turn's only researcher slot, and the orchestrator asking
+again was refused with the same sentence that opened this record — this time
+legitimately, and with no way forward.
+
+Two capabilities that would have limited the damage did not exist. There was no
+way to return an unfinished investigation: `researchArtifactSchema` admitted only
+`ready` and `blocked`, so an interrupted delegate could produce nothing at all.
+And there was no way for a delegate to ask a question: `task` is one call, a
+prompt in and an artifact out.
+
+## Decision
+
+Four mechanisms, one principle. The principle, in David's words, is that a
+delegation is not a *Message to Garcia*: the agent that delegates hands over
+everything it knows, and the agent that executes can ask when that is not enough.
+
+### 1. Every delegation carries a mandate
+
+`src/core/agent/delegation/mandate.ts` defines the order: the user's request
+**verbatim**, the orchestrator's objective, what is already known, what is in
+scope, what is explicitly out of scope, the definition of done, and the
+conventions that constrain the work.
+
+`assertMandateComplete` refuses a delegation missing `userRequest`, `objective`,
+`definitionOfDone`, `knownContext` or `inScope` — the fields no amount of
+searching can recover. `outOfScope` and `conventions` are encouraged by the
+prompt and **not** required: a model forced to fill `outOfScope` on a delegation
+with no real exclusions invents a boundary, and an invented boundary is worse
+than an absent one because the delegate obeys it.
+
+The `task` schema belongs to `deepagents` and has no field to add, so the order
+travels inside `description`. The orchestrator writes it as JSON, which a model
+emits reliably inside a string field; the guard renders it into headed prose,
+which a model reads; the structured original stays in the turn ledger. The guard
+is the translator between the two.
+
+A refused order is returned as a **tool result carrying the template**, not
+thrown. Throwing is correct for a protocol violation the model cannot fix and
+wrong for a message it can rewrite.
+
+### 2. One budget for the turn
+
+`budget-pool.ts` holds a single pool sized by `limits.maxAgentTurns`, split
+28/36/16 between Researcher, Coder and Verifier with **20% held in reserve**. The
+reserve is what guarantees the turn can always produce an answer; without it a
+greedy delegate consumes everything and the run ends with nothing to say.
+
+An unfinished grant is returned to the pool when a delegation ends, which is what
+keeps a correction cycle affordable.
+
+`subagent-budget.middleware.ts` enforces the grant inside the delegate's own
+graph. `ask_delegator` and `write_todos` are not charged: charging a delegate for
+asking pushes it back toward guessing, and `write_todos` writes to a state key
+subagents do not even share with the parent.
+
+### 3. A delegate can ask
+
+`delegation-broker.ts` answers a delegate's question in a fixed order: from the
+mandate, **quoted verbatim**; failing that, from the operator through
+`interrupt()`; failing that, with an explicit statement that the question went
+unanswered.
+
+Relevance against the mandate is decided by word overlap — a heuristic that can
+be wrong. It therefore **quotes and never synthesizes**: a wrong match costs a
+few tokens, while a synthesized answer from a wrong match would be a confident
+fabrication the delegate could not detect.
+
+The interrupt payload carries `kind: 'delegate_question'`. `ChatSession#handleHITL`
+assumed every interrupt was an approval, and without a discriminator a question
+would render as an authorization to act. Cancelling is not an answer: the
+delegate is told the operator declined and records an unknown.
+
+Each mandate allows two questions. That ceiling is inherited from the analysis in
+`docs/deferred-work.md` and is **unproven** — the risk is a model that asks about
+everything, and no trace has yet shown how a delegate really uses this.
+
+### 4. A failure and an attempt are different things
+
+`delegation-outcome.ts` classifies each ending as `decided`, `partial`,
+`refused`, or `infrastructure-failure`. Only `decided` and `partial` spend one of
+a role's permitted attempts.
+
+The runaway-retry protection the old rule provided now sits with the budget: a
+retry is granted from the same turn allowance, so a failure that repeats runs out
+of money without a counter of its own.
+
+`researchArtifactSchema` gains `partial`, `unknowns` and `openQuestions`. A
+`ready` handoff still requires a citation; a `partial` one must state its gaps,
+because a partial result whose gaps are unstated is indistinguishable from a
+complete one. A partial research handoff never authorizes implementation.
+
+### 5. Two smaller corrections found on the way
+
+`list_adrs` is now declared by the Coder and the Verifier. It had been the
+Researcher's alone, which left the agent that writes code unable to consult the
+decision records of the project it writes in — including a consumer project that
+received `docs/adr/` from `umbra init` ([ADR-012](./ADR-012-shipped-working-guides-and-consumer-decision-records.md)).
+
+`prompt-tool-contract.spec.ts` now covers the subagents, closing half of the gap
+`docs/deferred-work.md` recorded as *"the set of tools a model can call is
+assembled in more than one place, and only one of those places is verified"*.
+
+## Flow
+
+```mermaid
+flowchart TD
+  U[User instruction] --> O[Orchestrator]
+  O -->|task + JSON order| G{Guard}
+  G -->|order incomplete| R[Tool result with the template<br/>turn continues]
+  R --> O
+  G -->|no budget left| A[Answer with what is established]
+  G -->|order complete| B[Grant from the turn pool<br/>render order as prose]
+  B --> S[Subagent, own graph]
+  S -->|ask_delegator| K{Broker}
+  K -->|covered| Q[Quote the order — free]
+  K -->|not covered| H[Ask the operator — interrupt]
+  Q --> S
+  H --> S
+  S -->|budget spent| P[status: partial + unknowns]
+  S -->|finished| D[artifact]
+  P --> O
+  D --> O
+```
+
+## Alternatives considered
+
+| Solution | Pros | Cons | Decision |
+| --- | --- | --- | --- |
+| Raise `recursionLimit` again | One-line change | ADR-008 already measured this: at 50, four of five broad requests still reached the limit. It also multiplies per delegation | Rejected |
+| Bound only the Researcher, the delegate that failed | Smallest fix | The Coder and Verifier have the same unbounded private allowance; the next failure would be identical with a different name | Rejected |
+| A third LLM agent between orchestrator and delegate, holding context (David's first shape of the idea) | Could interpret a question rather than match it | Costs tokens and latency, can hallucinate, and becomes a fourth agent to bound. What the intermediary needs is memory and a budget, not intelligence | Rejected as first step; kept open for when the deterministic broker is measured to be insufficient |
+| Merge the Researcher into the orchestrator, which already declares `ask_codebase` | Removes the whole class of problem: a delegate that does not exist cannot be lost | Contradicts ADR-001, and the context isolation it defends is real — a large investigation would flood the orchestrator's window | Rejected. The inconsistency it exposed — the orchestrator holding a research tool its prompt forbids it to use — is recorded as deferred work |
+| Require every mandate field, `outOfScope` included | Maximum context for the delegate | Produces fabricated boundaries, which the delegate then obeys | Rejected |
+| Let the broker synthesize an answer from the mandate | Reads better for the delegate | A wrong relevance match becomes an undetectable fabrication | Rejected in favour of verbatim quotation |
+| Mandate as headed markdown written directly by the model | The delegate reads it unchanged | Heading-exact output from a flash-tier model is brittle; a missed heading loses a field silently | Rejected in favour of JSON in, prose out |
+| Keep counting crashed delegations as attempts | Prevents infinite retries | Observed live: it makes a crash permanent for the turn. The budget pool bounds retries by cost instead | Reversed deliberately |
+
+## Consequences
+
+### Positive
+
+- A delegate that runs out of budget hands back what it verified instead of
+  raising an exception that discards it.
+- A crashed delegation can be retried, and the retry is paid for out of the same
+  turn budget rather than being free.
+- The cost of a turn is bounded end to end for the first time, and a reserve
+  guarantees the turn can answer.
+- A delegate with a genuine question reaches the operator without spending an
+  orchestrator turn.
+- Findings from one delegation are inherited by the next, so work is not
+  repeated across a turn.
+
+### Neutral
+
+- The shared workspace `deepagents` already provides — every state key except
+  `messages`, `todos`, `structuredResponse`, `skillsMetadata` and
+  `memoryContents`, merged back on return — is used for file-shaped work and left
+  otherwise unchanged. Live accounting lives in the process-local ledger because
+  a subagent's message state is invisible to its parent.
+- Modes that do not delegate (`umbra deep`, `umbra analyze`, embedded use) open
+  no ledger and behave exactly as before. Absence of a budget is never an error.
+- The ledger is process-local and keyed by thread and turn, bounded to 32
+  threads. It is not persisted: a resumed session starts a fresh budget.
+
+### Negative
+
+- A single `activeDelegationId` pointer assumes one delegation runs at a time,
+  which holds while `maxDelegationDepth` is 1. Enabling parallel delegation
+  without replacing this pointer would let two delegates spend each other's
+  budget. Stated in the field's TSDoc.
+- The two-question allowance is unproven. A model that asks about everything
+  would burn operator attention instead of budget.
+- Mandate relevance matching is crude by construction. It will sometimes quote a
+  section that does not answer the question.
+- The split is fixed at 28/36/16 with a 20% reserve and has not been tuned
+  against real runs.
+
+## Verification Evidence
+
+- `node node_modules/typescript/bin/tsc --noEmit --pretty false` — clean.
+- `npm run build` — clean, `dist/` rebuilt. ADR-012 records that a CLI change is
+  not verified until this runs.
+- Unit and contract suites: **43 suites, 350 tests, 4 skipped** — from 334 before
+  this work. New coverage: mandate completeness and parsing, pool grants and
+  reserve, ledger turn scoping and eviction, outcome classification for every
+  observed failure signature, broker resolution order, guard refusal paths, and
+  the subagent prompt/tool contract.
+- The `deepagents` behaviours this record depends on were read from
+  `node_modules/deepagents/dist/index.js` at the lines quoted above, not
+  inferred: `createTaskTool` (message replacement, config spread, fresh
+  `invoke`), `EXCLUDED_STATE_KEYS`, `filterStateForSubagent`,
+  `returnCommandWithStateUpdate`, and `SubAgent.middleware` in `index.d.ts`.
+
+**Not yet verified:** no live `umbra orchestrate` run has exercised this. Every
+behaviour above is covered by unit tests against fixtures, and the failure that
+motivated it only surfaced in a real run. The mandate prompt in particular is a
+change to what the model reads, and `docs/deferred-work.md` states the rule this
+record follows: a prompt change is verified by what the model then does, not by a
+unit test. The forced-partial path, the operator question channel, and the
+budget's effect on real exploration must be observed in a LangSmith trace before
+this record's positive consequences are treated as measured.
+
+## Related Files
+
+- `src/core/agent/delegation/mandate.ts` — `Mandate`, `assertMandateComplete`,
+  `parseMandateOrder`, `renderMandate`, `MANDATE_TEMPLATE`.
+- `src/core/agent/delegation/budget-pool.ts` — `BudgetPool`,
+  `DEFAULT_BUDGET_SPLIT`.
+- `src/core/agent/delegation/delegation-registry.ts` — `openTurn`,
+  `currentTurn`, `nextDelegationId`, `recordFinding`, `activeDelegationId`.
+- `src/core/agent/delegation/delegation-broker.ts` — `answerDelegateQuestion`,
+  `AskOperator`.
+- `src/core/agent/delegation/delegation-outcome.ts` —
+  `classifyDelegationOutcome`.
+- `src/core/agent/delegation/subagent-budget.middleware.ts` —
+  `createSubagentBudgetMiddleware`.
+- `src/core/agent/orchestration-guard.middleware.ts` —
+  `createOrchestrationGuard`, `readDelegationHistory`, `readTurnKey`.
+- `src/core/agent/contracts.ts` — `researchArtifactSchema` with `partial`.
+- `src/core/tools/interaction/ask-delegator.tool.ts` — `askDelegatorTool`,
+  `DELEGATE_QUESTION_KIND`.
+- `src/core/subagents/{researcher,coder,verifier}.subagent.ts` — declarations,
+  middleware, prompts.
+- `src/core/agent/deep-agent-factory.ts` — `createOrchestrator`,
+  `buildSystemPrompt`.
+- `src/presentation/cli/chat-session.ts` — `handleDelegateQuestion`,
+  `resumeAgent`.
+- `src/core/agent/prompt-tool-contract.spec.ts` — the subagent contract.
+
+---
+
+## Amendment — 2026-08-27, first live run
+
+The record above was written before this decision had ever met a model. It has
+now, and the run settled two of its open questions — one in its favour, one
+against it. Nothing above is removed; this section states what changed.
+
+### The mandate works
+
+`umbra orchestrate`, asked *"puede prguntarle a u usbagente como esta please"*,
+produced a delegation whose `description` opened with:
+
+> **The user's request, verbatim** — puede prguntarle a u usbagente como esta please
+> **Your objective** — Analyze the codebase to determine how to implement a feature that allows a user to ask a subagent 'how are you' (status check).
+> **What is already known — do not rediscover this** — The user wants to be able to ask a subagent 'how are you'.
+
+The orchestrator wrote the JSON order, the guard rendered it, and the delegate
+received the request the operator actually made. Compare the delegation that
+motivated this record: `"List all files in the skills/ directory"`.
+
+### The question channel cannot suspend, and hung the run
+
+The same run then stopped. The Researcher issued one model request and the
+session sat on `Delegating to a subagent` for 145 seconds until the operator
+interrupted it. The trace shows no tool span completing after that request.
+
+The cause is in `deepagents` and is decisive. `getSubagents` builds every
+subagent with:
+
+```js
+agents[agentParams.name] = createAgent({
+  model, systemPrompt, tools, middleware, name, ...responseFormat
+});
+```
+
+There is no `checkpointer`. The only one in the whole construction is passed to
+the top-level `createDeepAgent`. `interrupt()` suspends by persisting state and
+waiting to be resumed with a `Command`, and a graph with nothing to persist to
+has nothing to resume from. The delegate raised a question that could never be
+delivered, and the run waited for an answer nobody was going to be asked for.
+
+This was foreseeable from the source and was not foreseen: the decision above
+reused the `requestApproval` pattern without checking that the graph it would run
+in had the one thing that pattern depends on. The `Related Files` list names
+`ask-delegator.tool.ts` as a consumer of the ADR-011 mechanism; that mechanism
+lives in the *orchestrator's* graph, and a subagent is not it.
+
+### What changed in response
+
+**The operator escalation is disabled by default.** `ask_delegator` still answers
+from the mandate — quoted, free, no suspension — which is the path carrying most
+of the value and which the failed run never reached. A question the order does
+not cover now returns the explicit "record this in `unknowns`" reply instead of
+suspending. `UMBRA_SUBAGENT_QUESTIONS=1` re-enables the escalation for whoever
+works on making it suspend properly, the same shape as `UMBRA_SIMPLE_PROMPT=1`
+in [ADR-012](./ADR-012-arrow-key-selection-prompts.md): an unproven path ships
+reachable, not enabled.
+
+**The guard no longer treats a suspension as the end of a delegation.** It closed
+the delegation in a `finally`, so a suspended run would have released its budget
+and cleared `activeDelegationId` — and the resumed tool body, re-executed from
+the top as `interrupt()` requires, would have found no delegation to belong to
+and been told none was active. That is precisely the re-execution hazard
+[ADR-011](./ADR-011-path-containment-and-real-approval.md) documents, reached
+through a `finally` rather than a `catch`. A `GraphInterrupt` is now re-thrown
+with the delegation left open.
+
+Both are covered by tests: a suspension keeps the pointer and the grant, an
+ordinary failure closes them, and the mocked `interrupt()` in
+`ask-delegator.tool.spec.ts` throws if the disabled path is ever reached.
+
+### What this leaves open
+
+Making a delegate genuinely able to ask the operator requires the subagent graph
+to be resumable, which means either a checkpointer reaching `getSubagents` — not
+currently possible through the `SubAgent` type — or moving the question out of the
+subagent and into the orchestrator's graph, where suspension already works. The
+second is the more promising shape and nothing here forecloses it.
+
+Until then the honest statement is: **a delegate can consult its order, and
+cannot reach a human.** The `Consequences → Positive` bullet claiming that a
+delegate with a genuine question reaches the operator is not yet true, and is
+withdrawn until it is.
+
+---
+
+## Amendment — 2026-08-27, second: the diagnosis above was wrong
+
+The first amendment blamed the 145-second hang on subagent graphs having no
+checkpointer, and disabled the operator question channel on that basis. **That
+inference was wrong.** It was drawn from reading
+`node_modules/@langchain/langgraph/dist/interrupt.js:54` — the
+`MISSING_CHECKPOINTER` guard — without executing anything. This amendment
+records what execution showed.
+
+### What was measured
+
+A spike built the exact topology under discussion with `FakeToolCallingModel`,
+so no provider was involved: an orchestrator with a checkpointer, a tool that
+invokes a subagent graph, and a tool inside that subagent that calls
+`interrupt()`. Three variants ran — subagent without a checkpointer (what
+`deepagents` does), with its own sharing the parent thread, and with its own on a
+separate thread.
+
+**All three suspended and resumed correctly.** Including the first.
+
+`interrupt()` resolves its config through
+`AsyncLocalStorageProviderSingleton.getRunnableConfig()`, not from the graph that
+owns the tool. Inside a nested `invoke`, that context still carries the
+**parent's** `__pregel_checkpointer`. A delegate can suspend and be resumed with
+the plumbing that already exists, and always could.
+
+### What was actually broken, and it is larger
+
+The same spike then drove the graph the way `ChatSession#sendMessage` does —
+`streamEvents(..., { version: 'v2' })`, watching `on_chain_end` for
+`__interrupt__`:
+
+```
+events seen: { on_chain_start: 10, on_chain_end: 7, on_chat_model_start: 2,
+               on_chat_model_end: 2, on_chain_stream: 2,
+               on_tool_start: 2, on_tool_error: 2 }
+interrupt visible anywhere     : false
+interrupt visible on_chain_end : false
+graph left waiting on tasks    : ["tools"]
+pending interrupts in state    : 1
+```
+
+A tool that suspends emits `on_tool_start` and then `on_tool_error` — never
+`on_tool_end` — and **`__interrupt__` appears on no event at all**, while the
+graph is genuinely suspended and waiting.
+
+So the CLI printed `Delegating to a subagent`, never received the matching tool
+end, never called `handleHITL`, and left the spinner turning. The run had
+stopped to ask a question that nothing ever asked. That is the hang, exactly.
+
+**This was never specific to delegation.** The identical measurement with a
+top-level tool — the shape of the `AgentSecurityPolicy` approval gate — produced
+the same result. See the amendment to
+[ADR-011](./ADR-011-path-containment-and-real-approval.md).
+
+### What changed
+
+`src/presentation/cli/pending-interrupts.ts` reads suspensions from the graph's
+own state, which is the authority; the event stream is a view of it that omits
+precisely this. `ChatSession#settlePendingInterrupts` closes every turn by asking
+the graph directly and resuming through the existing `handleHITL`, looping
+because a suspension raised *during* a resume is just as invisible, and bounded
+so a graph that keeps re-suspending returns control instead of holding the
+session.
+
+The operator channel is enabled again, now by measurement rather than by
+assumption. `UMBRA_SUBAGENT_QUESTIONS=0` turns it off for an operator who finds
+it intrusive; the mandate half works either way.
+
+**The consequence withdrawn by the first amendment is restored:** a delegate with
+a genuine question does reach the operator. It is verified end to end against the
+compiled `dist/` build — stream finishes silently, state reports one pending
+suspension, the resume delivers the answer into the tool, and the next read
+reports none.
+
+### What this says about the first amendment
+
+It reached the right action for the wrong reason. Disabling an unproven path was
+defensible; the reasoning attached to it was a guess presented with more
+confidence than an unexecuted read of a library deserves. Recorded here rather
+than rewritten above, because the mistake is the useful part: **a source file
+read is a hypothesis, and this project has a spike harness cheap enough that
+there was no excuse for not running one.**

@@ -1,0 +1,181 @@
+# ADR-008: Bound interactive Deep-agent iterations and join them to performance telemetry
+
+Category: Runtime behavior and observability
+
+Author: Codex
+Date: 2026-08-25
+
+## Status
+
+Accepted — amended 2026-08-27 and 2026-08-28. The tool-call budget described
+here is superseded by
+[ADR-019](./ADR-019-turn-cost-is-the-bound-not-tool-calls.md); the recursion
+limit and the telemetry record remain in force.
+
+## Context
+
+Five fresh Gemini 3.5 Flash Deep-agent investigations that required code
+exploration reached the configured recursion limit of 30 before producing a
+final answer. Raising only the limit to 50 was insufficient in an exploratory
+measurement: one of five requests completed, while four continued issuing
+searches and reads until the new limit.
+
+The CLI already auto-instruments LangChain with LangSmith, but operators needed
+a durable, privacy-safe way to correlate an interactive turn with its LangSmith
+trace and to see outcome, tool count, duration, and budget consumption without
+storing prompts or provider payloads.
+
+## Decision
+
+`parseAgentConfig` in `src/core/config/agent-config.ts` now defaults an
+interactive request to 50 LangGraph transitions and rejects values above 60.
+
+`createIterationBudgetMiddleware` in
+`src/core/agent/iteration-budget.middleware.ts` derives the current tool-call
+count from persisted messages after the latest human instruction. It allows at
+most eight tool attempts. When the budget is exhausted, its `wrapModelCall`
+removes tools and directs the model to synthesize the collected evidence into a
+final answer. Identical prior tool requests receive a synthetic tool result
+instead of running again.
+
+`TurnAudit` in `src/presentation/cli/turn-audit.ts` appends one JSONL record per
+interactive turn at `.agent/telemetry/interactive-turns.jsonl`. It stores an
+audit UUID, hashed thread identifier, model, mode, recursion/tool budgets,
+tool names and durations, text-output flag, elapsed time, outcome, and a coarse
+error category. It does not store prompt content, responses, tool arguments,
+raw error strings, credentials, or provider payloads.
+
+`ChatSession#createStreamConfig` supplies the same audit UUID and static budget
+metadata as LangSmith trace metadata, allowing the local JSONL line and remote
+trace to be correlated without an agent-visible telemetry tool.
+
+## Flow
+
+```mermaid
+flowchart LR
+  U[User instruction] --> G[Deep agent]
+  G --> T{Tool attempts < 8?}
+  T -->|yes| R[Run read or action tool]
+  R --> G
+  T -->|no| F[Remove tools and force synthesis]
+  F --> A[Final answer]
+  A --> L[Local JSONL audit]
+  A --> S[LangSmith trace with audit ID]
+```
+
+## Alternatives considered
+
+| Solution | Pros | Cons | Decision |
+| --- | --- | --- | --- |
+| Raise the recursion limit only | Small change | The 50-turn exploratory run still looped in 4/5 requests | Rejected |
+| Let the model follow a prompt-only soft budget | No framework interception | The model continued equivalent RAG searches during measurement | Rejected |
+| Persist raw prompts and tool arguments for audit | Maximum replay detail | Unnecessary data exposure | Rejected |
+| Derive a tool budget from LangGraph state and join safe metrics to LangSmith | Stops loops, keeps an auditable outcome, preserves privacy | Complex requests may finish with explicit uncertainty instead of more research | Accepted |
+
+## Consequences
+
+### Positive
+
+- A broad investigation has enough graph steps to finalize after normal work.
+- Repeated exploration cannot consume all 50 transitions indefinitely.
+- Operators can query local outcome metrics and inspect the matching LangSmith
+  trace by audit ID.
+
+### Neutral
+
+- The middleware is applied to the single-agent `DeepAgentFactory#create` path.
+  The orchestrated multi-agent path keeps its separate delegation and retry
+  controls.
+
+  > **Amendment — 2026-08-27.** This consequence was recorded as neutral and was
+  > not. The delegation and retry controls bound how often work is delegated;
+  > they bound nothing about what a delegate spends once it starts. Worse, the
+  > recursion limit this record treats as a per-request ceiling is not one:
+  > `deepagents` spreads the parent config into a fresh `subagent.invoke`, so
+  > each delegate begins with the same numeric allowance again. A turn configured
+  > for 50 transitions can therefore spend 50 in the orchestrator plus 50 in each
+  > delegation.
+  >
+  > Observed live on 2026-08-27: a Researcher consumed an entire private
+  > allowance — eighteen tool calls, six of them semantic searches — and the run
+  > ended on `Recursion limit of 50 reached` with no handoff. The orchestrator
+  > learned nothing until the exception arrived.
+  >
+  > The orchestrated path now shares one budget for the whole turn, enforced
+  > inside each subagent. Recorded in
+  > [ADR-014](./ADR-014-delegation-mandate-shared-budget-and-question-channel.md).
+  > Nothing in this record is removed: the single-agent decision it describes is
+  > unchanged and still in force.
+
+### Negative
+
+- A task that truly needs more than eight tool attempts must be narrowed or
+  continued in a new instruction; the model is expected to state what remains
+  unverified.
+- The final low-cost validation did not consume the eight-tool ceiling, so the
+  middleware's live forced-synthesis path is validated by unit tests and must
+  continue to be observed in LangSmith on a future complex request.
+
+  > **Amendment — 2026-08-28.** This bullet named the gap that then swallowed the
+  > decision. The ceiling was never observed live, and 120 recorded turns in
+  > `interactive-turns.jsonl` show it did not hold: **13 exceeded it**, the worst
+  > reaching 18 tool calls against a budget of 8.
+  >
+  > Two causes, both in what this record decided.
+  >
+  > **The check was placed before a model call.** `wrapModelCall` runs once per
+  > model response, so a model that requests six tools in one response spends all
+  > six. Eight was a floor, not a ceiling. Verified by running the compiled
+  > counter against synthetic batches: batches of six stop at 12, batches of nine
+  > stop at 9.
+  >
+  > **Tool calls were the wrong unit.** Across those 120 turns, tool execution
+  > accounted for 62.9 s of 4,532 s elapsed — **1.4%**. One turn ran 921 seconds
+  > on twelve tool calls, comfortably inside this budget the whole time. The
+  > sentence above about a task that "truly needs more than eight tool attempts"
+  > still stands; what it could not anticipate is that a turn can be ruinous
+  > without exceeding eight anything.
+  >
+  > [ADR-019](./ADR-019-turn-cost-is-the-bound-not-tool-calls.md) moves
+  > enforcement into `wrapToolCall`, makes the count self-observed rather than
+  > derived from agent state, and adds wall-clock, token and cost ceilings.
+  >
+  > **Nothing here is removed.** The recursion limit, the privacy-safe JSONL
+  > record and the LangSmith correlation are unchanged and still in force — and
+  > it was this record's own telemetry, written by this decision, that made the
+  > defect measurable at all.
+
+## Verification Evidence
+
+- `node node_modules/typescript/bin/tsc --noEmit --pretty false` passed after
+  the implementation.
+- `node node_modules/jest/bin/jest.js --runInBand --forceExit` passed: 21
+  suites and 75 tests. The known `--forceExit` open-handles warning was emitted
+  after the successful run.
+- Focused coverage includes the 50/60 configuration bounds, persisted-turn
+  counting, equivalent-call detection, privacy-safe JSONL output, LangSmith
+  metadata, and 400 recovery telemetry.
+- Two real read-only Deep sessions ran with `gemini-3.1-flash-lite`, the local
+  cheapest cloud tier. Both emitted a final answer: 3 tools in 9.44 seconds and
+  2 tools in 7.39 seconds. Their audit records have `outcome=completed` and
+  `textOutput=true`.
+- Earlier exploratory evidence, before this final middleware design: 0/5 broad
+  Gemini 3.5 Flash requests completed at 30 transitions; at 50 transitions,
+  1/5 completed and 4/5 reached the limit. These are diagnostic measurements,
+  not a performance benchmark.
+
+## Related Files
+
+- `src/core/config/agent-config.ts` — `limitsSchema`, `parseAgentConfig`.
+- `src/core/agent/iteration-budget.middleware.ts` —
+  `createIterationBudgetMiddleware`, `countCurrentTurnToolCalls`,
+  `hasPriorEquivalentToolCall`, `shouldForceFinalResponse`.
+- `src/core/agent/deep-agent-factory.ts` — `DeepAgentFactory.create`,
+  `DeepAgentFactory.buildSystemPrompt`.
+- `src/presentation/cli/chat-session.ts` — `ChatSession.sendMessage`,
+  `ChatSession.createStreamConfig`.
+- `src/presentation/cli/turn-audit.ts` — `TurnAudit`, `TurnAuditRecord`.
+- `src/core/agent/iteration-budget.middleware.spec.ts` — persisted-turn budget
+  tests.
+- `src/presentation/cli/turn-audit.spec.ts` — telemetry privacy and metadata
+  tests.

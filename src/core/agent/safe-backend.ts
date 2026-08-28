@@ -1,6 +1,7 @@
 import { FilesystemBackend } from 'deepagents';
 import * as fs from 'fs';
 import * as path from 'path';
+import { agentPath } from '../config/agent-directory';
 
 /**
  * 🛡️ SAFE BACKEND
@@ -9,7 +10,7 @@ import * as path from 'path';
  * * @example
  * ```ts
  * const backend = new SafeFilesystemBackend("/usuario/proyectos/mi-app");
- * // Ahora cada write_file o edit_file creará un backup en .agent/backups
+ * // Ahora cada write_file o edit_file creará un backup en .umbra/backups
  * ```
  */
 export class SafeFilesystemBackend extends FilesystemBackend {
@@ -32,7 +33,7 @@ export class SafeFilesystemBackend extends FilesystemBackend {
     // 1. AQUI AGREGAMOS LA ASIGNACIÓN QUE FALTABA
     this.rootDir = rootDir;
 
-    this.backupDir = path.join(rootDir, '.agent', 'backups');
+    this.backupDir = agentPath(rootDir, 'backups');
     if (!fs.existsSync(this.backupDir)) {
       fs.mkdirSync(this.backupDir, { recursive: true });
     }
@@ -92,7 +93,7 @@ export class SafeFilesystemBackend extends FilesystemBackend {
 
         fs.copyFileSync(realPath, backupPath);
         console.log(
-          `💾 [SafeBackend] Backup creado: .agent/backups/${path.basename(backupPath)}`,
+          `💾 [SafeBackend] Backup creado: .umbra/backups/${path.basename(backupPath)}`,
         );
       }
     } catch (error) {

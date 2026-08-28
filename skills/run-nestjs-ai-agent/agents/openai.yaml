@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run NestJS AI Agent"
+  short_description: "Run, evaluate, and close agent changes safely"
+  default_prompt: "Use $run-nestjs-ai-agent to run, evaluate, and close a change to this NestJS coding agent."

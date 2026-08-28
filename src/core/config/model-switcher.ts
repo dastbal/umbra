@@ -11,8 +11,8 @@
  * - `detectOllamaModels()` shells out to `ollama list` to discover installed models.
  *   This is the most reliable way to get real-time model availability without
  *   maintaining a static list.
- * - `saveModelToEnv()` reads the existing `.env`, patches the `AGENT_MODEL` line,
- *   and writes it back. This preserves all other env vars untouched.
+ * - Persistence reads the existing `.env`, patches only the selected keys, and
+ *   writes it back once. This preserves every unrelated variable untouched.
  * - We use `child_process.execSync` (not `spawn`) because `ollama list` is fast (<1s)
  *   and we want a synchronous result to keep the interactive menu simple.
  *
@@ -133,6 +133,100 @@ export class ModelSwitcher {
     modelString: string,
     envFilePath?: string,
   ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      { AGENT_MODEL: modelString },
+      envFilePath,
+    );
+  }
+
+  /**
+   * Persists a Claude-on-Vertex selection as one complete configuration.
+   *
+   * Writing the model and project together prevents
+   * `/model` from leaving a selected Claude model that cannot start after a
+   * partial save.
+   *
+   * @param modelString - Full `vertex-anthropic:*` model identifier.
+   * @param projectId - Google Cloud project where the partner model is enabled.
+   * @param envFilePath - Absolute path to the `.env` file to update.
+   * @returns True when both values were saved, otherwise false.
+   */
+  public static saveClaudeVertexSelectionToEnv(
+    modelString: string,
+    projectId: string,
+    envFilePath?: string,
+  ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      {
+        AGENT_MODEL: modelString,
+        GOOGLE_CLOUD_PROJECT: projectId,
+      },
+      envFilePath,
+    );
+  }
+
+  /**
+   * Persists a complete model selection, including its reasoning settings.
+   *
+   * Model, reasoning level and reasoning display are written in one pass for
+   * the same reason the Claude project is: a partial save can leave a
+   * configuration that no longer starts. A model whose reasoning level was
+   * cleared must not keep the previous model's level in `.env`, so an
+   * unconfigured level is written as an empty value rather than skipped —
+   * leaving the old line in place is what would carry a stale setting forward.
+   *
+   * @param selection - The full selection to persist.
+   * @param envFilePath - Absolute path to the `.env` file to update.
+   * @returns True when every value was saved, otherwise false.
+   */
+  public static saveSelectionToEnv(
+    selection: {
+      model: string;
+      reasoningLevel?: string;
+      showReasoning?: boolean;
+      projectId?: string;
+    },
+    envFilePath?: string,
+  ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      {
+        AGENT_MODEL: selection.model,
+        AGENT_REASONING: selection.reasoningLevel ?? '',
+        AGENT_REASONING_DISPLAY: selection.showReasoning ? 'true' : 'false',
+        ...(selection.projectId ? { GOOGLE_CLOUD_PROJECT: selection.projectId } : {}),
+      },
+      envFilePath,
+    );
+  }
+
+  /**
+   * Writes the Google Cloud settings that Vertex requires, on their own.
+   *
+   * Used by the setup screen, where the operator changes infrastructure
+   * configuration without selecting a model.
+   *
+   * @param settings - Project and optional location to persist.
+   * @param envFilePath - Absolute path to the `.env` file to update.
+   * @returns True when the values were saved, otherwise false.
+   */
+  public static saveVertexSettingsToEnv(
+    settings: { projectId: string; location?: string },
+    envFilePath?: string,
+  ): boolean {
+    return ModelSwitcher.saveEnvironmentValues(
+      {
+        GOOGLE_CLOUD_PROJECT: settings.projectId,
+        ...(settings.location ? { GOOGLE_CLOUD_LOCATION: settings.location } : {}),
+      },
+      envFilePath,
+    );
+  }
+
+  /** Updates selected environment keys while preserving the rest of the file. */
+  private static saveEnvironmentValues(
+    values: Readonly<Record<string, string>>,
+    envFilePath?: string,
+  ): boolean {
     const filePath = envFilePath ?? path.join(process.cwd(), '.env');
 
     try {
@@ -143,15 +237,19 @@ export class ModelSwitcher {
         content = fs.readFileSync(filePath, 'utf-8');
       }
 
-      const agentModelLine = `AGENT_MODEL=${modelString}`;
+      for (const [key, value] of Object.entries(values)) {
+        if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n]/.test(value)) {
+          return false;
+        }
+        const line = `${key}=${value}`;
+        const pattern = new RegExp(`^${key}=.*`, 'm');
 
-      if (/^AGENT_MODEL=.*/m.test(content)) {
-        // Replace existing AGENT_MODEL line
-        content = content.replace(/^AGENT_MODEL=.*/m, agentModelLine);
-      } else {
-        // Append at the end, ensuring a newline before if needed
-        const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-        content = `${content}${separator}${agentModelLine}\n`;
+        if (pattern.test(content)) {
+          content = content.replace(pattern, line);
+        } else {
+          const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+          content = `${content}${separator}${line}\n`;
+        }
       }
 
       fs.writeFileSync(filePath, content, 'utf-8');
@@ -182,7 +280,9 @@ export class ModelSwitcher {
    * Returns the list of Vertex AI / Gemini cloud models available as presets.
    *
    * Curated list organized by model family (newest first).
-   * Entries with an empty name (`''`) are visual separators between families.
+   * Entries with an empty `label` are visual separators between families; the
+   * separator text is carried in `name`. Callers that price or select a model
+   * must skip them.
    *
    * These are not auto-detected (no cloud API call needed) — they are curated
    * and kept in sync with the `MODEL_TIERS` defined in `model-resolver.ts`.
@@ -194,17 +294,43 @@ export class ModelSwitcher {
       // ── Gemini 3.5 (latest) ───────────────────────────────────────────────
       { name: '── Gemini 3.5 ──',       label: '' },
       { name: 'gemini-3.5-flash',       label: 'Gemini 3.5 Flash      ⭐ (fastest, agentic)' },
+      { name: 'gemini-3.5-flash-lite',  label: 'Gemini 3.5 Flash Lite (fast, high-volume)' },
 
       // ── Gemini 3.1 ────────────────────────────────────────────────────────
       { name: '── Gemini 3.1 ──',       label: '' },
       { name: 'gemini-3.1-flash-lite',  label: 'Gemini 3.1 Flash Lite   (cheap, high-volume)' },
-      { name: 'gemini-3.1-pro',         label: 'Gemini 3.1 Pro          (complex reasoning)' },
 
       // ── Gemini 2.5 ────────────────────────────────────────────────────────
       { name: '── Gemini 2.5 ──',       label: '' },
       { name: 'gemini-2.5-flash-lite',  label: 'Gemini 2.5 Flash Lite   (fast & cheap)' },
       { name: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash        (balanced)' },
       { name: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro          (most capable 2.5)' },
+    ];
+  }
+
+  /**
+   * Returns the curated Claude models available through Google Vertex AI.
+   *
+   * These presets are intentionally separate from {@link getVertexModels}:
+   * both use Google infrastructure and ADC, but Gemini and Anthropic require
+   * different LangChain transports and provider-specific tool handling.
+   *
+   * @returns Enabled Claude presets ordered from lowest to highest capability.
+   */
+  public static getVertexClaudeModels(): Array<{ name: string; label: string }> {
+    return [
+      {
+        name: 'vertex-anthropic:claude-haiku-4-5@20251001',
+        label: 'Claude Haiku 4.5  (fast & economical)',
+      },
+      {
+        name: 'vertex-anthropic:claude-sonnet-5',
+        label: 'Claude Sonnet 5     ⭐ (recommended)',
+      },
+      {
+        name: 'vertex-anthropic:claude-opus-5',
+        label: 'Claude Opus 5       (maximum capability)',
+      },
     ];
   }
 }

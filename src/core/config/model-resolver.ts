@@ -3,31 +3,31 @@
  *
  * Centralized LLM model resolution for the nestjs-ai-agent-lib.
  *
- * Resolution priority:
- * 1. `AGENT_MODEL` environment variable (highest — runtime switch)
- * 2. `override` parameter passed programmatically
- * 3. `DEFAULT_MODEL` constant (lowest — safe fallback)
+ * Primary-session resolution priority:
+ * 1. Explicit CLI/programmatic override (highest — deliberate task choice)
+ * 2. `AGENT_MODEL` environment variable (runtime switch)
+ * 3. Role profile or `DEFAULT_MODEL` (safe fallback)
  *
  * Supported model string formats:
  * - Bare model name:      "gemini-2.5-flash-lite"   → Google Vertex AI / GenAI
- * - Provider:model:       "anthropic:claude-opus-4-7"
+ * - Claude on Vertex:     "vertex-anthropic:claude-sonnet-5"
+ * - Direct provider:model:"anthropic:claude-opus-4-7" (reserved, unsupported)
  * - Ollama local:         "ollama:llama3.2"
  * - OpenAI format:        "openai:gpt-4o"
  *
  * @example
  * ```bash
- * # .env.development
+ * # .env
  * AGENT_MODEL=gemini-2.5-flash-lite      # fast and cheap (default)
  * AGENT_MODEL=gemini-2.5-pro             # for architecture tasks
  * AGENT_MODEL=ollama:llama3.2            # local, no API costs
- * AGENT_MODEL=anthropic:claude-opus-4-7  # maximum code quality
+ * AGENT_MODEL=vertex-anthropic:claude-sonnet-5  # Claude through Vertex AI
  * ```
  *
  * @example
  * ```ts
- * const model = resolveModel();                    // reads AGENT_MODEL env
- * const model = resolveModel('gemini-2.5-pro');    // override for orchestrator
- * const model = resolveModel(undefined, 'lite');    // tier-based selection
+ * const model = resolveModel(); // reads AGENT_MODEL env
+ * const model = resolveModelForSession('gemini-2.5-pro', 'pro');
  * ```
  */
 
@@ -47,20 +47,24 @@ export const MODEL_TIERS: Record<string, string> = {
   lite:  'gemini-3.1-flash-lite',
   /** Balanced. Best for: most coding tasks and agentic workflows. */
   flash: 'gemini-3.5-flash',
-  /** Most capable cloud model. Best for: architecture, complex refactors. */
-  pro:   'gemini-3.1-pro',
-  // TODO: Phase N — Add Anthropic support via @langchain/anthropic + ANTHROPIC_API_KEY.
-  // 'claude': 'anthropic:claude-opus-4-7' was removed because LLMProvider does not
-  // yet implement the Anthropic provider. Returning a broken model string silently
-  // crashed the agent with "Unsupported provider" at runtime (ADR-023).
+  /** Most capable stable cloud model. Best for: architecture, complex refactors. */
+  pro:   'gemini-2.5-pro',
+
+  // ── Claude through Google Vertex AI ─────────────────────────────────────
+  /** Fastest enabled Claude preset. Best for: routing and high-volume work. */
+  'claude-fast': 'vertex-anthropic:claude-haiku-4-5@20251001',
+  /** Recommended Claude preset. Best for: coding and agentic workflows. */
+  claude: 'vertex-anthropic:claude-sonnet-5',
+  /** Maximum-capability Claude preset. Best for: architecture and hard problems. */
+  'claude-max': 'vertex-anthropic:claude-opus-5',
 
   // ── Versioned Gemini shortcuts (pin to specific generation) ──────────────
   /** Gemini 3.5 Flash — fastest, best for agentic tasks (June 2026 GA). */
   'gemini-3.5-flash':      'gemini-3.5-flash',
+  /** Gemini 3.5 Flash Lite — fast, high-volume tasks. */
+  'gemini-3.5-lite':       'gemini-3.5-flash-lite',
   /** Gemini 3.1 Flash Lite — cheapest, high-volume tasks. */
   'gemini-3.1-lite':       'gemini-3.1-flash-lite',
-  /** Gemini 3.1 Pro — complex reasoning, multimodal. */
-  'gemini-3.1-pro':        'gemini-3.1-pro',
   /** Gemini 2.5 Flash Lite — legacy fast/cheap. */
   '2.5-lite':              'gemini-2.5-flash-lite',
   /** Gemini 2.5 Flash — legacy balanced. */
@@ -85,22 +89,93 @@ export const MODEL_TIERS: Record<string, string> = {
 
 
 /**
- * Resolve the active LLM model string.
+ * Expands a model tier or returns an already concrete model identifier.
  *
- * Checks `AGENT_MODEL` env var first, then the programmatic override,
- * then falls back to `DEFAULT_MODEL`.
+ * This function deliberately does not read environment variables. It is used
+ * for role profiles so an interactive `AGENT_MODEL` switch does not silently
+ * flatten Researcher, Coder, and Verifier onto the same cheap model.
  *
- * @param override - Optional model string override (takes priority over default,
- *   but NOT over the env variable — the env variable always wins for runtime control).
+ * @param model - Tier alias or concrete model identifier.
+ * @returns A concrete model identifier ready for provider routing.
+ */
+export function resolveConfiguredModel(model: string): string {
+  return MODEL_TIERS[model] ?? model;
+}
+
+/**
+ * Resolves the Vertex AI region used for Gemini chat requests.
+ *
+ * Gemini 3.5 is available from the global Vertex AI endpoint. Operators can
+ * override this with a supported regional endpoint through GOOGLE_CLOUD_LOCATION.
+ *
+ * @param configuredLocation - Optional region override, primarily for testing.
+ * @returns A Vertex AI endpoint location.
+ */
+export function resolveVertexLocation(configuredLocation = process.env.GOOGLE_CLOUD_LOCATION): string {
+  return configuredLocation?.trim() || 'global';
+}
+
+/**
+ * Resolves the Google Cloud project used by Vertex-hosted partner models.
+ *
+ * Gemini's SDK can infer a project from some ADC configurations, but the
+ * Anthropic Vertex client requires an explicit project identifier. Keeping the
+ * resolver pure makes the requirement deterministic and straightforward to test.
+ *
+ * @param configuredProject - Optional explicit project, primarily for testing.
+ * @returns The trimmed project identifier, or undefined when it is absent.
+ */
+export function resolveVertexProject(
+  configuredProject = process.env.GOOGLE_CLOUD_PROJECT,
+): string | undefined {
+  return configuredProject?.trim() || undefined;
+}
+
+/**
+ * Checks the documented Google Cloud project ID shape.
+ *
+ * Besides improving the prompt error, this validation is a security boundary:
+ * Windows launches `gcloud.cmd` through `cmd.exe`, so untrusted shell syntax
+ * must never reach that process.
+ *
+ * @param projectId - Candidate project identifier, not a display name.
+ * @returns True for a lowercase 6-30 character Google Cloud project ID.
+ */
+export function isGoogleCloudProjectId(projectId: string): boolean {
+  return /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId);
+}
+
+/**
+ * Resolve the active LLM model string from the environment and fallback.
+ *
+ * Checks `AGENT_MODEL` first, then the fallback value, then `DEFAULT_MODEL`.
+ * Use `resolveModelForSession()` whenever an explicit user override is present.
+ *
+ * @param fallback - Optional profile model used when no environment override exists.
  * @returns The resolved model string ready to pass to `createDeepAgent`.
  */
-export function resolveModel(override?: string): string {
-  const raw = process.env.AGENT_MODEL ?? override ?? DEFAULT_MODEL;
-  // Expand tier shortcuts (e.g. "flash" → "gemini-3.5-flash") via MODEL_TIERS.
-  // If the raw value is not a known tier, pass it through as-is (it is already
-  // a full model name like "gemini-2.5-flash-lite" or "ollama:gemma4").
-  // ADR-022: MODEL_TIERS was previously decoration — resolveModel() never used it.
-  return MODEL_TIERS[raw] ?? raw;
+export function resolveModel(fallback?: string): string {
+  return resolveConfiguredModel(process.env.AGENT_MODEL ?? fallback ?? DEFAULT_MODEL);
+}
+
+/**
+ * Resolves the primary model for one CLI or API session.
+ *
+ * An explicit override is intentionally stronger than `AGENT_MODEL`: a user
+ * choosing `--model gemini-2.5-pro` for a single architecture review should
+ * not have to edit their cost-efficient global default first.
+ *
+ * @param profileModel - Model selected by the project role profile.
+ * @param explicitModel - Optional per-session CLI or API override.
+ * @returns A concrete model identifier.
+ */
+export function resolveModelForSession(
+  profileModel: string,
+  explicitModel?: string,
+): string {
+  return explicitModel === undefined
+    ? resolveModel(profileModel)
+    : resolveConfiguredModel(explicitModel);
 }
 
 /**
@@ -144,6 +219,83 @@ export function isOllamaModel(model: string): boolean {
 }
 
 /**
+ * Returns true when Claude is transported through Google Vertex AI.
+ *
+ * The explicit prefix keeps Vertex authentication and billing distinct from a
+ * future direct Anthropic API integration using `anthropic:*` identifiers.
+ *
+ * @param model - The resolved model string.
+ * @returns True for `vertex-anthropic:*` model identifiers.
+ */
+export function isVertexAnthropicModel(model: string): boolean {
+  return model.toLowerCase().startsWith('vertex-anthropic:');
+}
+
+/**
+ * Extracts the provider-native Claude model identifier.
+ *
+ * @param model - A `vertex-anthropic:*` model identifier.
+ * @returns The bare Claude model identifier expected by AnthropicVertex.
+ * @throws Error when the identifier is malformed or uses another provider.
+ */
+export function getVertexAnthropicModelName(model: string): string {
+  if (!isVertexAnthropicModel(model)) {
+    throw new Error(`Not a Vertex Anthropic model: "${model}".`);
+  }
+
+  const modelName = model.slice('vertex-anthropic:'.length).trim();
+  if (!modelName.startsWith('claude-')) {
+    throw new Error(`Invalid Claude model identifier: "${model}".`);
+  }
+  return modelName;
+}
+
+/**
+ * Matches a Claude 5 generation model, optionally carrying a Vertex
+ * `@YYYYMMDD` version suffix. Claude 4.5 identifiers such as
+ * `claude-haiku-4-5` end in `-4-5` and deliberately do not match.
+ */
+const CLAUDE_5_GENERATION = /^claude-[a-z]+-5(@\d{8})?$/;
+
+/**
+ * Reports whether a bare Claude model identifier belongs to the Claude 5
+ * generation.
+ *
+ * Exported because two independent concerns depend on this one fact — which
+ * sampling parameter the model accepts, and which reasoning parameter it
+ * accepts. Keeping it in one place stops the two from drifting apart when a
+ * new model family appears.
+ *
+ * @param modelName - A bare Claude identifier, e.g. `claude-sonnet-5`.
+ * @returns True for the Claude 5 generation, false for 4.5 and earlier.
+ */
+export function isClaude5Generation(modelName: string): boolean {
+  return CLAUDE_5_GENERATION.test(modelName.trim().toLowerCase());
+}
+
+/**
+ * Reports whether a Claude model rejects the `temperature` sampling parameter.
+ *
+ * The Claude 5 generation removed `temperature`; sending it returns HTTP 400
+ * `` `temperature` is deprecated for this model `` before any inference runs.
+ * Claude 4.5 still accepts it, so the parameter cannot simply be dropped for
+ * every Claude model without losing deterministic sampling where it is honored.
+ *
+ * Verified against the live Vertex endpoint on 2026-08-28: `claude-sonnet-5`
+ * and `claude-opus-5` reject it; `claude-haiku-4-5@20251001` accepts it.
+ *
+ * @param model - A `vertex-anthropic:*` identifier or a bare Claude model name.
+ * @returns True when `temperature` must be omitted from the request.
+ */
+export function rejectsTemperature(model: string): boolean {
+  const modelName = isVertexAnthropicModel(model)
+    ? getVertexAnthropicModelName(model)
+    : model.trim();
+
+  return isClaude5Generation(modelName);
+}
+
+/**
  * Returns true when the resolved model is an Anthropic Claude model.
  *
  * Matches: `"anthropic:*"` — Anthropic provider format.
@@ -152,10 +304,8 @@ export function isOllamaModel(model: string): boolean {
  * @returns True if the model is an Anthropic model.
  *
  * @internal
- * @todo Phase N — Anthropic is not yet supported by `LLMProvider`.
- *   To implement: install `@langchain/anthropic`, add `ANTHROPIC_API_KEY` to `.env`,
- *   and extend `LLMProvider.createChatModel()` with an `isAnthropicModel` branch.
- *   This function is kept so the guard can be wired in without touching the resolver.
+ * @remarks Direct Anthropic API access remains reserved but unsupported. Claude
+ *   through Google Vertex AI uses {@link isVertexAnthropicModel} instead.
  */
 export function isAnthropicModel(model: string): boolean {
   return model.toLowerCase().startsWith('anthropic:');

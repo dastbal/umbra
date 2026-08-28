@@ -41,7 +41,7 @@ Si ejecutas el agente dentro del ecosistema de NestJS, el servicio está exporta
 
 \`\`\`typescript
 import { Injectable } from '@nestjs/common';
-import { InteractionService } from '@dastbal/nestjs-ai-agent/core/interaction';
+import { InteractionService } from '@dastbal/umbra/core/interaction';
 
 @Injectable()
 export class MyFeatureService {

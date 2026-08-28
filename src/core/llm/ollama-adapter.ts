@@ -95,6 +95,42 @@ export interface OllamaPreflightResult {
  */
 export class OllamaChatAdapter extends ChatOllama {
   /**
+   * Lookup hint that lets deepagents find Umbra's Ollama harness profile.
+   *
+   * ## Why this exists
+   *
+   * Umbra passes a prebuilt model instance, so deepagents resolves the harness
+   * profile from the instance rather than from a model string. That path reads
+   * two hints, and this adapter supplied neither:
+   *
+   * - the provider comes from a three-entry map keyed on `getName()` —
+   *   `ChatAnthropic`, `ChatOpenAI`, `ChatGoogleGenerativeAI`. This class
+   *   reports `ChatOllama`, so the provider hint was `undefined`.
+   * - the identifier comes from `model_name ?? modelName`, and `ChatOllama`
+   *   defines neither — it stores the name in `model`.
+   *
+   * With both hints missing the profile resolved to the empty one, so **every
+   * exclusion Umbra registers for Ollama was silently discarded**: deepagents'
+   * built-in `ls`, `read_file`, `write_file`, `edit_file`, `grep` and `glob`
+   * stayed live. Those read deepagents' in-memory `StateBackend`, not the disk,
+   * so `ls` returned an empty directory in 2ms and the model faithfully
+   * reported that the project had no files. Verified on a real run, 2026-08-28.
+   *
+   * ## Why this shape
+   *
+   * Returning `ollama:<name>` makes the identifier lookup land on the `ollama`
+   * provider key, where the profile is registered. The tag separator becomes a
+   * dash because deepagents rejects any spec with more than two colon-separated
+   * parts before it ever consults the provider key — `ollama:gemma4:e2b` would
+   * resolve to nothing, which is the same failure by a different route.
+   *
+   * @returns A two-part spec that resolves to the `ollama` harness profile.
+   */
+  public get modelName(): string {
+    return `ollama:${String(this.model).replace(/:/g, '-')}`;
+  }
+
+  /**
    * Creates an OllamaChatAdapter with a 5-minute fetch timeout.
    *
    * `ChatOllamaInput` does not expose a `timeout` property directly, but it

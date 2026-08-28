@@ -1,0 +1,136 @@
+const mockRegisterHarnessProfile = jest.fn();
+
+jest.mock('deepagents', () => ({
+  createDeepAgent: jest.fn(),
+  registerHarnessProfile: mockRegisterHarnessProfile,
+}));
+
+const mockCreateChatModel = jest.fn((model: string) => ({ model }));
+
+jest.mock('../llm/provider', () => ({
+  LLMProvider: {
+    createChatModel: mockCreateChatModel,
+  },
+}));
+
+import { DeepAgentFactory } from './deep-agent-factory';
+
+interface DeepAgentFactoryInternals {
+  registerAnthropicHarnessProfile(taskExclusions?: string[]): void;
+  registerGeminiHarnessProfile(model: string, taskExclusions?: string[]): void;
+  resolveRuntimeModel(model: string): unknown;
+  resolveRoleModel(model: string): unknown;
+  buildSystemPrompt(
+    rootDir: string,
+    type: 'simple' | 'orchestrator' | 'analysis',
+  ): string;
+}
+
+describe('DeepAgentFactory model routing', () => {
+  const originalAgentModel = process.env.AGENT_MODEL;
+
+  beforeEach(() => {
+    mockRegisterHarnessProfile.mockClear();
+  });
+
+  afterEach(() => {
+    if (originalAgentModel === undefined) {
+      delete process.env.AGENT_MODEL;
+    } else {
+      process.env.AGENT_MODEL = originalAgentModel;
+    }
+  });
+
+  it('keeps the configured Coder model when the primary session uses Flash Lite', () => {
+    process.env.AGENT_MODEL = 'gemini-2.5-flash-lite';
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    expect(internals.resolveRoleModel('gemini-2.5-pro')).toEqual({
+      model: 'gemini-2.5-pro',
+    });
+  });
+
+  it('routes Gemini through the configured Vertex client instead of deepagents defaults', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    expect(internals.resolveRuntimeModel('gemini-3.5-flash')).toEqual({
+      model: 'gemini-3.5-flash',
+    });
+    expect(mockCreateChatModel).toHaveBeenCalledWith('gemini-3.5-flash');
+  });
+
+  it('registers the Gemini profile under deepagents Google provider key', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerGeminiHarnessProfile('gemini-3.5-flash');
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'google:gemini-3.5-flash',
+      expect.objectContaining({
+        excludedTools: expect.arrayContaining(['ls', 'grep', 'glob']),
+      }),
+    );
+  });
+
+  it('hides the delegation tool from an agent that has no subagents', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerGeminiHarnessProfile('gemini-3.5-flash');
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'gemini-3.5-flash',
+      expect.objectContaining({ excludedTools: expect.arrayContaining(['task']) }),
+    );
+  });
+
+  it('lets the delegation tool reach the provider when subagents exist', () => {
+    // The regression this guards: `task` was excluded unconditionally, so the
+    // orchestrator's prompt ordered it to delegate through a tool the provider
+    // never received. Vertex answered `UNEXPECTED_TOOL_CALL` and the run died.
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerGeminiHarnessProfile('gemini-3.5-flash', []);
+
+    for (const call of mockRegisterHarnessProfile.mock.calls) {
+      expect(call[1].excludedTools).not.toContain('task');
+      // The schema-incompatible exclusions must survive either way.
+      expect(call[1].excludedTools).toEqual(expect.arrayContaining(['grep', 'glob', 'ls']));
+    }
+  });
+
+  it('registers Claude tool exclusions under the Anthropic provider profile', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerAnthropicHarnessProfile();
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'anthropic',
+      expect.objectContaining({
+        excludedTools: expect.arrayContaining([
+          'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'task',
+        ]),
+      }),
+    );
+  });
+
+  it('keeps Claude delegation available when subagents exist', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    internals.registerAnthropicHarnessProfile([]);
+
+    expect(mockRegisterHarnessProfile).toHaveBeenCalledWith(
+      'anthropic',
+      expect.objectContaining({
+        excludedTools: expect.not.arrayContaining(['task']),
+      }),
+    );
+  });
+
+  it('makes one-shot analysis override generic skill-discovery tool instructions', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+    const prompt = internals.buildSystemPrompt('C:\\project', 'analysis');
+
+    expect(prompt).toContain('Do not call list_files');
+    expect(prompt).toContain('Do not load a skill');
+  });
+});

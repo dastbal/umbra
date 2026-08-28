@@ -7,6 +7,7 @@
     "outDir": "./dist",             /* Dónde se guardará el código listo para publicar */
     "rootDir": "./src",
     "strict": true,
+    "isolatedModules": true,
     "esModuleInterop": true,
     "experimentalDecorators": true, /* Necesario para NestJS */
     "emitDecoratorMetadata": true,  /* Necesario para NestJS */

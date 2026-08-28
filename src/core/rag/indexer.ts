@@ -90,11 +90,19 @@ export class IndexerService {
     }
 
       // 3. TERCERA PASADA: Guardar Vectores
+      let embedOutcome = { embeddedBatches: 0, failedBatches: 0 };
       if (pendingChunks.length > 0) {
-        await this.embedAndSaveBatches(pendingChunks);
+        embedOutcome = await this.embedAndSaveBatches(pendingChunks);
       }
 
-      IndexerService.log('✅ Indexing Complete.');
+      // Reporting completion after failed batches is worse than the failure
+      // itself: the operator reads a green line, trusts an index that is
+      // missing content, and later wonders why semantic search cannot find it.
+      IndexerService.log(
+        embedOutcome.failedBatches > 0
+          ? '⚠️  Indexing finished with gaps — reindex once the cause is fixed.'
+          : '✅ Indexing Complete.',
+      );
     } finally {
       IndexerService.isIndexing = false;
     }
@@ -153,6 +161,9 @@ export class IndexerService {
   private async embedAndSaveBatches(allChunks: ProcessedChunk[]) {
     IndexerService.log(`🧠 Generating Embeddings for ${allChunks.length} chunks...`);
 
+    const failures: string[] = [];
+    const batchCount = Math.ceil(allChunks.length / this.BATCH_SIZE);
+
     for (let i = 0; i < allChunks.length; i += this.BATCH_SIZE) {
       const batch = allChunks.slice(i, i + this.BATCH_SIZE);
 
@@ -209,13 +220,52 @@ export class IndexerService {
              await new Promise(resolve => setTimeout(resolve, delay));
              delay *= 2; // Exponential backoff
           } else {
-             console.error('\n❌ Embedding Error:', err);
+             // Counted, not printed. A misconfiguration fails identically for
+             // every batch, and printing the full library stack trace once per
+             // batch buried the one line that mattered under fourteen copies of
+             // the same error. The summary below reports it once.
+             failures.push(err instanceof Error ? err.message : String(err));
              break;
           }
         }
       }
     }
+
+    if (failures.length > 0) {
+      IndexerService.reportEmbeddingFailures(failures, batchCount);
+      return { embeddedBatches: batchCount - failures.length, failedBatches: failures.length };
+    }
+
     IndexerService.log('\n💾 Vectors Saved.');
+    return { embeddedBatches: batchCount, failedBatches: 0 };
+  }
+
+  /**
+   * Reports embedding failures as one summary rather than one trace per batch.
+   *
+   * Distinct messages are listed with the number of batches each affected, and
+   * only the first line of each is kept — the Google client appends a
+   * documentation URL and a stack trace that repeat verbatim every time and say
+   * nothing per occurrence.
+   *
+   * @param failures - One message per failed batch, in order.
+   * @param batchCount - Total batches attempted, for the ratio.
+   * @returns Nothing.
+   */
+  private static reportEmbeddingFailures(failures: string[], batchCount: number): void {
+    const counts = new Map<string, number>();
+    for (const message of failures) {
+      const firstLine = message.split('\n')[0]!.trim();
+      counts.set(firstLine, (counts.get(firstLine) ?? 0) + 1);
+    }
+
+    console.error(
+      `\n❌ Embeddings failed for ${failures.length} of ${batchCount} batches. ` +
+      `Semantic search will be incomplete.`,
+    );
+    for (const [message, count] of counts) {
+      console.error(`   ${message}${count > 1 ? `  (×${count} batches)` : ''}`);
+    }
   }
 
   /**

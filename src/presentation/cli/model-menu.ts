@@ -4,18 +4,26 @@
  * Interactive terminal menu for switching the active LLM model at runtime.
  *
  * Renders a two-level menu:
- * 1. Provider selection: Vertex AI (cloud) or Ollama (local)
- * 2. Model selection: curated Vertex presets OR auto-detected Ollama models
+ * 1. Provider selection: Gemini, Claude on Vertex AI, or Ollama
+ * 2. Model selection: curated cloud presets or auto-detected Ollama models
  *
  * Triggered by typing `/model` in the chat session.
  *
  * ## Design Decisions
- * - Uses raw `readline` (not `inquirer` or `prompts`) to stay consistent with
- *   the rest of the CLI and avoid adding heavy interactive UI dependencies.
+ * - No interactive UI dependency (`inquirer`, `prompts`) is used. The arrow-key
+ *   navigation comes from `./interactive-select`, which is built on Node's own
+ *   `readline` keypress decoder — see that module for the mechanism.
+ * - **Every level has two paths.** On a real terminal the user navigates with
+ *   the arrow keys. Without a TTY — piped input, CI, `< NUL` — there are no
+ *   keystrokes to read and an arrow prompt would hang forever, so the original
+ *   "type a number and press Enter" path is kept and used instead. It is a live
+ *   fallback, not dead code.
  * - `detectOllamaModels()` is called on-demand (not at startup) so there's no
  *   startup latency for Vertex AI users.
- * - The menu marks the currently active model with `(active)` to orient the user.
- * - Returns `null` if the user cancels (types 0 or empty) without switching.
+ * - The menu marks the currently active model with `(active)` to orient the user,
+ *   and the arrow prompt opens with the highlight already on it.
+ * - Returns `null` if the user cancels (Escape, Ctrl+C, or `0`/empty in the
+ *   numeric fallback) without switching.
  *
  * @example
  * ```ts
@@ -26,9 +34,25 @@
  * ```
  */
 
-import * as readline from 'readline';
 import { ModelSwitcher } from '../../core/config/model-switcher';
+import {
+  isVertexAnthropicModel,
+  isGoogleCloudProjectId,
+  resolveVertexProject,
+} from '../../core/config/model-resolver';
+import {
+  REASONING_DISPLAY_ENV,
+  REASONING_LEVEL_ENV,
+  ReasoningDisplaySupport,
+  ReasoningLevel,
+  describeReasoning,
+  resolveConfiguredReasoningDisplay,
+  resolveConfiguredReasoningLevel,
+  resolveReasoningLevel,
+} from '../../core/config/reasoning-profile';
 import { colors, box } from './theme';
+import { isInteractive, selectOutcome, SelectChoice } from './interactive-select';
+import { askNumber as askNumberPrompt, askText } from './prompts';
 import chalk from 'chalk';
 
 /**
@@ -42,10 +66,65 @@ export interface ModelMenuResult {
 }
 
 /**
+ * Presents one level of the menu, choosing the interaction style for the
+ * terminal at hand.
+ *
+ * On an interactive terminal this is an arrow-key prompt. Otherwise it prints
+ * the numbered list and reads a number, which is the only thing that can work
+ * when stdin is a pipe.
+ *
+ * Ctrl+C is treated as a cancellation of the menu rather than a session
+ * shutdown: the user returns to the chat prompt, where a second Ctrl+C ends the
+ * session through `ChatSession`'s own SIGINT handler.
+ *
+ * @typeParam T - The value carried by each row.
+ * @param title - Section heading for this level.
+ * @param choices - Rows to present. Separators are skipped by navigation and
+ *                  are not numbered in the fallback.
+ * @returns The chosen value, or `null` if the user cancelled.
+ */
+async function chooseFromList<T>(
+  title: string,
+  choices: SelectChoice<T>[],
+): Promise<T | null> {
+  if (isInteractive()) {
+    console.log('');
+    const outcome = await selectOutcome<T>({ title, choices });
+    return outcome.status === 'selected' ? outcome.value : null;
+  }
+
+  // ── Fallback: numbered list + typed number ─────────────────────────────────
+  printSection(title);
+
+  const selectable = choices.filter((c) => !c.separator && !c.disabled);
+  let numbered = 0;
+  for (const choice of choices) {
+    if (choice.separator) {
+      console.log('');
+      console.log(colors.secondary(`  ${choice.label}`));
+      continue;
+    }
+    numbered++;
+    const hint      = choice.hint   ? colors.muted(`  (${choice.hint})`) : '';
+    const activeTag = choice.active ? colors.accent(' ← active')         : '';
+    const label     = choice.disabled
+      ? colors.dim(choice.label)
+      : chalk.white(choice.label);
+    console.log(`  ${colors.primary.bold(`${numbered}.`)} ${label}${hint}${activeTag}`);
+  }
+  console.log('');
+
+  const picked = await askNumber('  Select: ', 0, selectable.length);
+  if (picked === null || picked === 0) return null;
+  return selectable[picked - 1].value as T;
+}
+
+/**
  * Displays the interactive model selection menu and returns the selected model.
  *
  * Shows a two-level menu: first pick a provider, then pick a specific model.
- * The selection is automatically persisted to `.env` via `ModelSwitcher.saveModelToEnv()`.
+ * The selection is automatically persisted to `.env`; Claude selections also
+ * persist their required Google Cloud project in the same write.
  *
  * @param currentModel - The currently active model string (highlighted as "active").
  * @param envFilePath - Absolute path to the `.env` file to update. Defaults to `process.cwd()/.env`.
@@ -56,42 +135,88 @@ export async function showModelMenu(
   envFilePath?: string,
 ): Promise<ModelMenuResult | null> {
   console.log('');
-  printMenuBox('🔧  Switch LLM Model', [
-    '  Type the number and press Enter.',
-    '  Press 0 or Enter to cancel.',
-  ]);
+  printMenuBox('🔧  Switch LLM Model', interactiveHints());
   console.log('');
 
   // ── Step 1: Provider Selection ─────────────────────────────────────────────
-  const providers = [
-    { key: '1', label: '⚡  Vertex AI  (Gemini cloud — requires Google credentials)', value: 'vertex' },
-    { key: '2', label: '🦙  Ollama     (Local models — free, no API key needed)',     value: 'ollama' },
+  const isCurrentOllama = currentModel.startsWith('ollama:');
+  const isCurrentClaude = isVertexAnthropicModel(currentModel);
+  const providers: SelectChoice<'vertex-gemini' | 'vertex-anthropic' | 'ollama' | 'setup'>[] = [
+    {
+      // The distinguishing word leads each row. Both cloud providers share the
+      // same Vertex AI transport, so starting both labels with it made them
+      // scan as the same option; the shared part moves to the parenthetical.
+      label: '⚡  Gemini  (Google — via Vertex AI)',
+      value: 'vertex-gemini',
+      active: !isCurrentOllama && !isCurrentClaude,
+    },
+    {
+      label: '🟠  Claude  (Anthropic — via Vertex AI)',
+      value: 'vertex-anthropic',
+      active: isCurrentClaude,
+    },
+    {
+      label: '🦙  Ollama  (Local — free, no API key needed)',
+      value: 'ollama',
+      active: isCurrentOllama,
+    },
+    { label: '── configuration ──', separator: true },
+    {
+      label: '⚙️   Setup   (Google Cloud project and location)',
+      value: 'setup',
+    },
   ];
 
-  printSection('Select Provider');
-  const isCurrentOllama = currentModel.startsWith('ollama:');
-  providers.forEach((p) => {
-    const isActive = (p.value === 'ollama' && isCurrentOllama) ||
-                     (p.value === 'vertex' && !isCurrentOllama);
-    const activeTag = isActive ? colors.accent(' ← active') : '';
-    console.log(`  ${colors.primary.bold(p.key + '.')} ${chalk.white(p.label)}${activeTag}`);
-  });
-
-  const providerChoice = await askNumber('  Provider: ', 0, providers.length);
-  if (providerChoice === null || providerChoice === 0) {
+  const selectedProvider = await chooseFromList('Select Provider', providers);
+  if (selectedProvider === null) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selectedProvider = providers[providerChoice - 1];
-  console.log('');
-
   // ── Step 2: Model Selection ────────────────────────────────────────────────
-  if (selectedProvider.value === 'vertex') {
+  if (selectedProvider === 'setup') {
+    return showSetupMenu(envFilePath);
+  }
+
+  if (selectedProvider === 'vertex-gemini') {
     return showVertexModelMenu(currentModel, envFilePath);
+  } else if (selectedProvider === 'vertex-anthropic') {
+    return showVertexClaudeModelMenu(currentModel, envFilePath);
   } else {
     return showOllamaModelMenu(currentModel, envFilePath);
   }
+}
+
+/**
+ * Shows Claude models hosted by Google Vertex AI.
+ *
+ * @param currentModel - Currently active model for highlighting.
+ * @param envFilePath - Path to `.env` for persistence.
+ * @returns The selected model result, or null when cancelled.
+ */
+async function showVertexClaudeModelMenu(
+  currentModel: string,
+  envFilePath?: string,
+): Promise<ModelMenuResult | null> {
+  const choices: SelectChoice<string>[] = ModelSwitcher.getVertexClaudeModels().map(
+    (entry) => ({
+      label: entry.label,
+      value: entry.name,
+      active: entry.name === currentModel,
+    }),
+  );
+
+  const selected = await chooseFromList('Select Claude Model', choices);
+  if (selected === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
+  const projectId = await requestVertexProjectId();
+  if (projectId === null) return null;
+
+  process.env.GOOGLE_CLOUD_PROJECT = projectId;
+  return await applyModelSelection(selected, envFilePath, projectId);
 }
 
 // ── Private: Vertex AI model submenu ─────────────────────────────────────────
@@ -113,37 +238,21 @@ async function showVertexModelMenu(
 ): Promise<ModelMenuResult | null> {
   const allEntries = ModelSwitcher.getVertexModels();
 
-  // Split into selectable models and separators so we can number correctly.
-  const selectableModels = allEntries.filter((m) => m.label !== '');
+  // An entry with an empty label is a family header, not a model. It becomes a
+  // separator: rendered, but skipped by navigation and never numbered.
+  const choices: SelectChoice<string>[] = allEntries.map((entry) =>
+    entry.label === ''
+      ? { label: entry.name, separator: true }
+      : { label: entry.label, value: entry.name, active: entry.name === currentModel },
+  );
 
-  printSection('Select Gemini Model');
-
-  // Track selectable index separately so separators don't consume numbers.
-  let selectableIdx = 0;
-  for (const entry of allEntries) {
-    if (entry.label === '') {
-      // Separator / family header — print without a number
-      console.log('');
-      console.log(colors.secondary(`  ${entry.name}`));
-    } else {
-      selectableIdx++;
-      const isActive = entry.name === currentModel;
-      const activeTag = isActive ? colors.accent(' ← active') : '';
-      console.log(
-        `  ${colors.primary.bold(`${selectableIdx}.`)} ${chalk.white(entry.label)}${activeTag}`,
-      );
-    }
-  }
-  console.log('');
-
-  const choice = await askNumber('  Model: ', 0, selectableModels.length);
-  if (choice === null || choice === 0) {
+  const selected = await chooseFromList('Select Gemini Model', choices);
+  if (selected === null) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selected = selectableModels[choice - 1];
-  return applyModelSelection(selected.name, envFilePath);
+  return await applyModelSelection(selected, envFilePath);
 }
 
 // ── Private: Ollama model submenu ─────────────────────────────────────────────
@@ -179,30 +288,255 @@ async function showOllamaModelMenu(
   console.log(colors.accent(`✓ (${ollamaModels.length} found)`));
   console.log('');
 
-  printSection('Select Ollama Model');
-
   const currentBareModel = currentModel.startsWith('ollama:')
     ? currentModel.slice('ollama:'.length)
     : currentModel;
 
-  ollamaModels.forEach((m: { name: string; size: string }, i: number) => {
-    const isActive = m.name === currentBareModel;
-    const activeTag  = isActive ? colors.accent(' ← active') : '';
-    const sizeLabel  = colors.muted(`  (${m.size})`);
-    console.log(
-      `  ${colors.primary.bold(`${i + 1}.`)} ${chalk.white(m.name)}${sizeLabel}${activeTag}`,
-    );
-  });
+  const choices: SelectChoice<string>[] = ollamaModels.map(
+    (m: { name: string; size: string }) => ({
+      label: m.name,
+      value: m.name,
+      hint: m.size,
+      active: m.name === currentBareModel,
+    }),
+  );
 
-  const choice = await askNumber('  Model: ', 0, ollamaModels.length);
-  if (choice === null || choice === 0) {
+  const selected = await chooseFromList('Select Ollama Model', choices);
+  if (selected === null) {
     console.log(colors.muted('  Cancelled.\n'));
     return null;
   }
 
-  const selected = ollamaModels[choice - 1];
-  const fullModelString = ModelSwitcher.toOllamaString(selected.name);
-  return applyModelSelection(fullModelString, envFilePath);
+  const fullModelString = ModelSwitcher.toOllamaString(selected);
+  return await applyModelSelection(fullModelString, envFilePath);
+}
+
+// ── Private: Reasoning submenu ────────────────────────────────────────────────
+
+/**
+ * What the operator chose on the reasoning screen.
+ */
+interface ReasoningChoice {
+  /** The level to persist, or undefined to leave the model's own default. */
+  level?: ReasoningLevel;
+  /** Whether the model's reasoning should be shown in the terminal. */
+  showReasoning: boolean;
+}
+
+/**
+ * One row on the reasoning screen.
+ *
+ * The display toggle shares the list with the levels because both answer the
+ * same question — how much thinking do I want, and do I want to see it — and
+ * splitting them into two screens would make the cheap, reversible half feel
+ * like a separate decision.
+ */
+type ReasoningRow =
+  | { kind: 'level'; level: ReasoningLevel }
+  | { kind: 'default' }
+  | { kind: 'toggle-display' };
+
+/** Human-readable guidance per level, shown as the row hint. */
+const LEVEL_HINTS: Readonly<Record<ReasoningLevel, string>> = {
+  minimal: 'barely thinks — cheapest, fastest',
+  low: 'quick answers, simple tasks',
+  medium: 'balanced',
+  high: 'provider default — most coding work',
+  xhigh: 'hard problems, agentic runs',
+  max: 'correctness over cost',
+};
+
+/** Why the display row is or is not actionable, in the operator's words. */
+const DISPLAY_HINTS: Readonly<Record<ReasoningDisplaySupport, string>> = {
+  controllable: 'visibility only — thinking is billed either way',
+  'forced-on': 'always shown once a level is set — cannot be turned off',
+  unavailable: 'not available for this model',
+};
+
+/**
+ * Renders the display row's checkbox for each support state.
+ *
+ * A forced-on model shows a filled box the operator cannot clear, which is
+ * honest about the state; an unavailable one shows an empty box it cannot fill.
+ *
+ * @param support - How much control Umbra has over showing reasoning.
+ * @param showReasoning - The current toggle state, when it is controllable.
+ * @returns The checkbox glyph to render.
+ */
+function displayCheckbox(support: ReasoningDisplaySupport, showReasoning: boolean): string {
+  if (support === 'forced-on') return '☑';
+  if (support === 'unavailable') return '☐';
+  return showReasoning ? '☑' : '☐';
+}
+
+/**
+ * Asks how hard the selected model should think, and whether to show it.
+ *
+ * Only the levels the chosen model actually accepts are offered, so a
+ * selection can never produce the `400` that an unsupported level returns. A
+ * model with no reasoning controls says so and is not prompted.
+ *
+ * The screen re-renders when the display toggle is used, so the operator sees
+ * the new state before committing to a level.
+ *
+ * @param model - The model just selected.
+ * @returns The chosen reasoning settings, or null when cancelled.
+ */
+async function chooseReasoning(model: string): Promise<ReasoningChoice | null> {
+  const profile = describeReasoning(model);
+
+  if (profile.mechanism === 'none') {
+    console.log('');
+    console.log(colors.muted('  Reasoning: not available for this model.'));
+    return { level: undefined, showReasoning: false };
+  }
+
+  const controllable = profile.display === 'controllable';
+  const activeLevel = resolveReasoningLevel(model, resolveConfiguredReasoningLevel());
+  let showReasoning = controllable && resolveConfiguredReasoningDisplay();
+
+  // Loop so the display toggle can be flipped without leaving the screen.
+  for (;;) {
+    const rows: SelectChoice<ReasoningRow>[] = [
+      ...profile.levels.map((level) => ({
+        label: `${level.padEnd(8)}`,
+        value: { kind: 'level' as const, level },
+        hint: LEVEL_HINTS[level],
+        active: level === activeLevel,
+      })),
+      {
+        label: 'default ',
+        value: { kind: 'default' as const },
+        hint: 'let the model decide',
+        active: activeLevel === undefined,
+      },
+      { label: '── show reasoning ──', separator: true },
+      {
+        label: `${displayCheckbox(profile.display, showReasoning)}  Show the model's reasoning`,
+        value: { kind: 'toggle-display' as const },
+        hint: DISPLAY_HINTS[profile.display],
+        disabled: !controllable,
+      },
+    ];
+
+    const picked = await chooseFromList('Reasoning', rows);
+    if (picked === null) return null;
+
+    if (picked.kind === 'toggle-display') {
+      showReasoning = !showReasoning;
+      continue;
+    }
+
+    return {
+      level: picked.kind === 'level' ? picked.level : undefined,
+      showReasoning,
+    };
+  }
+}
+
+// ── Private: Setup submenu ────────────────────────────────────────────────────
+
+/**
+ * Shows the Google Cloud settings that no other screen can reach.
+ *
+ * The project ID is otherwise only asked for when it is missing, so an ID
+ * entered wrongly once could only be fixed by editing `.env` by hand. The
+ * region has never been reachable from the CLI at all.
+ *
+ * Reasoning is deliberately absent: it is chosen when a model is chosen, and a
+ * second path to the same value is how two paths drift apart.
+ *
+ * @param envFilePath - Path to `.env` for persistence.
+ * @returns Always null — setup changes configuration, never the model.
+ */
+async function showSetupMenu(envFilePath?: string): Promise<null> {
+  const project = resolveVertexProject() ?? '(not set)';
+  const location = process.env.GOOGLE_CLOUD_LOCATION?.trim() || 'global';
+
+  const action = await chooseFromList<'project' | 'location'>('Setup', [
+    {
+      label: 'Google Cloud project',
+      value: 'project',
+      hint: project,
+    },
+    {
+      label: 'Vertex AI location  ',
+      value: 'location',
+      hint: location,
+    },
+  ]);
+
+  if (action === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
+  if (action === 'project') {
+    console.log('');
+    console.log(colors.muted('  Use the ID from the project selector, not its display name.'));
+    const answer = await askText({
+      prompt: colors.primary.bold('  Google Cloud project ID: '),
+    });
+    const projectId = answer?.trim() ?? '';
+    if (!projectId) {
+      console.log(colors.muted('  Cancelled.\n'));
+      return null;
+    }
+    if (!isGoogleCloudProjectId(projectId)) {
+      console.log(colors.danger('  ✗ Invalid Google Cloud project ID. Nothing was changed.\n'));
+      return null;
+    }
+    reportSetupSave(
+      ModelSwitcher.saveVertexSettingsToEnv({ projectId }, envFilePath),
+      'GOOGLE_CLOUD_PROJECT',
+      projectId,
+    );
+    process.env.GOOGLE_CLOUD_PROJECT = projectId;
+    return null;
+  }
+
+  console.log('');
+  console.log(colors.muted('  "global" is recommended. A specific region can hit its own quota.'));
+  const answer = await askText({
+    prompt: colors.primary.bold('  Vertex AI location: '),
+  });
+  const chosen = answer?.trim() ?? '';
+  if (!chosen) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+  if (!/^[a-z][a-z0-9-]*$/.test(chosen)) {
+    console.log(colors.danger('  ✗ Invalid location. Nothing was changed.\n'));
+    return null;
+  }
+  reportSetupSave(
+    ModelSwitcher.saveVertexSettingsToEnv(
+      { projectId: resolveVertexProject() ?? '', location: chosen },
+      envFilePath,
+    ),
+    'GOOGLE_CLOUD_LOCATION',
+    chosen,
+  );
+  process.env.GOOGLE_CLOUD_LOCATION = chosen;
+  return null;
+}
+
+/**
+ * Reports the outcome of a setup write.
+ *
+ * @param saved - Whether the write succeeded.
+ * @param key - The environment key that was written.
+ * @param value - The value that was written.
+ */
+function reportSetupSave(saved: boolean, key: string, value: string): void {
+  console.log('');
+  if (saved) {
+    console.log(`  ${colors.accent('✅')} ${chalk.white(key)} ${colors.muted('=')} ${colors.primary.bold(value)}`);
+    console.log(`  ${colors.muted('💾 Saved to .env')}`);
+  } else {
+    console.log(`  ${colors.warning(`⚠️  Could not save to .env — set ${key} manually.`)}`);
+  }
+  console.log('');
 }
 
 // ── Private: Apply selection ──────────────────────────────────────────────────
@@ -212,16 +546,50 @@ async function showOllamaModelMenu(
  *
  * @param modelString - Full model string to set (e.g., "ollama:gemma4").
  * @param envFilePath - Path to `.env` file.
+ * @param vertexProjectId - Project to persist atomically for Claude on Vertex.
  * @returns The `ModelMenuResult` with save status.
  */
-function applyModelSelection(
+async function applyModelSelection(
   modelString: string,
   envFilePath?: string,
-): ModelMenuResult {
+  vertexProjectId?: string,
+): Promise<ModelMenuResult | null> {
+  // Reasoning is asked here, after the model is known, because this is the only
+  // point in the flow where the legal levels are known. Asking earlier — or
+  // from a separate command — would allow persisting a level the selected model
+  // rejects, which is the same class of failure as a saved model with no
+  // project: valid when written, broken on the next start.
+  const reasoning = await chooseReasoning(modelString);
+  if (reasoning === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
   console.log('');
   console.log(`  ${colors.accent('✅')} ${chalk.white('Switching to')} ${colors.primary.bold(modelString)}`);
+  if (reasoning.level) {
+    console.log(`  ${colors.muted(`   reasoning: ${reasoning.level}`)}`);
+  }
+  if (reasoning.showReasoning) {
+    console.log(`  ${colors.muted('   reasoning shown in the terminal')}`);
+  }
 
-  const saved = ModelSwitcher.saveModelToEnv(modelString, envFilePath);
+  const saved = ModelSwitcher.saveSelectionToEnv(
+    {
+      model: modelString,
+      reasoningLevel: reasoning.level,
+      showReasoning: reasoning.showReasoning,
+      projectId: vertexProjectId,
+    },
+    envFilePath,
+  );
+
+  // The agent is rebuilt inside this same process, so `.env` alone is not
+  // enough: the provider reads these from `process.env` when it constructs the
+  // new model. Without this, a switch would apply the previous selection's
+  // reasoning settings to the newly chosen model.
+  process.env[REASONING_LEVEL_ENV] = reasoning.level ?? '';
+  process.env[REASONING_DISPLAY_ENV] = reasoning.showReasoning ? 'true' : 'false';
 
   if (saved) {
     console.log(`  ${colors.muted('💾 Saved to .env')}`);
@@ -235,7 +603,61 @@ function applyModelSelection(
   return { model: modelString, saved };
 }
 
+/**
+ * Resolves the project required by Anthropic's Vertex client.
+ *
+ * Existing valid configuration is reused without prompting. When it is absent
+ * or malformed, the operator gets one focused question before any model switch
+ * is persisted or restarted.
+ *
+ * @returns A valid Google Cloud project ID, or null when cancelled/invalid.
+ */
+async function requestVertexProjectId(): Promise<string | null> {
+  const configured = resolveVertexProject();
+  if (configured && isGoogleCloudProjectId(configured)) return configured;
+
+  console.log('');
+  console.log(colors.warning('  Claude on Vertex needs the Google Cloud project ID.'));
+  console.log(colors.muted('  Use the ID from the project selector, not its display name.'));
+
+  const answer = await askText({
+    prompt: colors.primary.bold('  Google Cloud project ID: '),
+  });
+  const projectId = answer?.trim() ?? '';
+  if (!projectId) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+  if (!isGoogleCloudProjectId(projectId)) {
+    console.log(colors.danger('  ✗ Invalid Google Cloud project ID. Nothing was changed.\n'));
+    return null;
+  }
+
+  return projectId;
+}
+
 // ── Private: UI Helpers ───────────────────────────────────────────────────────
+
+/**
+ * Builds the header hint lines, which differ per interaction style.
+ *
+ * Telling a user on a pipe to "use the arrow keys" would be wrong, and telling
+ * a user on a real terminal to "type the number" would understate what they
+ * can do — so the hint is derived from the same check that picks the path.
+ *
+ * @returns The subtitle lines for the menu box.
+ */
+function interactiveHints(): string[] {
+  return isInteractive()
+    ? [
+        '  Use ↑↓ to move, Enter to select.',
+        '  Press Esc to cancel.',
+      ]
+    : [
+        '  Type the number and press Enter.',
+        '  Press 0 or Enter to cancel.',
+      ];
+}
 
 /**
  * Prints a framed menu box with a title and optional subtitle lines.
@@ -265,8 +687,10 @@ function printSection(label: string): void {
 /**
  * Prompts the user for a numeric input within a given range.
  *
- * Uses a short-lived readline (closed immediately after input) to avoid
- * interfering with the streaming output.
+ * Kept as a thin wrapper rather than inlined at the call site: it fixes the
+ * prompt styling for this menu, and it is the name the fallback path has always
+ * been documented under. The readline lifetime and the range validation live in
+ * `./prompts` (`askNumber`), so they are not re-implemented here.
  *
  * @param prompt - The prompt string to display.
  * @param min - Minimum valid value (inclusive).
@@ -274,23 +698,5 @@ function printSection(label: string): void {
  * @returns The parsed number, or `null` if input was empty/invalid.
  */
 function askNumber(prompt: string, min: number, max: number): Promise<number | null> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    rl.question(colors.primary.bold(prompt), (answer) => {
-      rl.close();
-      const trimmed = answer.trim();
-      if (!trimmed) { resolve(null); return; }
-      const num = parseInt(trimmed, 10);
-      if (isNaN(num) || num < min || num > max) {
-        console.log(colors.warning(`  Invalid choice. Please enter a number between ${min} and ${max}.`));
-        resolve(null);
-      } else {
-        resolve(num);
-      }
-    });
-  });
+  return askNumberPrompt(colors.primary.bold(prompt), min, max);
 }

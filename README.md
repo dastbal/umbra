@@ -1,11 +1,17 @@
-# NestJS AI Agent Lib
+# Umbra
 
-[![NestJS AI Agent](https://img.shields.io/badge/NestJS%20AI%20Agent-Lib-blue?style=flat-square)](https://github.com/your-repo/nestjs-ai-agent-lib)
+[![Umbra](https://img.shields.io/badge/Umbra-Autonomous%20Engineering%20Orchestrator-111111?style=flat-square)](https://github.com/dastbal/umbra)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](https://opensource.org/licenses/MIT)
 
 > Built with ❤️ by **David Balladares** — Principal Software Engineer level autonomous agent for NestJS.
 
-An autonomous AI agent framework designed specifically for **NestJS** projects. It analyzes, plans, writes, and verifies code with specialized subagents, all accessible via a premium streaming CLI. Leverages **Google Gemini (Vertex AI)** or **local Ollama** models without requiring API keys for local inference.
+Umbra is an autonomous engineering orchestrator for **NestJS** projects. It
+analyzes, plans, writes, and verifies code with specialized subagents through a
+secure streaming CLI. It supports **Google Gemini**, **Anthropic Claude through
+Vertex AI**, and local **Ollama** models.
+
+> Requires Node.js 20 or later. Version 2 blocks agent access to credentials,
+> `.git`, arbitrary shell commands, and paths outside the workspace.
 
 ---
 
@@ -16,8 +22,10 @@ An autonomous AI agent framework designed specifically for **NestJS** projects. 
 - [Getting Started with NestJS](#getting-started-with-nestjs)
   - [Option A — Ollama (Local, Free, No API Key) 🦙](#option-a--ollama-local-free-no-api-key-)
   - [Option B — Google Gemini (Cloud)](#option-b--google-gemini-cloud)
+  - [Option C — Anthropic Claude through Vertex AI](#option-c--anthropic-claude-through-vertex-ai)
 - [CLI — Interactive Streaming Sessions](#cli--interactive-streaming-sessions)
   - [Session Management](#session-management)
+  - [Reasoning — how hard the model thinks](#reasoning--how-hard-the-model-thinks)
   - [Switching Models — `/model` command](#switching-models---model-command)
   - [LLM Switching via env var](#llm-switching-via-env-var)
 - [Agent Modes](#agent-modes)
@@ -50,6 +58,29 @@ This library empowers your NestJS applications with an autonomous AI agent capab
 - ⚙️ **Autonomous Execution:** Executes full plans without requiring manual `yes/no` confirmations.
 - 🩹 **Self-Healing:** Recovers automatically from corrupted session states.
 - 🦙 **Local LLM Support:** Full integration with Ollama, allowing use of models like Gemma4, Qwen3.6, Llama3.2 locally — free, offline, and no API key needed.
+- 🟠 **Claude on Vertex AI:** Uses Haiku 4.5, Sonnet 5, or Opus 5 with Google ADC and Google Cloud billing.
+
+## Safe first run
+
+```powershell
+# Install once, then use Umbra from any project directory.
+npm install -g @dastbal/umbra
+
+# Creates a non-destructive local policy without overwriting an existing one.
+umbra init
+
+# Checks Node, local binaries, and configuration without network access.
+umbra doctor
+
+# Optional: sends a minimal `Reply only: OK` health prompt to the selected model.
+umbra doctor --live
+
+# Safe first task: read-only, evidence-gated analysis.
+umbra analyze "Summarize the project architecture"
+```
+
+`umbra metrics --since 7 --check` summarizes privacy-safe local telemetry and
+returns a non-zero exit code when the configured default health threshold fails.
 
 ---
 
@@ -59,7 +90,7 @@ This library empowers your NestJS applications with an autonomous AI agent capab
 *   **Domain-Driven Design (DDD) Support:** Understands and can generate code following DDD principles.
 *   **Architecture Aware:** Can analyze and refactor code while respecting architectural boundaries.
 *   **TDD Workflow:** Integrates seamlessly with Jest for Test-Driven Development.
-*   **Multiple LLM Backends:** Supports Google Gemini (cloud) and Ollama (local).
+*   **Multiple LLM Backends:** Supports Google Gemini, Claude partner models on Vertex AI, and Ollama locally.
 *   **Codebase Indexing (RAG):** Enables the agent to understand your project's structure and code through semantic search.
 *   **Safety First:** Robust file system safety, HITL approvals for destructive actions.
 *   **Efficient CLI:** Real-time token streaming and interactive model switching.
@@ -111,12 +142,12 @@ AGENT_MODEL=ollama:gemma4
 **4. Run the agent:**
 
 ```bash
-npm run agent -- deep
+umbra deep
 ```
 
 That's it! No Google account or API key needed.
 
-> **Tip:** Inside the agent session, type `/model` to interactively switch between Ollama models or even to Gemini cloud models if you configure them.
+> **Tip:** Inside the agent session, type `/model` to interactively switch between Ollama, Gemini, and enabled Claude models.
 
 ---
 
@@ -128,15 +159,18 @@ Leverages Google's powerful Vertex AI models. Requires authentication.
 
 ```bash
 # 1. Install the Google Cloud SDK: https://cloud.google.com/sdk/docs/install
-# 2. Authenticate and set your GCP project:
-gcloud auth application-default login --project YOUR_GCP_PROJECT_ID
+# 2. Umbra asks before launching Google's official browser login flow:
+umbra auth login --project YOUR_GCP_PROJECT_ID
 
-# 3. Configure your environment variables:
+# 3. Confirm that credentials exist without displaying a token:
+umbra auth status
+
+# 4. Configure your environment variables:
 # Create or update .env.development:
 # AGENT_MODEL=gemini-2.5-flash-lite
 
-# 4. Run the agent:
-npm run agent -- deep
+# 5. Run Umbra:
+umbra deep
 ```
 
 #### Option B2 — Service Account (CI/CD, Production)
@@ -157,20 +191,80 @@ AGENT_MODEL=gemini-2.5-flash-lite
 
 ---
 
+### Option C — Anthropic Claude through Vertex AI
+
+Claude uses the same Google Application Default Credentials as Gemini, but the
+model must first be enabled for your project in Vertex AI Model Garden. Usage is
+billed by Google Cloud; a Claude web subscription does not cover Vertex API use.
+
+```dotenv
+# Project where the Claude models are enabled
+GOOGLE_CLOUD_PROJECT=YOUR_GCP_PROJECT_ID
+GOOGLE_CLOUD_LOCATION=global
+
+# Fast and economical
+AGENT_MODEL=vertex-anthropic:claude-haiku-4-5@20251001
+
+# Other enabled choices:
+# AGENT_MODEL=vertex-anthropic:claude-sonnet-5
+# AGENT_MODEL=vertex-anthropic:claude-opus-5
+```
+
+For local development, authenticate once with
+`umbra auth login --project YOUR_GCP_PROJECT_ID`. Then run `umbra deep` or choose
+**Claude** from `/model`. If `GOOGLE_CLOUD_PROJECT` is missing, the selector asks
+for the project ID and saves it together with the model before it restarts the
+agent. Once set, both the project and the Vertex location can be changed from
+**Setup** at the bottom of the `/model` provider list.
+
+---
+
+### Reasoning — how hard the model thinks
+
+Every cloud model exposes a knob for reasoning depth, and no two providers name
+it the same. Umbra calls it **Reasoning** everywhere and translates per model,
+so the same six levels read the same regardless of who serves the model.
+
+The level is chosen at the end of `/model`, right after the model itself, and
+the picklist offers **only the levels that model accepts** — which is what makes
+it impossible to save a setting the model would reject. See
+[ADR-016](./docs/adr/ADR-016-one-reasoning-vocabulary-across-providers.md).
+
+```dotenv
+# low | medium | high | xhigh | max | minimal — empty means the model default
+AGENT_REASONING=xhigh
+
+# Show the model's reasoning in the terminal (Claude 5 only)
+AGENT_REASONING_DISPLAY=false
+```
+
+| Model family | Levels offered | Show reasoning |
+|---|---|---|
+| Claude Sonnet 5, Opus 5 | `low` `medium` `high` `xhigh` `max` | your choice |
+| Claude Haiku 4.5 | `low` `medium` `high` | always on once a level is set |
+| Gemini 3.5, 3.1 | `minimal` `low` `medium` `high` | not available |
+| Gemini 2.5 | `low` `medium` `high` | always on once a level is set |
+| Ollama | — | — |
+
+Three things worth knowing before you turn it up:
+
+- Lower levels cost less and answer faster. `high` is the provider default.
+- A level saved for one model is **clamped down**, never up, when you switch to a
+  model that lacks it — `max` on Claude Opus 5 becomes `high` on Gemini 3.5.
+- On **Claude Haiku 4.5**, setting a level gives up `temperature: 0`. The API
+  rejects both together.
+
+---
+
 ## CLI — Interactive Streaming Sessions
 
 The agent provides an interactive CLI experience similar to other advanced chatbots, with real-time token streaming and clear status indicators for tool execution.
 
 ```
-╭────────────────────────────────────────────────╮
-│                                                │
-│  NestJS AI Agent — Deep Mode                  │
-│  Single autonomous agent with planning tools  │
-│  Model: ollama:gemma4                         │
-│  Session: auth-module (continuing)            │
-│  Type your task. Ctrl+C to exit.              │
-│                                                │
-╰────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────╮
+│  Umbra · Deep    session auth-module         │
+│  🟠 claude-opus-5  ·  reasoning xhigh        │
+╰──────────────────────────────────────────────╯
 
 You: Create a UsersModule following DDD principles.
 
@@ -197,13 +291,13 @@ Manage conversation history and context using session IDs.
 
 | Command                                 | Behavior                                                              |
 | :-------------------------------------- | :-------------------------------------------------------------------- |
-| `npm run agent -- deep`                 | **Ephemeral** — Starts a fresh session each time.                     |
-| `npm run agent -- deep --session auth`  | **Persistent** — Reopens or creates the `auth` session context.       |
-| `npm run agent -- orchestrate --session feature-x` | Same persistence for the orchestrator mode.                         |
-| `npm run agent -- deep "Your task"`     | Starts an ephemeral session with an initial human message.            |
-| `npm run agent -- deep --session session-name "Your task"` | Starts/resumes a named session with an initial message. |
+| `umbra deep`                 | **Ephemeral** — Starts a fresh session each time.                     |
+| `umbra deep --session auth`  | **Persistent** — Reopens or creates the `auth` session context.       |
+| `umbra orchestrate --session feature-x` | Same persistence for the orchestrator mode.                         |
+| `umbra deep "Your task"`     | Starts an ephemeral session with an initial human message.            |
+| `umbra deep --session session-name "Your task"` | Starts/resumes a named session with an initial message. |
 
-> **Note:** Session data is stored in `.agent/deep_agent_history.db` and `.agent/orchestrator_history.db`.
+> **Note:** Session data is stored in `.umbra/deep_agent_history.db` and `.umbra/orchestrator_history.db`.
 
 ---
 
@@ -221,20 +315,34 @@ You: /model
 ╰────────────────────────────────────────────────────╯
 
   Select Provider:
-  1. ⚡  Vertex AI  (Gemini cloud — requires Google credentials)
-  2. 🦙  Ollama     (Local models — free, no API key needed)  ← active
+  1. ⚡  Gemini  (Google — via Vertex AI)
+  2. 🟠  Claude  (Anthropic — via Vertex AI)  ← active
+  3. 🦙  Ollama  (Local — free, no API key needed)
+
+  ── configuration ──
+  4. ⚙️   Setup   (Google Cloud project and location)
   Provider: 2
 
-  Detecting Ollama models... ✓ (4 found)
+  Select Claude Model:
+  1. Claude Haiku 4.5  (fast & economical)
+  2. Claude Sonnet 5     ⭐ (recommended)  ← active
+  3. Claude Opus 5       (maximum capability)
+  Model: 3
 
-  Select Ollama Model:
-  1. gemma4:26b  (17 GB)
-  2. gemma4:e2b  (7.2 GB)
-  3. gemma4:e4b  (9.6 GB)
-  4. gemma4      (9.6 GB)
-  Model: 1
+  Reasoning:
+  1. low       (quick answers, simple tasks)
+  2. medium    (balanced)
+  3. high      (provider default — most coding work)  ← active
+  4. xhigh     (hard problems, agentic runs)
+  5. max       (correctness over cost)
+  6. default   (let the model decide)
 
-  ✅ Switching to ollama:gemma4:26b
+  ── show reasoning ──
+  7. ☐  Show the model's reasoning  (visibility only — thinking is billed either way)
+  Select: 4
+
+  ✅ Switching to vertex-anthropic:claude-opus-5
+     reasoning: xhigh
   💾 Saved to .env
   🔄 Restarting agent with new model...
 ```
@@ -245,7 +353,7 @@ The selected model is automatically saved to your `.env` file for future session
 
 | Command | Description | State |
 |---|---|---|
-| `/model` | Switch the active LLM model interactively (Ollama or Vertex AI) | — |
+| `/model` | Switch the active LLM model, its reasoning level, or the Google Cloud setup | — |
 | `/mentor` | Toggle deep mentor mode — Forced Output Contract, trade-off analysis, Socratic gates | `[ON]` / `[OFF]` |
 | `/help` | Show all available slash commands with their current state | — |
 | `Ctrl+C` | Exit the session cleanly | — |
@@ -285,40 +393,56 @@ Alternatively, set the `AGENT_MODEL` environment variable before running the age
 
 # ── Ollama (local, free) ──────────────────────────────────────────
 # Balanced quality/performance
-$env:AGENT_MODEL="ollama:gemma4";       npm run agent -- deep
+$env:AGENT_MODEL="ollama:gemma4";       umbra deep
 
 # Fast, low RAM
-$env:AGENT_MODEL="ollama:gemma4:e2b";   npm run agent -- deep
+$env:AGENT_MODEL="ollama:gemma4:e2b";   umbra deep
 
 # High quality (large download)
-$env:AGENT_MODEL="ollama:gemma4:26b";   npm run agent -- deep
+$env:AGENT_MODEL="ollama:gemma4:26b";   umbra deep
 
 # Strong reasoning, compact
-$env:AGENT_MODEL="ollama:qwen3.6";      npm run agent -- deep
+$env:AGENT_MODEL="ollama:qwen3.6";      umbra deep
 
 # General purpose offline
-$env:AGENT_MODEL="ollama:llama3.2";     npm run agent -- deep
+$env:AGENT_MODEL="ollama:llama3.2";     umbra deep
 
 # ── Vertex AI (cloud) ─────────────────────────────────────────────
 # Fast & cheap (default if no GOOGLE_APPLICATION_CREDENTIALS)
-$env:AGENT_MODEL="gemini-2.5-flash-lite"; npm run agent -- deep
+$env:AGENT_MODEL="gemini-2.5-flash-lite"; umbra deep
 
 # Balanced speed + quality
-$env:AGENT_MODEL="gemini-2.5-flash";      npm run agent -- deep
+$env:AGENT_MODEL="gemini-2.5-flash";      umbra deep
 
 # Max capability (architecture, complex refactors)
-$env:AGENT_MODEL="gemini-2.5-pro";        npm run agent -- orchestrate
+$env:AGENT_MODEL="gemini-2.5-pro";        umbra orchestrate
+
+# ── Claude through Vertex AI (cloud) ──────────────────────────────
+$env:GOOGLE_CLOUD_PROJECT="YOUR_GCP_PROJECT_ID"
+
+# Fast and economical
+$env:AGENT_MODEL="vertex-anthropic:claude-haiku-4-5@20251001"; umbra deep
+
+# Recommended for coding and agentic workflows
+$env:AGENT_MODEL="vertex-anthropic:claude-sonnet-5";  umbra deep
+
+# Maximum capability
+$env:AGENT_MODEL="vertex-anthropic:claude-opus-5";    umbra orchestrate
 ```
 
 ```bash
 # Linux / macOS
 # Ollama examples
-AGENT_MODEL=ollama:gemma4 npm run agent -- deep
-AGENT_MODEL=ollama:qwen3.6 npm run agent -- deep
+AGENT_MODEL=ollama:gemma4 umbra deep
+AGENT_MODEL=ollama:qwen3.6 umbra deep
 
 # Gemini examples
-AGENT_MODEL=gemini-2.5-flash-lite npm run agent -- deep
-AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
+AGENT_MODEL=gemini-2.5-flash-lite umbra deep
+AGENT_MODEL=gemini-2.5-pro umbra orchestrate
+
+# Claude through Vertex AI examples
+GOOGLE_CLOUD_PROJECT=YOUR_GCP_PROJECT_ID AGENT_MODEL=vertex-anthropic:claude-haiku-4-5@20251001 umbra deep
+GOOGLE_CLOUD_PROJECT=YOUR_GCP_PROJECT_ID AGENT_MODEL=vertex-anthropic:claude-sonnet-5 umbra deep
 ```
 
 **Available Model Tiers:**
@@ -333,13 +457,126 @@ AGENT_MODEL=gemini-2.5-pro npm run agent -- orchestrate
 | `local`    | `ollama:llama3.2`        | 🦙 Local    | General purpose offline                |
 | `lite`     | `gemini-3.1-flash-lite`  | ⚡ Cloud    | Quick edits, Q&A (cheapest)           |
 | `flash`    | `gemini-3.5-flash`       | ⚡ Cloud    | Balanced speed + quality (recommended) |
-| `pro`      | `gemini-3.1-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
+| `pro`      | `gemini-2.5-pro`         | ⚡ Cloud    | Architecture, complex refactors        |
+| `3.5-lite` | `gemini-3.5-flash-lite`  | ⚡ Cloud    | Fast, high-volume workloads            |
+| `claude-fast` | `vertex-anthropic:claude-haiku-4-5@20251001` | 🟠 Vertex | Fast, economical Claude work |
+| `claude` | `vertex-anthropic:claude-sonnet-5` | 🟠 Vertex | Coding and agentic workflows |
+| `claude-max` | `vertex-anthropic:claude-opus-5` | 🟠 Vertex | Architecture and hard problems |
 
-> **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This ensures a stable and high-quality codebase index even when switching between local Ollama and cloud Gemini models.
+The `/model` menu still displays **Claude Haiku 4.5**. Its dated suffix is the
+Vertex transport version confirmed for that model and is selected automatically.
+
+> **Embeddings Note:** For Retrieval-Augmented Generation (RAG), the agent consistently uses **Vertex AI's `text-embedding-004`** model, regardless of the chat model selected. This keeps one stable codebase index when switching among Ollama, Gemini, and Claude.
 
 ---
 
 ## Agent Modes
+
+### Project initialization and policy
+
+Run this once inside the project you want the agent to operate on:
+
+```bash
+umbra init
+```
+
+During initialization Umbra optionally offers to connect LangSmith. It explains
+that remote tracing can include prompts, model responses, tool activity, and
+metadata, then asks for the API key without echoing it. Choosing no keeps
+tracing off and changes nothing. Enable it later with:
+
+```bash
+umbra setup langsmith
+```
+
+Credentials are saved only in `.umbra/langsmith.env`, which Umbra ignores in
+Git; they are never written to `.umbra/agent.config.json` or local telemetry.
+
+The command is idempotent and creates `.umbra/agent.config.json` only when it is
+missing. The file is local runtime state (and remains ignored by Git), so each
+project can choose its own model routing and safety limits. The first iteration
+keeps one delegation level and one writer: Researcher is read-only, Coder is the
+only writer, and Verifier is read-only and runs tests plus the TypeScript check.
+Handoffs are compact structured artifacts rather than full transcripts.
+
+For interactive `deep` work, the default recursion budget is 50 graph
+transitions (hard maximum 60). A per-turn middleware allows at most eight tool
+attempts; after that it removes tools from the next model call so the model must
+synthesize the evidence already collected. Each interactive turn also appends
+privacy-safe metrics to `.umbra/telemetry/interactive-turns.jsonl` and adds its
+audit ID, model, mode, and budgets to the matching LangSmith trace. The local
+record never stores prompts, tool arguments, response content, credentials, or
+raw provider errors.
+
+For architecture reviews, audits, and performance questions use the dedicated
+evidence-gated mode. It is one-shot, read-only, injects a bounded workspace
+manifest, and requires cited paths in the structured response:
+
+```bash
+umbra analyze "Evalúa el propósito, flujo, memoria y cuellos de botella del proyecto"
+```
+
+To keep this audit predictable and cheap, `analyze` answers only from its
+machine-collected, path-and-line manifest; it does not launch RAG searches or
+re-read files. Missing evidence is reported as `No verificado`. Use `deep` or
+`orchestrate` when the task needs an interactive investigation beyond that
+bounded report.
+
+### Model routing: cost first, quality where it matters
+
+`AGENT_MODEL` selects the primary model for the current `deep` or
+`orchestrate` session. It does **not** overwrite the specialized models inside
+the orchestrator: the project policy keeps the Researcher, Coder, and Verifier
+on their own profiles. By default, the Coder uses `gemini-2.5-pro` while the
+other roles use `gemini-2.5-flash-lite` to preserve cost efficiency.
+
+For a single quality-sensitive review, leave your economical `.env` unchanged
+and pass an explicit model just for that run:
+
+```powershell
+# A high-quality, read-only architecture or performance review
+umbra analyze --model gemini-2.5-pro "Evaluate the project purpose, flow, memory, and performance bottlenecks"
+
+# A stronger Supervisor for one complex implementation session
+umbra orchestrate --model gemini-2.5-pro --session architecture-review
+```
+
+The precedence is: explicit `--model` > `AGENT_MODEL` > project role profile.
+The role profiles and safety limits are visible and editable in
+`.umbra/agent.config.json`; `umbra init` never overwrites an existing file.
+
+### What one turn is allowed to spend
+
+Every interactive turn is bounded on four dimensions, and stops at whichever it
+reaches first. The defaults come from measured sessions, not from taste:
+
+| Ceiling | Default | Why |
+| --- | --- | --- |
+| Tool calls | 8 | 98 of 120 recorded turns used three or fewer |
+| Tokens | 250,000 | prompt plus completion, across the whole turn |
+| Wall clock | 300 s | above the 95th percentile of recorded turns (238 s) |
+| Cost | unset | set `limits.maxCostUsd` in `.umbra/agent.config.json` to enforce it |
+
+When a ceiling is reached the turn is not aborted: the model loses its tools and
+is told which ceiling ran out, so it answers with the evidence it already has
+and states what it could not verify.
+
+The running total appears live on the wait indicator — `7 calls · 51.0k tok ·
+$0.0846` — so a turn that is going wrong can be stopped while it happens. Cost
+is shown only when the active model has a published price; an unpriced model
+shows no figure rather than a misleading `$0.00`.
+
+A greeting, a thank-you or a farewell is answered directly by the CLI with no
+model call at all. Affirmations such as `ok`, `dale` or `seguí` are deliberately
+**not** treated as small talk — they usually mean *proceed*, and answering one
+locally would refuse work you just approved.
+
+Diagnostics: set `UMBRA_BUDGET_PROBE=1` to append a shape-only record of what
+the budget middleware observes to `.umbra/telemetry/budget-probe.jsonl`. It
+stores counts and message types, never message content, and is off by default.
+
+See [ADR-019](docs/adr/ADR-019-turn-cost-is-the-bound-not-tool-calls.md) and
+[ADR-020](docs/adr/ADR-020-a-message-that-asks-for-nothing-costs-nothing.md).
 
 ### Deep Agent (`deep`) — Single Autonomous Agent
 
@@ -347,13 +584,13 @@ Ideal for most day-to-day tasks: debugging, code analysis, single-file modificat
 
 ```bash
 # Start an ephemeral session
-npm run agent -- deep
+umbra deep
 
 # Start a persistent session named "my-feature"
-npm run agent -- deep --session my-feature
+umbra deep --session my-feature
 
 # Ask a specific question about a file
-npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts"
+umbra deep "explain src/core/agent/deep-agent-factory.ts"
 ```
 
 **Task Sizing:** The agent automatically classifies tasks before execution:
@@ -364,6 +601,7 @@ npm run agent -- deep "explain src/core/agent/deep-agent-factory.ts"
 **Core Tools:**
 *   `write_todos`: Plans and tracks multi-step tasks.
 *   `list_files`: Lists directory contents.
+*   `list_adrs`: Returns a cached catalog of ADR paths, status, and context; the agent reads only the ADR selected for a decision-history task.
 *   `safe_read_file`: Reads file content safely.
 *   `safe_write_file`: Writes to files with automatic backups.
 *   `ask_codebase`: Performs semantic search over your codebase using RAG.
@@ -379,21 +617,23 @@ Best suited for complex, large-scale tasks such as implementing entire modules, 
 
 ```bash
 # Start an ephemeral orchestrator session
-npm run agent -- orchestrate
+umbra orchestrate
 
 # Start a persistent session for a major refactor
-npm run agent -- orchestrate --session big-refactor
+umbra orchestrate --session big-refactor
 ```
 
 **Mandatory Workflow:** The orchestrator strictly follows a predefined protocol to ensure thoroughness and quality:
 1.  **`write_todos`:** Creates a comprehensive plan covering analysis, implementation, and verification.
 2.  **`task(researcher)`:** Delegates analysis to the `researcher` subagent, which examines the codebase and produces a detailed implementation plan.
-3.  **`task(coder)`:** Delegates implementation to the `coder` subagent, which follows the researcher's plan, adheres to Test-Driven Development (TDD), and writes tests *before* implementation.
-4.  **`run_integrity_check`:** Verifies that the entire project is free of TypeScript errors after the `coder` finishes.
+3.  **`task(coder)`:** Delegates implementation to the `coder` subagent, which follows the researcher's handoff, adheres to Test-Driven Development (TDD), and writes tests *before* implementation.
+4.  **`task(verifier)`:** Runs focused tests and the TypeScript integrity check without write access.
+5.  **Correction loop:** Allows at most the configured `maxRetries` automatic correction cycles before reporting a blocker.
 
 **Subagents:**
 *   **Researcher:** A read-only analyst. Uses tools like `ask_codebase` and `safe_read_file` to understand the project and generate structured plans.
-*   **Coder:** An implementation specialist. Uses `safe_write_file`, `run_tests`, and `run_integrity_check`. Writes `.spec.ts` files first, then implements the corresponding code. Self-corrects up to 3 times upon test failures.
+*   **Coder:** An implementation specialist. Uses `safe_write_file`, `run_tests`, and `run_integrity_check`. Writes `.spec.ts` files first, then implements the corresponding code. Self-corrects up to the configured `maxRetries` upon test failures.
+*   **Verifier:** A read-only quality gate. Runs tests and type-checks, then returns compact evidence and remaining issues.
 
 ---
 
@@ -413,6 +653,7 @@ graph TD
         F --> G[LLMProvider];
         G -- Ollama --> H(OllamaChatAdapter);
         G -- Gemini --> I(ChatVertexAI);
+        G -- Claude on Vertex --> R(ChatAnthropic + AnthropicVertex);
         F -- Simple Agent --> J(createDeepAgent);
         F -- Orchestrator --> K(createDeepAgent);
         K --> L[Researcher Subagent];
@@ -446,7 +687,7 @@ graph TD
 
 *   **CLI:** Handles user interaction, model switching (`/model`), and session management.
 *   **Agent Core:** `DeepAgentFactory` orchestrates agent creation, routing requests to either a simple `DeepAgent` or a multi-subagent `Orchestrator`.
-*   **LLM Integration:** `LLMProvider` routes requests to `OllamaChatAdapter` for local models or `ChatVertexAI` for cloud models.
+*   **LLM Integration:** `LLMProvider` routes local models to `OllamaChatAdapter`, Gemini to `ChatVertexAI`, and Vertex-hosted Claude to `ChatAnthropic` with Anthropic's Vertex client.
 *   **Services & Tools:** Provides core functionalities like safe file operations, RAG indexing, conversation persistence (SQLite), and the underlying LLM tooling.
 
 ---
@@ -459,7 +700,7 @@ This library is built with NestJS in mind. It understands NestJS conventions for
 
 ### Safety Features
 
-*   **`safe_write_file`:** Before writing any file, the agent creates a timestamped backup in `.agent/backups/`. This ensures you can always revert to the previous version if the agent's changes are not as expected.
+*   **`safe_write_file`:** Before writing any file, the agent creates a timestamped backup in `.umbra/backups/`. This ensures you can always revert to the previous version if the agent's changes are not as expected.
 *   **Project Root Sandboxing:** The agent operates strictly within the project's root directory. It cannot access or modify files outside this scope.
 *   **Human-in-the-Loop (HITL):** For potentially destructive operations (e.g., deleting files/directories, dropping database tables, modifying infrastructure files like `docker-compose.yml` or `.env.production`), the agent will pause and explicitly ask for your approval.
 
@@ -479,7 +720,7 @@ The agent uses Retrieval-Augmented Generation (RAG) to understand your codebase:
 The library follows a clean, modular structure:
 
 ```
-/nestjs-ai-agent-lib
+/umbra
 ├── src/
 │   ├── bin/                      # CLI entry points (deep, orchestrate)
 │   │   └── cli.ts
@@ -524,7 +765,7 @@ The library follows a clean, modular structure:
 │   └── mentor-mode.md            # Deep mentor: Forced Output Contract + Socratic gates
 ├── AGENTS.md                     # ⭐ Project context for AI agents (read-only)
 ├── ANTIGRAVITY.md                # ADR log & work history for the human developer
-├── .agent/                       # Agent runtime data
+├── .umbra/                       # Agent runtime data
 │   ├── deep_agent_history.db     # SQLite DB for named deep agent sessions
 │   ├── orchestrator_history.db   # SQLite DB for named orchestrator sessions
 │   ├── index.meta.json           # Timestamp for RAG index freshness
@@ -576,9 +817,11 @@ The library follows a clean, modular structure:
 |   | Zero-code tracing: all LLM calls, tool calls, LangGraph steps | ✅ Done |
 |   | Configure with 3 env vars: LANGCHAIN_TRACING_V2, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT | ✅ Done |
 |   | No-op when env vars are absent (safe for library consumers) | ✅ Done |
+| **v2.0.1** | **Claude partner models through Vertex AI** | ✅ **Done** |
+|   | Haiku 4.5, Sonnet 5, and Opus 5 routing and `/model` presets | ✅ Done |
+|   | Google ADC transport, Anthropic harness profile, and packaged pricing | ✅ Done |
 | **Future** | SSE HTTP API (`/agent/stream`) | ⏳ Planned |
 |   | Agent self-evolution — write new skills from patterns it discovers | ⏳ Planned |
-|   | Anthropic Claude support (`@langchain/anthropic`) | ⏳ Planned |
 |   | LangGraph state-level mentor toggle (true per-session stateful mode) | ⏳ Planned |
 
 ---
