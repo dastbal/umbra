@@ -122,6 +122,22 @@ supported when thinking is enabled`. A Claude 4.5 selection with a reasoning
 level therefore gives up deterministic sampling. The provider computes the
 reasoning fields first and drops `temperature` when a thinking block is present.
 
+### The session banner reports the level
+
+The banner is where the operator learns what they are about to spend. It shows
+the **clamped** level rather than the stored one, so what is displayed is what
+the next request will carry.
+
+It also shrank from five content lines to two. It reprints on every model
+switch, so the lines that never change — the subtitle restating the mode, the
+"type your task" hint — cost attention on each reprint without adding anything
+after the first read. The model name drops its routing prefix and dated Vertex
+suffix in favor of a provider glyph.
+
+Fixing the width exposed that the box border had never been aligned: the lines
+were padded with literal trailing spaces rather than measured, so styled text
+and two-column emoji both pushed the right edge out of place.
+
 ## Alternatives considered
 
 ### A separate `/effort` command
@@ -200,3 +216,5 @@ and does nothing — the worst of the three outcomes.
 - `src/core/llm/provider.ts` — `anthropicReasoningFields`, `geminiReasoningFields`
 - `src/core/config/model-switcher.ts` — `saveSelectionToEnv`, `saveVertexSettingsToEnv`
 - `src/presentation/cli/model-menu.ts` — the Reasoning picklist and Setup screen
+- `src/presentation/cli/theme.ts` — `buildWelcomeBanner`, measured box width
+- `src/presentation/cli/chat-session.ts` — `activeReasoningLevel` for the banner

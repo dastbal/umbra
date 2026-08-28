@@ -53,6 +53,10 @@ import {
 import { ContextCompressor } from '../../core/agent/context-compressor';
 import { resolveSummarizerModel } from '../../core/config/model-resolver';
 import {
+  resolveConfiguredReasoningLevel,
+  resolveReasoningLevel,
+} from '../../core/config/reasoning-profile';
+import {
   classifyOrchestrationTask,
   formatOrchestrationRoute,
 } from '../../core/agent/task-classifier';
@@ -60,6 +64,20 @@ import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
 import { flushPendingTraces } from '../../core/observability';
+
+/**
+ * Resolves the reasoning level the given model will actually run at.
+ *
+ * The configured level may not exist on the model in hand, so the banner
+ * reports the clamped value rather than the stored one — what is shown is what
+ * the next request will carry.
+ *
+ * @param model - The model the session is about to use.
+ * @returns The active level, or undefined when the model has no reasoning knob.
+ */
+function activeReasoningLevel(model: string): string | undefined {
+  return resolveReasoningLevel(model, resolveConfiguredReasoningLevel());
+}
 
 /**
  * Builds the rejection decision sent back to the graph.
@@ -247,7 +265,12 @@ export class ChatSession {
     this.isRunning = true;
 
     // Welcome banner
-    process.stdout.write(buildWelcomeBanner(this.config.mode, this.config.model, this.config.sessionName));
+    process.stdout.write(buildWelcomeBanner(
+        this.config.mode,
+        this.config.model,
+        this.config.sessionName,
+        activeReasoningLevel(this.config.model),
+      ));
 
     // Handle Ctrl+C gracefully (no readline needed — process-level signal)
     process.on('SIGINT', () => void this.shutdown());
@@ -1043,7 +1066,12 @@ export class ChatSession {
 
       // ── Step 4: Show the updated welcome banner ───────────────────────────
       process.stdout.write(
-        buildWelcomeBanner(this.config.mode, result.model, this.config.sessionName),
+        buildWelcomeBanner(
+          this.config.mode,
+          result.model,
+          this.config.sessionName,
+          activeReasoningLevel(result.model),
+        ),
       );
     } catch (err: unknown) {
       const message = (err as Error)?.message ?? String(err);

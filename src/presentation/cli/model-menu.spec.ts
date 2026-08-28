@@ -151,6 +151,37 @@ describe('showModelMenu reasoning screen', () => {
     restore('AGENT_REASONING_DISPLAY', originalDisplay);
   });
 
+  it('updates process.env so the rebuilt agent uses the new settings', async () => {
+    // The agent is rebuilt in this same process and the provider reads these
+    // from process.env. Writing only .env would have applied the *previous*
+    // selection's reasoning to the newly chosen model.
+    process.env.AGENT_REASONING = 'high';
+    process.env.AGENT_REASONING_DISPLAY = 'true';
+
+    mockSelectOutcome
+      .mockResolvedValueOnce({ status: 'selected', value: 'vertex-gemini' })
+      .mockResolvedValueOnce({ status: 'selected', value: 'gemini-3.5-flash' })
+      .mockResolvedValueOnce({ status: 'selected', value: { kind: 'level', level: 'low' } });
+
+    await showModelMenu('gemini-2.5-pro');
+
+    expect(process.env.AGENT_REASONING).toBe('low');
+    expect(process.env.AGENT_REASONING_DISPLAY).toBe('false');
+  });
+
+  it('clears the level in process.env when the model default is chosen', async () => {
+    process.env.AGENT_REASONING = 'max';
+
+    mockSelectOutcome
+      .mockResolvedValueOnce({ status: 'selected', value: 'vertex-gemini' })
+      .mockResolvedValueOnce({ status: 'selected', value: 'gemini-3.5-flash' })
+      .mockResolvedValueOnce({ status: 'selected', value: { kind: 'default' } });
+
+    await showModelMenu('gemini-2.5-pro');
+
+    expect(process.env.AGENT_REASONING).toBe('');
+  });
+
   it('offers the four thinkingLevel steps on Gemini 3.x, never xhigh or max', async () => {
     mockSelectOutcome
       .mockResolvedValueOnce({ status: 'selected', value: 'vertex-gemini' })

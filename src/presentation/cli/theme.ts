@@ -266,51 +266,115 @@ export function formatToolInput(toolName: string, input: unknown): string {
 
 // ── Session Header ────────────────────────────────────────────────────────────
 
+/** Matches ANSI escape sequences, so styled text can be measured. */
+// eslint-disable-next-line no-control-regex
+const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * Matches the emoji ranges used in this banner, which terminals render two
+ * columns wide while a code-point count reports them as one.
+ */
+const DOUBLE_WIDTH_PATTERN = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu;
+
+/** Variation selectors are zero-width; they style the previous glyph. */
+const ZERO_WIDTH_PATTERN = /[\u{FE00}-\u{FE0F}]/gu;
+
+/**
+ * Measures the printed width of styled text.
+ *
+ * Three things a `.length` gets wrong here, each of which shifts the box's
+ * right edge: escape sequences occupy no columns, emoji occupy two, and
+ * variation selectors occupy none.
+ *
+ * @param text - Possibly styled text.
+ * @returns The number of terminal columns it occupies.
+ */
+function bannerWidth(text: string): number {
+  const plain = text.replace(ANSI_PATTERN, '').replace(ZERO_WIDTH_PATTERN, '');
+  const wideCount = (plain.match(DOUBLE_WIDTH_PATTERN) ?? []).length;
+  return Array.from(plain).length + wideCount;
+}
+
+/**
+ * Shortens a model string for display without losing which model it is.
+ *
+ * The routing prefix answers "who serves this", which the provider glyph
+ * already says, and `vertex-anthropic:claude-opus-5` is wide enough to push the
+ * banner past a comfortable width on its own. The dated Vertex suffix goes too:
+ * it is a transport detail, and only one version of each model is offered.
+ *
+ * @param model - The full resolved model string.
+ * @returns A short display name, e.g. `claude-opus-5`.
+ */
+function shortModelName(model: string): string {
+  const withoutPrefix = model.includes(':') ? model.slice(model.indexOf(':') + 1) : model;
+  return withoutPrefix.replace(/@\d{8}$/, '');
+}
+
+/**
+ * Picks the glyph that identifies the provider at a glance.
+ *
+ * @param model - The full resolved model string.
+ * @returns A single-width emoji for the provider.
+ */
+function providerGlyph(model: string): string {
+  if (model.startsWith('ollama:')) return '🦙';
+  if (model.startsWith('vertex-anthropic:')) return '🟠';
+  return '⚡';
+}
+
 /**
  * Build the welcome banner for a new chat session.
+ *
+ * Two content lines rather than five: the mode and session on one, everything
+ * about the model on the other. The banner reprints on every model switch, so
+ * the lines that never change — the subtitle describing the mode, and the
+ * "type your task" hint — cost attention each time without adding anything
+ * after the first read.
  *
  * @param mode - 'deep' | 'orchestrate'
  * @param model - The resolved model string.
  * @param sessionName - Named session being continued (undefined = new session).
+ * @param reasoningLevel - Active reasoning level, when the model has one.
  * @returns Multiline banner string ready to print.
  */
 export function buildWelcomeBanner(
   mode: 'deep' | 'orchestrate',
   model: string,
   sessionName?: string,
+  reasoningLevel?: string,
 ): string {
   const title = mode === 'deep'
-    ? colors.deep.bold('  Umbra — Deep Mode  ')
-    : colors.orchestrator.bold('  Umbra — Orchestrator  ');
+    ? colors.deep.bold('Umbra · Deep')
+    : colors.orchestrator.bold('Umbra · Orchestrator');
 
-  const subtitle = mode === 'deep'
-    ? colors.muted('  Single autonomous agent with planning tools  ')
-    : colors.muted('  Researcher + Coder subagents coordinated  ');
+  const session = sessionName
+    ? `${colors.muted('session')} ${chalk.white(sessionName)}`
+    : `${colors.muted('session')} ${chalk.hex('#F59E0B')('new')}`;
 
-  const modelLine = colors.muted(`  Model: ${chalk.white(model)}  `);
+  const modelPart = `${providerGlyph(model)} ${chalk.white(shortModelName(model))}`;
+  // The level is the one setting that silently changes cost and latency, so it
+  // is shown wherever the model is shown rather than left to be remembered.
+  const reasoningPart = reasoningLevel
+    ? `  ${colors.dim('·')}  ${colors.muted('reasoning')} ${colors.accent(reasoningLevel)}`
+    : '';
 
-  const sessionLine = sessionName
-    ? colors.muted(`  Session: ${chalk.white(sessionName)} ${colors.accent('(continuing)')}  `)
-    : colors.muted(`  Session: ${chalk.hex('#F59E0B')('new')} ${colors.dim('(--session <name> to persist)')}  `);
+  const lines = [
+    `${title}    ${session}`,
+    `${modelPart}${reasoningPart}`,
+  ];
 
-  const hint = colors.dim('  Type your task. Ctrl+C to exit.  ');
-
-  const width = 48;
-  const top    = colors.dim('╭' + '─'.repeat(width) + '╮');
-  const bottom = colors.dim('╰' + '─'.repeat(width) + '╯');
-  const empty  = colors.dim('│' + ' '.repeat(width) + '│');
+  // Width follows the content, with a floor so a short model name still reads
+  // as a banner rather than a label.
+  const inner = Math.max(46, ...lines.map((line) => bannerWidth(line) + 4));
+  const pad = (line: string): string =>
+    colors.dim('│') + '  ' + line + ' '.repeat(inner - bannerWidth(line) - 2) + colors.dim('│');
 
   return [
     '',
-    top,
-    empty,
-    colors.dim('│') + title + colors.dim('│'),
-    colors.dim('│') + subtitle + colors.dim('│'),
-    colors.dim('│') + modelLine + colors.dim('│'),
-    colors.dim('│') + sessionLine + colors.dim('│'),
-    colors.dim('│') + hint + colors.dim('│'),
-    empty,
-    bottom,
+    colors.dim('╭' + '─'.repeat(inner) + '╮'),
+    ...lines.map(pad),
+    colors.dim('╰' + '─'.repeat(inner) + '╯'),
     '',
   ].join('\n');
 }

@@ -261,15 +261,10 @@ Three things worth knowing before you turn it up:
 The agent provides an interactive CLI experience similar to other advanced chatbots, with real-time token streaming and clear status indicators for tool execution.
 
 ```
-╭────────────────────────────────────────────────╮
-│                                                │
-│  Umbra — Deep Mode                            │
-│  Single autonomous agent with planning tools  │
-│  Model: ollama:gemma4                         │
-│  Session: auth-module (continuing)            │
-│  Type your task. Ctrl+C to exit.              │
-│                                                │
-╰────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────╮
+│  Umbra · Deep    session auth-module         │
+│  🟠 claude-opus-5  ·  reasoning xhigh        │
+╰──────────────────────────────────────────────╯
 
 You: Create a UsersModule following DDD principles.
 

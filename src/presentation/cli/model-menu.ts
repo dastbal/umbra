@@ -41,6 +41,8 @@ import {
   resolveVertexProject,
 } from '../../core/config/model-resolver';
 import {
+  REASONING_DISPLAY_ENV,
+  REASONING_LEVEL_ENV,
   ReasoningDisplaySupport,
   ReasoningLevel,
   describeReasoning,
@@ -581,6 +583,13 @@ async function applyModelSelection(
     },
     envFilePath,
   );
+
+  // The agent is rebuilt inside this same process, so `.env` alone is not
+  // enough: the provider reads these from `process.env` when it constructs the
+  // new model. Without this, a switch would apply the previous selection's
+  // reasoning settings to the newly chosen model.
+  process.env[REASONING_LEVEL_ENV] = reasoning.level ?? '';
+  process.env[REASONING_DISPLAY_ENV] = reasoning.showReasoning ? 'true' : 'false';
 
   if (saved) {
     console.log(`  ${colors.muted('💾 Saved to .env')}`);
