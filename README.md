@@ -480,6 +480,18 @@ Run this once inside the project you want the agent to operate on:
 umbra init
 ```
 
+During initialization Umbra optionally offers to connect LangSmith. It explains
+that remote tracing can include prompts, model responses, tool activity, and
+metadata, then asks for the API key without echoing it. Choosing no keeps
+tracing off and changes nothing. Enable it later with:
+
+```bash
+umbra setup langsmith
+```
+
+Credentials are saved only in `.umbra/langsmith.env`, which Umbra ignores in
+Git; they are never written to `.umbra/agent.config.json` or local telemetry.
+
 The command is idempotent and creates `.umbra/agent.config.json` only when it is
 missing. The file is local runtime state (and remains ignored by Git), so each
 project can choose its own model routing and safety limits. The first iteration

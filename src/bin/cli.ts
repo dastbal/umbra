@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as dotenv from "dotenv";
 dotenv.config({ quiet: true }); // Load .env variables silently
+dotenv.config({ path: '.umbra/langsmith.env', quiet: true }); // Optional local tracing credentials
 
 // ── LangSmith Observability ──────────────────────────────────────────────────
 // Must be imported AFTER dotenv.config() and BEFORE any @langchain/* imports.
@@ -37,6 +38,8 @@ import {
 } from '../core/observability';
 import { LLMProvider } from '../core/llm/provider';
 import { GoogleApplicationDefaultAuth } from '../presentation/cli/google-application-default-auth';
+import { configureLangSmith, hasLangSmithConfiguration } from '../core/observability/langsmith-config';
+import { askSecret, askText, confirm } from '../presentation/cli/prompts';
 
 const program = new Command();
 suppressLangSmithTransportLogs();
@@ -48,6 +51,40 @@ const log = {
   error: (msg: string) => console.log(chalk.red("❌ [ERR]: ") + msg),
   hitl: (msg: string) => console.log(chalk.yellow("✋ [WAITING FOR APPROVAL]: ") + msg),
 };
+
+/** Runs the opt-in LangSmith credential flow used by setup and first initialization. */
+async function setupLangSmith(): Promise<void> {
+  if (hasLangSmithConfiguration(process.cwd())) {
+    log.sys('LangSmith is already configured for this project.');
+    return;
+  }
+
+  const enabled = await confirm({
+    question: 'Enable LangSmith tracing? It sends prompts, model responses, tool activity, and metadata to your LangSmith workspace.',
+    defaultValue: false,
+    yesLabel: 'Enable tracing',
+    noLabel: 'Keep tracing off',
+  });
+  if (enabled !== true) {
+    log.sys('LangSmith tracing remains off. Run `umbra setup langsmith` whenever you want to enable it.');
+    return;
+  }
+
+  const apiKey = await askSecret({ prompt: '  LangSmith API key (stored only in .umbra/langsmith.env): ' });
+  const project = await askText({ prompt: `  LangSmith project [${path.basename(process.cwd())}]: ` });
+  const endpoint = await askText({ prompt: '  Self-hosted endpoint (leave blank for LangSmith cloud): ' });
+  try {
+    const result = configureLangSmith(process.cwd(), {
+      apiKey: apiKey ?? '',
+      project: project?.trim() || path.basename(process.cwd()),
+      endpoint: endpoint ?? undefined,
+    });
+    log.sys(`LangSmith tracing enabled. Credentials were saved locally at ${result.path}.`);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.error(`Could not configure LangSmith: ${message}`);
+  }
+}
 
 /**
  * Ensures clean exit and database closing
@@ -359,12 +396,21 @@ authProgram
     if (exitCode !== 0) process.exitCode = exitCode;
   });
 
+const setupProgram = program
+  .command('setup')
+  .description('Configure optional local integrations for this project');
+
+setupProgram
+  .command('langsmith')
+  .description('Optionally configure private LangSmith tracing for this project')
+  .action(setupLangSmith);
+
 program
   .command("init")
   .description(
     "Create the idempotent project-local multi-agent policy, working guides, and decision-record index",
   )
-  .action(() => {
+  .action(async () => {
     // Before anything reads or writes the workspace: a project last used under
     // the previous directory name keeps its index, history and backups.
     const migration = migrateLegacyAgentDirectory(process.cwd());
@@ -424,6 +470,10 @@ program
       log.error(
         `Agent policy is ready, but the working guides could not be installed: ${message}`,
       );
+    }
+
+    if (!hasLangSmithConfiguration(process.cwd())) {
+      await setupLangSmith();
     }
   });
 

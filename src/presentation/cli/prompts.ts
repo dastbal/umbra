@@ -55,6 +55,7 @@
  */
 
 import * as readline from 'readline';
+import { Writable } from 'stream';
 import { colors } from './theme';
 import { isInteractive, selectOutcome } from './interactive-select';
 
@@ -137,6 +138,23 @@ export function askText(opts: AskTextOptions): Promise<string | null> {
       resolve(answer);
     });
   });
+}
+
+/**
+ * Reads a secret without echoing it back to the terminal.
+ *
+ * @param opts - Prompt configuration. The prompt remains visible; entered text does not.
+ * @returns The entered secret, or `null` when the operator interrupts.
+ */
+export function askSecret(opts: AskTextOptions): Promise<string | null> {
+  const output = opts.output ?? process.stdout;
+  output.write(opts.prompt);
+
+  const hiddenOutput = new Writable({
+    write(_chunk: Buffer, _encoding: BufferEncoding, done: () => void): void { done(); },
+  }) as NodeJS.WriteStream;
+
+  return askText({ ...opts, prompt: '', output: hiddenOutput });
 }
 
 /**

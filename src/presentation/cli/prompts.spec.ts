@@ -7,7 +7,7 @@
  */
 
 import { PassThrough } from 'stream';
-import { askText, askNumber, confirm } from './prompts';
+import { askSecret, askText, askNumber, confirm } from './prompts';
 
 /** A stream pair standing in for a terminal or a pipe. */
 interface Streams {
@@ -118,6 +118,21 @@ describe('askText', () => {
     });
 
     expect(answer).toBe('añadí una función');
+  });
+});
+
+describe('askSecret', () => {
+  it('shows its prompt without echoing the entered credential', async () => {
+    const streams = makeStreams(false);
+    sendSoon(streams, 'lsv2_pt_secret\n');
+
+    const answer = await askSecret({
+      prompt: '  LangSmith API key: ', input: streams.input, output: streams.output,
+    });
+
+    expect(answer).toBe('lsv2_pt_secret');
+    expect(streams.written()).toContain('LangSmith API key');
+    expect(streams.written()).not.toContain('lsv2_pt_secret');
   });
 });
 
