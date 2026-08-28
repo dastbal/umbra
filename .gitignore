@@ -58,3 +58,6 @@ __pycache__/
 tmp/
 output/
 tsconfig.tsbuildinfo
+
+# npm pack output — build artifact, never versioned
+*.tgz
