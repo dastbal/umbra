@@ -62,3 +62,9 @@ tsconfig.tsbuildinfo
 
 # npm pack output — build artifact, never versioned
 *.tgz
+
+# Umbra — local agent state (safe to delete)
+deep_agent_history.db
+deep_agent_history.db-shm
+deep_agent_history.db-wal
+interactive-turns.jsonl

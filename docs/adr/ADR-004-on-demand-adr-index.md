@@ -2,10 +2,36 @@
 
 ## Estado
 
-Aceptada - 2026-08-07
+Aceptada - 2026-08-07, enmendada 2026-08-28
 
 Sustituye ADR-003, que documento un indice de README por una interpretacion
 incorrecta de la solicitud original.
+
+> **Amendment — 2026-08-28.** The index worked; the parser reading it did not,
+> and the failure was silent.
+>
+> `extractSectionParagraph` in `src/core/tools/adr-index.ts` looked for the
+> headings `## Estado` and `## Contexto`. Those are the headings of the first
+> four records, written in Spanish. Every record from ADR-005 onward uses
+> `## Status` and `## Context`, because the project convention is that anything
+> written into the repository is in English.
+>
+> The result, measured on 2026-08-28 by running the built index over this
+> directory: **16 of 20 records reported `Sin estado` and `Sin contexto`.**
+> `list_adrs` returned their titles and nothing else. The agent is instructed by
+> `buildSystemPrompt` to call this tool before consulting a prior decision, and
+> for 80% of the decision history it was being handed a filename and a title
+> with no status — so it could not tell an Accepted record from a Superseded one
+> without opening the file, which is the exact context spend this record exists
+> to avoid.
+>
+> Both spellings are now accepted (`STATUS_HEADINGS`, `CONTEXT_HEADINGS`), and
+> `adr-index.spec.ts` covers an English record alongside a Spanish one so the
+> next format shift fails a test instead of quietly degrading. Verified: 22 of
+> 22 records now report a status.
+>
+> Nothing else in this record changes. The on-demand, cached, bounded-context
+> design it decided is unaffected and still in force.
 
 ## Contexto
 

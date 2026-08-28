@@ -1,4 +1,8 @@
-import { classifyOrchestrationTask, formatOrchestrationRoute } from './task-classifier';
+import {
+  classifyOrchestrationTask,
+  classifySmallTalk,
+  formatOrchestrationRoute,
+} from './task-classifier';
 
 describe('classifyOrchestrationTask', () => {
   it('keeps a read-only question on the inexpensive direct route', () => {
@@ -59,5 +63,48 @@ describe('classifyOrchestrationTask', () => {
 
     expect(route.complexity).toBe('medium');
     expect(route.subagents).toEqual(['researcher', 'coder', 'verifier']);
+  });
+});
+
+describe('classifySmallTalk', () => {
+  it.each([
+    ['hey', 'greeting'],
+    ['Hola!', 'greeting'],
+    ['buenas tardes', 'greeting'],
+    ['hello there', 'greeting'],
+    ['¿cómo estás?', 'greeting'],
+    ['thanks', 'thanks'],
+    ['muchas gracias', 'thanks'],
+    ['chau', 'farewell'],
+    ['hasta luego', 'farewell'],
+  ])('recognises %j as %s', (input, kind) => {
+    expect(classifySmallTalk(input)).toBe(kind);
+  });
+
+  // The expensive direction to get wrong. "dale" and "seguí" mean *proceed with
+  // what you proposed*; answering one with a canned line refuses work the
+  // operator just approved, which is worse than spending the tokens.
+  it.each(['ok', 'okay', 'dale', 'listo', 'yes', 'sí', 'seguí', 'continuá', 'go on'])(
+    'never treats the affirmation %j as small talk',
+    (input) => {
+      expect(classifySmallTalk(input)).toBeNull();
+    },
+  );
+
+  it('does not match a greeting that carries a real request', () => {
+    expect(classifySmallTalk('hola, agregá un endpoint de usuarios')).toBeNull();
+    expect(classifySmallTalk('hey can you fix the failing spec')).toBeNull();
+    expect(classifySmallTalk('thanks — now refactor the resolver')).toBeNull();
+  });
+
+  it('does not match a question about the project', () => {
+    expect(classifySmallTalk('what does this project do?')).toBeNull();
+    expect(classifySmallTalk('¿qué hace el módulo de RAG?')).toBeNull();
+  });
+
+  it('keeps thanks and farewells off the delegation route too', () => {
+    for (const input of ['gracias', 'chau']) {
+      expect(classifyOrchestrationTask(input).subagents).toEqual([]);
+    }
   });
 });

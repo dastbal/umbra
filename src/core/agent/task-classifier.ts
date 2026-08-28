@@ -19,7 +19,9 @@ export interface OrchestrationRoute {
 }
 
 const READ_ONLY_PATTERN = /\b(explain|describe|what is|what does|how does|why|analy[sz]e|audit|review|compare|show|list|explica|describe|qué es|qué hace|cómo funciona|por qué|analiza|audita|revisa|compara|muestra|lista)\b/i;
-const GREETING_PATTERN = /^(hi|hello|hey( there)?|hola|buenas( tardes| noches| días)?|qué tal|cómo estás)[!?.\s]*$/i;
+const GREETING_PATTERN = /^[¿¡\s]*((hi|hello|hey)( there)?|hola|buenas( tardes| noches| días)?|qué tal|cómo estás|qué hacés)[!?.\s]*$/i;
+const THANKS_PATTERN = /^[¿¡\s]*(thanks( a lot)?|thank you|thx|(muchas |mil )?gracias)[!?.\s]*$/i;
+const FAREWELL_PATTERN = /^[¿¡\s]*(bye|goodbye|see you|chau|chao|adi[oó]s|hasta luego|nos vemos)[!?.\s]*$/i;
 const IMPLEMENTATION_PATTERN = /\b(add|create|implement|build|fix|change|modify|update|refactor|rename|remove|delete|migrate|write|agrega|añade|crea|implementa|construye|corrige|cambia|modifica|actualiza|renombra|elimina|migra|escribe)\b/i;
 const LARGE_PATTERN = /\b(module|feature|architecture|major|migration|database|prisma|typeorm|repository|endpoint|controller|ddd|multi[- ]file|refactor|módulo|funcionalidad|arquitectura|migración|base de datos|repositorio|controlador|multiarchivo)\b/i;
 
@@ -36,7 +38,7 @@ const LARGE_PATTERN = /\b(module|feature|architecture|major|migration|database|p
 export function classifyOrchestrationTask(request: string): OrchestrationRoute {
   const isImplementation = IMPLEMENTATION_PATTERN.test(request);
 
-  if (!isImplementation && (READ_ONLY_PATTERN.test(request) || GREETING_PATTERN.test(request))) {
+  if (!isImplementation && (READ_ONLY_PATTERN.test(request) || classifySmallTalk(request) !== null)) {
     return { complexity: 'small', requiresImplementation: false, subagents: [] };
   }
 
@@ -73,4 +75,34 @@ export function formatOrchestrationRoute(route: OrchestrationRoute, request: str
 Required route: ${subagents}.
 User request (preserve intent exactly):
 ${request}`;
+}
+
+/** Conversational message kinds that are not a request to do work. */
+export type SmallTalkKind = 'greeting' | 'thanks' | 'farewell';
+
+/**
+ * Recognises a message that is conversation rather than a task.
+ *
+ * This exists because the Deep-agent system prompt applies its investigation
+ * protocol to every message, with no exception for a message that asks for
+ * nothing. One recorded turn spent 11 tool calls and 108 seconds on the word
+ * "hey" (`.umbra/telemetry/interactive-turns.jsonl`, audit `84ad7c97`).
+ *
+ * Deliberately excluded: affirmations such as "ok", "dale", "listo", "yes" and
+ * "seguí". Those routinely mean *proceed with what you proposed*, and
+ * answering one with a canned line would refuse work the operator just
+ * approved. A false negative here costs tokens; a false positive costs the
+ * user's actual request.
+ *
+ * Each pattern is anchored to the whole message, so "hola, agregá un endpoint"
+ * stays a task.
+ *
+ * @param request - Raw interactive user request, already trimmed.
+ * @returns The small-talk kind, or `null` when the message asks for work.
+ */
+export function classifySmallTalk(request: string): SmallTalkKind | null {
+  if (GREETING_PATTERN.test(request)) return 'greeting';
+  if (THANKS_PATTERN.test(request)) return 'thanks';
+  if (FAREWELL_PATTERN.test(request)) return 'farewell';
+  return null;
 }

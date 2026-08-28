@@ -280,7 +280,9 @@ export class ModelSwitcher {
    * Returns the list of Vertex AI / Gemini cloud models available as presets.
    *
    * Curated list organized by model family (newest first).
-   * Entries with an empty name (`''`) are visual separators between families.
+   * Entries with an empty `label` are visual separators between families; the
+   * separator text is carried in `name`. Callers that price or select a model
+   * must skip them.
    *
    * These are not auto-detected (no cloud API call needed) — they are curated
    * and kept in sync with the `MODEL_TIERS` defined in `model-resolver.ts`.

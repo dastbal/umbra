@@ -259,6 +259,26 @@ decoration — or an understanding of intent the test cannot have.
 5. Validate by running `umbra orchestrate` and `umbra analyze` and reading the
    traces — a prompt change is only verified by what the model then does.
 
+> **Amendment — 2026-08-28.** The shared base changed, and **this entry still
+> applies in full**. [ADR-020](./adr/ADR-020-a-message-that-asks-for-nothing-costs-nothing.md)
+> reordered `buildSystemPrompt` so the identity and a conversation gate come
+> before the evidence protocol, removed the skill-discovery fallback that ordered
+> `list_files("skills/")` on every unmatched message, and rewrote two blocks that
+> declared themselves mandatory on every turn.
+>
+> All three edits landed in the **shared base**, which is exactly the problem
+> this entry describes: they reached `orchestrator` and `analysis` too, and
+> neither was reasoned about. The conversation gate is harmless in both. The
+> removed directory listing is a straightforward gain in both. But the fact that
+> a change aimed at `simple` silently rewrote the other two prompts is the defect
+> recorded here, arriving again.
+>
+> `evidence-protocol.ts` was deliberately left alone for the same reason, and
+> that is the shape of the fix: the file is shared with
+> `researcher.subagent.ts`, where an unconditional investigation protocol is
+> correct. Step 1 — split the base so each mode appends only what it can act on —
+> is unchanged and is what would have made the ADR-020 edits attributable.
+
 ---
 
 ## The `/` command palette — **built 2026-08-26**
@@ -322,7 +342,7 @@ This is the shape that produced three of this project's load-bearing ideas:
 `list_adrs` ([ADR-004](./adr/ADR-004-on-demand-adr-index.md)). In each, the
 valuable artifact was not the answer but **the cheap index that made the answer
 findable**. Applied here: cache question → finding pairs per module under
-`.agent/`, and let a delegate start with what the last run established instead of
+`.umbra/`, and let a delegate start with what the last run established instead of
 re-asking.
 
 ### What is broken today
@@ -339,7 +359,7 @@ is persistence **across** turns and sessions.
 ### The mechanism to reuse — do not invent one
 
 `src/core/rag/` and the two existing on-demand indexes. Both write a cached
-catalog into `.agent/` with a `status` field and a refresh path, and both are
+catalog into `.umbra/` with a `status` field and a refresh path, and both are
 already exercised by their own specs. The injection point is
 `Mandate.knownContext`, which the guard already renders into the delegate's only
 message.
@@ -579,3 +599,139 @@ cost of this idea and the reason it is a proposal.
 `src/core/llm/provider.ts` (`getEmbeddingsModel`), `src/core/rag/` (index
 identity and invalidation). If it is ever accepted, it supersedes the module
 rule above and amends ADR-010's packaging claim.
+
+---
+
+## A turn budget counted in bytes of context, not in tool calls
+
+> Recorded 2026-08-28, branch `2.0.1`. Produced by the ideation ritual's
+> "context as the product" lens while diagnosing the turn that spent 108 seconds
+> on the word `hey`. David chose the multi-dimension governor
+> ([ADR-019](./adr/ADR-019-turn-cost-is-the-bound-not-tool-calls.md)) and this
+> stayed behind.
+
+### The idea
+
+The governor now bounds tool calls, tokens, wall clock and cost. None of those
+is the unit the model actually spends when it reads a file. A **byte budget**
+would be: once a turn has pulled roughly 150 KB of file content into context,
+`safe_read_file` stops returning bodies and answers *"you have read 200 KB this
+turn — use `ask_codebase`"*.
+
+### What is actually broken today
+
+In the 11-tool-call turn recorded as audit `84ad7c97`, the agent read **202,815
+bytes** — including `deep-agent-factory.ts` (50 KB), `chat-session.ts` (48 KB)
+and `cli.ts` (32 KB) — to answer a greeting.
+
+`ask_codebase` was called **zero times** in those 11 calls. It is declared in
+`DeepAgentFactory.create` and it is the tool
+[ADR-003](./adr/ADR-003-on-demand-readme-index.md) and
+[ADR-004](./adr/ADR-004-on-demand-adr-index.md) exist to provide. The agent has
+semantic search over the project and reads whole files by hand instead.
+
+The token ceiling added in ADR-019 bounds the *total*, which stops a runaway. It
+does nothing to steer the model toward the cheaper tool while there is still
+budget left.
+
+### The mechanism to reuse — do not invent one
+
+`src/core/agent/turn-governor.ts` already owns per-turn spend and already has a
+dimension type. A `bytesRead` field and a `recordBytes` call from
+`safe_read_file` is the whole accounting. `TurnSpend` is reset by `beforeAgent`,
+so turn boundaries are solved.
+
+### The plan
+
+1. Add `bytesRead` to `TurnSpend` and a soft threshold distinct from the hard
+   ceilings — this one redirects rather than stops.
+2. Have `wrapToolCall` return a redirect `ToolMessage` for `safe_read_file` past
+   the threshold, naming `ask_codebase` explicitly.
+3. Measure first: count `ask_codebase` calls per turn across
+   `interactive-turns.jsonl`. If the answer is near zero, the tool is being
+   ignored for a reason worth finding before adding pressure.
+
+### What would make it worthless
+
+Truncating a read in the middle of real code work is worse than the tokens it
+saves. This must redirect, never silently shorten a file, and the threshold has
+to sit above what an honest multi-file task needs.
+
+---
+
+## The agent reading its own telemetry
+
+> Recorded 2026-08-28, branch `2.0.1`. Produced by the ideation ritual's "the
+> agent that observes itself" lens. Not chosen, and the reason it might be a bad
+> idea is unusually clear.
+
+### The idea
+
+`.umbra/telemetry/interactive-turns.jsonl` records what every previous turn
+cost. The agent never sees it. The proposal: inject a one-line summary of the
+previous turn into the next turn's context — *"your last turn spent 11 tool
+calls and 108 seconds on a greeting"* — so the cost becomes visible to the model
+rather than only to the operator.
+
+### Why it is interesting
+
+Every bound built in ADR-019 is external: the middleware stops the model. This
+would be the first mechanism that lets the model bound *itself*, and the data
+already exists, is privacy-safe by construction, and is written on every turn by
+`TurnAudit#record`.
+
+### What would make it worthless, and it is a real risk
+
+It spends tokens on every turn in order to save tokens. The summary is paid
+forever; the savings are hypothetical. Before building it, the number to
+establish is what fraction of expensive turns follow another expensive turn — if
+runaways are independent events, telling the model about the last one teaches it
+nothing.
+
+### The mechanism to reuse
+
+`src/presentation/cli/turn-audit.ts` writes the records. Reading the last line
+back is trivial; `ChatSession#sendMessage` composes the input and is where a
+prefix would go.
+
+---
+
+## Tool arguments reach the tools double-encoded
+
+> Recorded 2026-08-28, branch `2.0.1`. Observed in the transcripts that produced
+> [ADR-019](./adr/ADR-019-turn-cost-is-the-bound-not-tool-calls.md) and
+> [ADR-020](./adr/ADR-020-a-message-that-asks-for-nothing-costs-nothing.md), and
+> deliberately not chased there: it changes nothing about cost, and mixing it
+> into that work would have made a failed run impossible to attribute.
+
+### What is observed
+
+`list_files` receives its arguments plainly:
+
+```
+{"dirPath":"skills"}
+```
+
+`safe_read_file` receives a JSON **string** wrapped in an `input` key:
+
+```
+{"input":"{\"file_path\":\"skills/mentor-mode.md\"}"}
+```
+
+Both calls succeed, so nothing is broken today. But two tools declared in the
+same list are being invoked through two different argument shapes, which means
+something between the model and the tool is disagreeing about the schema.
+
+### Why it is worth a look before it bites
+
+This is the same family as the entry above on harness tool exclusions: the set
+of tools a model can call, and the shape it calls them with, is assembled in
+more than one place and verified in one. A tool whose arguments arrive
+double-encoded works right up until a value contains a quote.
+
+### Where to start
+
+Compare the zod schemas of `listFilesTool` and `safeReadFileTool` in
+`src/core/tools/file-tools.ts`. The likely difference is a single-argument
+schema being collapsed by deepagents into an `input` envelope, in which case the
+fix is the schema shape, not the tool.

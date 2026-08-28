@@ -80,6 +80,16 @@ const SHIMMER_PAUSE = 14;
  * renderer.finalizeTurn();
  * ```
  */
+/**
+ * Renders a token count compactly enough for a one-line wait indicator.
+ *
+ * @param tokens - Total tokens observed for the turn.
+ * @returns "51.0k" above a thousand, the plain integer below it.
+ */
+function formatTokens(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
+}
+
 export class StreamRenderer {
   /** Whether we are currently streaming tokens (affects newline handling). */
   private isStreaming = false;
@@ -114,8 +124,17 @@ export class StreamRenderer {
   /** Interval handle for the thinking animation, or null when idle. */
   private thinkingTimer: NodeJS.Timeout | null = null;
 
-  /** Tokens received this turn — surfaced next to the "writing" phrase. */
-  private streamedTokens = 0;
+  /**
+   * Stream chunks received this turn.
+   *
+   * Named for what it is. It was rendered as "N tokens", which it is not: the
+   * provider decides chunk boundaries, so this counts repaints, not billing
+   * units. Real token counts arrive through {@link noteTurnSpend}.
+   */
+  private streamedChunks = 0;
+
+  /** Authoritative per-turn spend, when the caller reports it. */
+  private turnSpend: { toolCalls: number; tokens: number; costUsd?: number } | null = null;
 
   /**
    * Whether stdout is an interactive terminal.
@@ -220,13 +239,13 @@ export class StreamRenderer {
       this.clearThinking();
       process.stdout.write(colors.secondary.bold('  ⬡  Agent') + colors.dim('  ─────────────────────────────') + '\n');
       this.isStreaming = true;
-      this.streamedTokens = 0;
+      this.streamedChunks = 0;
       this.showThinking('write');
     }
 
     // Buffer the raw token for markdown rendering in finalizeTurn()
     this.tokenBuffer += token;
-    this.streamedTokens++;
+    this.streamedChunks++;
     this.hasStreamedContent = true;
   }
 
@@ -390,13 +409,49 @@ export class StreamRenderer {
   }
 
   /**
+   * Reports what the current turn has spent, for the live indicator.
+   *
+   * A recorded turn ran 108 seconds on the word "hey" and another ran 921
+   * seconds, with no way to see the cost accumulating. Showing it while it
+   * happens is what lets an operator stop a runaway turn instead of reading
+   * about it in telemetry afterwards.
+   *
+   * @param spend - Tool calls, tokens and USD observed so far this turn.
+   */
+  public noteTurnSpend(spend: { toolCalls: number; tokens: number; costUsd?: number }): void {
+    this.turnSpend = spend;
+    if (this.thinkingTimer) this.renderThinking();
+  }
+
+  /** Clears per-turn spend so the next turn starts from nothing. */
+  public resetTurnSpend(): void {
+    this.turnSpend = null;
+  }
+
+  /**
+   * Builds the trailing counter for the wait indicator.
+   *
+   * @returns The counter text, or an empty string when there is nothing to show.
+   * @internal
+   */
+  private buildCounter(): string {
+    const spend = this.turnSpend;
+    if (spend && (spend.toolCalls > 0 || spend.tokens > 0)) {
+      const parts = [`${spend.toolCalls} calls`, `${formatTokens(spend.tokens)} tok`];
+      if (spend.costUsd !== undefined) parts.push(`$${spend.costUsd.toFixed(4)}`);
+      return `  ${parts.join(' · ')}`;
+    }
+    return this.streamedChunks > 0 ? `  ${this.streamedChunks} chunks` : '';
+  }
+
+  /**
    * Paint one frame of the wait indicator.
    * @internal
    */
   private renderThinking(): void {
     const frames = spinnerFrames;
     const spinner = frames[Math.floor(this.thinkingHead / 2) % frames.length];
-    const counter = this.streamedTokens > 0 ? `  ${this.streamedTokens} tokens` : '';
+    const counter = this.buildCounter();
 
     // Reserve room for the spinner, its padding and the counter.
     const budget = this.lineWidth - 5 - counter.length;
@@ -445,7 +500,7 @@ export class StreamRenderer {
     this.hasStreamedContent = false;
     this.toolCallCount = 0;
     this.tokenBuffer = '';
-    this.streamedTokens = 0;
+    this.streamedChunks = 0;
   }
 
   // ── HITL (Human-in-the-Loop) ───────────────────────────────────────────────

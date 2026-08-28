@@ -7,7 +7,10 @@ Date: 2026-08-25
 
 ## Status
 
-Accepted — amended 2026-08-27
+Accepted — amended 2026-08-27 and 2026-08-28. The tool-call budget described
+here is superseded by
+[ADR-019](./ADR-019-turn-cost-is-the-bound-not-tool-calls.md); the recursion
+limit and the telemetry record remain in force.
 
 ## Context
 
@@ -112,6 +115,35 @@ flowchart LR
 - The final low-cost validation did not consume the eight-tool ceiling, so the
   middleware's live forced-synthesis path is validated by unit tests and must
   continue to be observed in LangSmith on a future complex request.
+
+  > **Amendment — 2026-08-28.** This bullet named the gap that then swallowed the
+  > decision. The ceiling was never observed live, and 120 recorded turns in
+  > `interactive-turns.jsonl` show it did not hold: **13 exceeded it**, the worst
+  > reaching 18 tool calls against a budget of 8.
+  >
+  > Two causes, both in what this record decided.
+  >
+  > **The check was placed before a model call.** `wrapModelCall` runs once per
+  > model response, so a model that requests six tools in one response spends all
+  > six. Eight was a floor, not a ceiling. Verified by running the compiled
+  > counter against synthetic batches: batches of six stop at 12, batches of nine
+  > stop at 9.
+  >
+  > **Tool calls were the wrong unit.** Across those 120 turns, tool execution
+  > accounted for 62.9 s of 4,532 s elapsed — **1.4%**. One turn ran 921 seconds
+  > on twelve tool calls, comfortably inside this budget the whole time. The
+  > sentence above about a task that "truly needs more than eight tool attempts"
+  > still stands; what it could not anticipate is that a turn can be ruinous
+  > without exceeding eight anything.
+  >
+  > [ADR-019](./ADR-019-turn-cost-is-the-bound-not-tool-calls.md) moves
+  > enforcement into `wrapToolCall`, makes the count self-observed rather than
+  > derived from agent state, and adds wall-clock, token and cost ceilings.
+  >
+  > **Nothing here is removed.** The recursion limit, the privacy-safe JSONL
+  > record and the LangSmith correlation are unchanged and still in force — and
+  > it was this record's own telemetry, written by this decision, that made the
+  > defect measurable at all.
 
 ## Verification Evidence
 

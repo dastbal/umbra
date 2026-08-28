@@ -39,7 +39,14 @@ import { LLMProvider } from '../llm/provider';
 import { OllamaChatAdapter } from '../llm/ollama-adapter';
 import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
-import { createIterationBudgetMiddleware } from './iteration-budget.middleware';
+import {
+  DEFAULT_INTERACTIVE_TOOL_BUDGET,
+  createIterationBudgetMiddleware,
+} from './iteration-budget.middleware';
+import type { CostResolver } from './turn-governor';
+import { LlmPricingConfig } from '../infrastructure/config/llm-pricing.config';
+import { CostTrackerService } from '../application/services/cost-tracker.service';
+import { TokenUsage } from '../domain/value-objects/token-usage';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -111,7 +118,7 @@ export interface DeepAgentFactoryConfig {
   enableContextCompression?: boolean;
 
   /**
-   * Optional project policy override. When omitted, `.agent/agent.config.json`
+   * Optional project policy override. When omitted, `.umbra/agent.config.json`
    * is loaded; when both are absent, safe defaults are used.
    */
   agentConfig?: AgentConfigInput;
@@ -187,7 +194,10 @@ export class DeepAgentFactory {
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      middleware: [createIterationBudgetMiddleware()],
+      middleware: [createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+        limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
+        costOf: DeepAgentFactory.buildCostResolver(model),
+      })],
       tools: [                           // ADR-002
         safeWriteFileTool,
         safeReadFileTool,
@@ -440,7 +450,7 @@ export class DeepAgentFactory {
   /**
    * Resolves the project policy from an explicit override or local runtime file.
    *
-   * @param rootDir - Project root used to locate `.agent/agent.config.json`.
+   * @param rootDir - Project root used to locate `.umbra/agent.config.json`.
    * @param input - Optional programmatic policy override.
    * @returns A fully defaulted and validated policy.
    */
@@ -684,7 +694,7 @@ export class DeepAgentFactory {
    * Resetting the named thread prevents the invalid tool-only history from being
    * combined with a later human message.
    *
-   * @param rootDir - Project root directory (where `.agent/` lives).
+   * @param rootDir - Project root directory (where `.umbra/` lives).
    * @param threadId - The LangGraph thread ID of the corrupted session.
    * @param agentType - Which DB file to look in.
    * @returns true if a checkpoint was cleared, false if none was found.
@@ -727,7 +737,7 @@ export class DeepAgentFactory {
   /**
    * Conditionally re-indexes the project only when the RAG index is stale.
    *
-   * Reads `.agent/index.meta.json` to check the last index timestamp.
+   * Reads `.umbra/index.meta.json` to check the last index timestamp.
    * If the index was built less than `FRESH_TTL_MS` milliseconds ago, the
    * re-index is skipped entirely — saving 3-5 seconds on every startup.
    * If stale or missing, a full `indexProject()` run is triggered and the
@@ -824,6 +834,32 @@ export class DeepAgentFactory {
   }
 
   /**
+   * Builds the pricing function that enables the turn governor's cost ceiling.
+   *
+   * `agent.config.json` has declared `limits.maxCostUsd` since the schema was
+   * written, and until now nothing read it. Enforcing it needs a price, and a
+   * price the project does not have must disable the ceiling rather than
+   * silently treat the turn as free — which is exactly how cost tracking came
+   * to report zero for the starred default model.
+   *
+   * @param model - Model whose published price applies to this session.
+   * @returns A resolver returning USD, or `undefined` when the model is unpriced.
+   */
+  private static buildCostResolver(model: string): CostResolver {
+    const tracker = new CostTrackerService(new LlmPricingConfig());
+
+    return (usage) => {
+      try {
+        return tracker
+          .calculateCost(model, new TokenUsage(usage.inputTokens, usage.outputTokens))
+          .amount;
+      } catch {
+        return undefined;
+      }
+    };
+  }
+
+  /**
    * Builds the system prompt for the given agent type.
    *
    * @param rootDir - The project root directory (injected into prompt for context).
@@ -841,12 +877,18 @@ export class DeepAgentFactory {
     const evidenceProtocol = buildEvidenceProtocolPrompt(
       type === 'analysis' ? 'preloaded-manifest' : 'tool-research',
     );
-    const base = `${evidenceProtocol}
-You are a Principal Software Engineer specialized in NestJS (Node.js).
+    const base = `You are a Principal Software Engineer specialized in NestJS (Node.js).
 You operate directly on the local file system of a live, real-world project at: ${rootDir}
 
-🎯 SKILL DISCOVERY — mandatory before every task:
-Scan the user's message for trigger keywords and load the matching skill FIRST.
+💬 CONVERSATION GATE — this takes precedence over every protocol below:
+If the message asks for no work — a greeting, an acknowledgement, a thank you, or
+a one-line remark with no question about this project — answer it in one or two
+sentences and call no tools at all. The protocols below describe how to carry out
+work; they begin to apply at the first message that asks for some, not before.
+
+${evidenceProtocol}
+🎯 SKILL DISCOVERY — before starting a task:
+Scan the user's message for trigger keywords and load the matching skill first.
 
 Keyword → Skill map (check in this order):
 - "module / feature / DDD / domain / create service"  → \`skills/create-ddd-module.md\`
@@ -863,9 +905,13 @@ Keyword → Skill map (check in this order):
 - "mentor / teach me / explain why / trade-off / learning" → \`skills/mentor-mode.md\`
 - "ADR / decision record / document this decision / supersede" → \`skills/document-decision.md\`
 
-If no keyword matches, call \`list_files("skills/")\` to discover available skills.
-Load the matching skill with \`safe_read_file("skills/<name>.md")\` and follow it precisely.
-If \`skills/\` does not exist, proceed with your best NestJS/DDD judgment.
+If no keyword matches, load no skill and proceed with your best NestJS/DDD
+judgment. The map above is the complete list, so listing the directory discovers
+nothing and costs a round trip — which is how the word "hey" once cost 11 tool
+calls before answering.
+Load a matching skill with \`safe_read_file("skills/<name>.md")\` and follow it precisely.
+A consumer project may ship no \`skills/\` directory at all; that is expected, not a
+problem to investigate.
 
 ARCHITECTURE DECISION INDEX:
 - Do not scan or read ADR files during ordinary coding tasks.
@@ -892,7 +938,7 @@ When asked to fix a bug or explain something:
 - NEVER say "you should consider X" — say what to do and do it.
 - NEVER give 3 vague alternatives — give THE answer with reasoning.
 
-🔍 SESSION STATE VERIFICATION (mandatory on every turn):
+🔍 SESSION STATE VERIFICATION — when the work depends on earlier file changes:
 History is a record of intent — disk is ground truth.
 - If history mentions files you created before → verify with \`safe_read_file\` before assuming.
 - If a file is missing → create it from scratch. Never skip a write because history says it was done.

@@ -15,11 +15,19 @@ export interface ModelPricingEntry {
  *
  * A project-local `llm-pricing.json` still overrides these values per model.
  *
+ * For Gemini 3.x the published output price is a single combined rate that
+ * already includes thinking tokens, so reasoning effort raises the cost of a
+ * turn through the output counter rather than through a separate line item.
+ *
  * @see LlmPricingConfig
  * @see https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing
+ * @see https://ai.google.dev/gemini-api/docs/pricing
  */
 export const DEFAULT_LLM_PRICING: Readonly<Record<string, ModelPricingEntry>> = {
+  'gemini-3.5-flash': { inputMillion: 1.50, outputMillion: 9.00 },
+  'gemini-3.5-flash-lite': { inputMillion: 0.30, outputMillion: 2.50 },
   'gemini-3.1-pro-preview': { inputMillion: 2.00, outputMillion: 12.00 },
+  'gemini-3.1-flash-lite': { inputMillion: 0.25, outputMillion: 1.50 },
   'gemini-3.1-flash-lite-preview': { inputMillion: 0.25, outputMillion: 1.50 },
   'gemini-3.0-pro-preview': { inputMillion: 2.00, outputMillion: 12.00 },
   'gemini-3.0-flash-preview': { inputMillion: 0.50, outputMillion: 3.00 },

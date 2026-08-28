@@ -32,6 +32,18 @@ import { askText } from './prompts';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
 import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
 
+import { recordBudgetProbe } from '../../core/agent/budget-probe';
+import {
+  type TurnSpend,
+  createTurnSpend,
+  readUsage,
+  recordToolCall,
+  recordUsage,
+} from '../../core/agent/turn-governor';
+import { LlmPricingConfig } from '../../core/infrastructure/config/llm-pricing.config';
+import { CostTrackerService } from '../../core/application/services/cost-tracker.service';
+import { TokenUsage } from '../../core/domain/value-objects/token-usage';
+
 /**
  * Suspensions answered in one turn before the CLI gives the prompt back.
  *
@@ -58,7 +70,9 @@ import {
 } from '../../core/config/reasoning-profile';
 import {
   classifyOrchestrationTask,
+  classifySmallTalk,
   formatOrchestrationRoute,
+  type SmallTalkKind,
 } from '../../core/agent/task-classifier';
 import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
@@ -212,6 +226,14 @@ export class ChatSession {
    * Built once in the constructor and read by the dispatcher, the picker and
    * the help text, so all three can never disagree about what exists.
    */
+  /**
+   * Prices the running turn for the live indicator.
+   *
+   * Built once per session rather than per turn: `LlmPricingConfig` reads the
+   * project override from disk in its constructor.
+   */
+  private readonly costTracker = new CostTrackerService(new LlmPricingConfig());
+
   private readonly slashCommands: SlashCommand[];
   /** Lines the operator submitted this session, for the editor's history. */
   private readonly inputHistory: string[] = [];
@@ -276,8 +298,9 @@ export class ChatSession {
     process.on('SIGINT', () => void this.shutdown());
 
     // Send first message if provided (from CLI argument)
-    if (firstMessage?.trim()) {
-      await this.sendMessage(firstMessage.trim());
+    const first = firstMessage?.trim();
+    if (first && !this.handledAsSmallTalk(first)) {
+      await this.sendMessage(first);
     }
 
     // Enter interactive loop
@@ -309,6 +332,11 @@ export class ChatSession {
     });
     let hasTextOutput = false;
     let hasToolActivity = false;
+    // Display spend for this turn. The middleware keeps its own copy for
+    // enforcement; both use the same pure functions, so the two cannot drift in
+    // how they read a provider's usage report.
+    const spend = createTurnSpend(Date.now());
+    this.renderer.resetTurnSpend?.();
     const routedInput = this.config.mode === 'orchestrate'
       ? formatOrchestrationRoute(classifyOrchestrationTask(input), input)
       : input;
@@ -343,6 +371,31 @@ export class ChatSession {
             break;
           }
 
+          // ── Model call finished ──────────────────────────────────────────
+          // Token usage is only readable here. The deep path has never consumed
+          // it: `usage_metadata` is read solely by the legacy graph nodes that
+          // ADR-011 deprecated, which is why a turn's real cost is unknown.
+          case 'on_chat_model_end': {
+            const observed = readUsage(event.data?.output);
+            if (observed) {
+              recordUsage(spend, observed);
+              this.reportSpend(spend);
+            }
+
+            const usage = event.data?.output?.usage_metadata;
+            recordBudgetProbe(this.config.auditRootDir, {
+              at: 'on_chat_model_end',
+              hasUsageMetadata: Boolean(usage),
+              usageKeys: usage ? Object.keys(usage) : [],
+              ...(usage ? {
+                inputTokens: usage.input_tokens,
+                outputTokens: usage.output_tokens,
+                totalTokens: usage.total_tokens,
+              } : {}),
+            });
+            break;
+          }
+
           // ── Tool call started ────────────────────────────────────────────
           case 'on_tool_start': {
             hasToolActivity = true;
@@ -350,6 +403,8 @@ export class ChatSession {
             const toolInput = event.data?.input ?? {};
             toolStartTimes.set(toolName, Date.now());
             audit.recordToolStart(toolName);
+            recordToolCall(spend);
+            this.reportSpend(spend);
             this.renderer.showToolStart(toolName, toolInput);
             break;
           }
@@ -729,6 +784,8 @@ export class ChatSession {
         this.reportUnknownCommand(trimmed);
         continue;
       }
+
+      if (this.handledAsSmallTalk(trimmed)) continue;
 
       await this.sendMessage(trimmed);
       // Phase 2: proactive compression — check token budget after each turn.
@@ -1171,6 +1228,84 @@ export class ChatSession {
    *
    * @param input - The unrecognised input.
    */
+  /**
+   * Pushes the turn's running spend to the wait indicator.
+   *
+   * Cost is omitted rather than shown as zero when the model has no published
+   * price: a counter that reads $0.00 for a real spend is worse than one that
+   * shows nothing, and that is precisely the failure this work started from.
+   *
+   * @param spend - Running spend for the current turn.
+   */
+  private reportSpend(spend: TurnSpend): void {
+    this.renderer.noteTurnSpend?.({
+      toolCalls: spend.toolCalls,
+      tokens: spend.inputTokens + spend.outputTokens,
+      costUsd: this.costOf(spend),
+    });
+  }
+
+  /**
+   * Prices the turn so far, or returns undefined when the model is unpriced.
+   *
+   * @param spend - Running spend for the current turn.
+   * @returns Cost in USD, or undefined when no published price applies.
+   */
+  private costOf(spend: TurnSpend): number | undefined {
+    if (spend.inputTokens === 0 && spend.outputTokens === 0) return undefined;
+    try {
+      return this.costTracker
+        .calculateCost(this.currentModel, new TokenUsage(spend.inputTokens, spend.outputTokens))
+        .amount;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Answers conversational input locally, bypassing the agent entirely.
+   *
+   * A greeting is not a task, but the Deep-agent system prompt applies its
+   * investigation protocol to every message: one recorded turn spent 11 tool
+   * calls and 108 seconds on the word "hey" (`interactive-turns.jsonl`, audit
+   * `84ad7c97`). This is the same shape as the unknown-command branch in
+   * {@link promptLoop} — recognised locally, answered without spending a turn.
+   *
+   * Both entry points route through here on purpose. The CLI argument path in
+   * {@link start} calls `sendMessage` directly, so a gate placed only in the
+   * prompt loop would leave `umbra deep "hey"` paying the full cost.
+   *
+   * @param input - Trimmed user input.
+   * @returns True when the input was answered here and must not reach the agent.
+   */
+  private handledAsSmallTalk(input: string): boolean {
+    const kind = classifySmallTalk(input);
+    if (kind === null) return false;
+    this.replyToSmallTalk(kind);
+    return true;
+  }
+
+  /**
+   * Prints the local acknowledgement for one conversational message kind.
+   *
+   * The wording stays short on purpose: this is the CLI acknowledging a
+   * greeting, not the agent reasoning about one. A farewell points at `/exit`
+   * rather than closing the session, because leaving is the operator's call.
+   *
+   * @param kind - Which conversational message was recognised.
+   */
+  private replyToSmallTalk(kind: SmallTalkKind): void {
+    const lines: Record<SmallTalkKind, string> = {
+      greeting: 'Ready when you are. Describe a task, or type /help.',
+      thanks: 'Any time.',
+      farewell: 'Still here — type /exit to close the session.',
+    };
+
+    console.log('');
+    console.log(`  ${colors.primary('⬡')}  ${lines[kind]}`);
+    console.log('');
+  }
+
   private reportUnknownCommand(input: string): void {
     const near = suggestSlashCommands(this.slashCommands, input);
     console.log('');

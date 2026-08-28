@@ -52,7 +52,7 @@ interface AdrCandidate {
  * Builds or reuses a local catalog of Architecture Decision Records.
  *
  * The catalog contains only the decision identifier, title, status, and a
- * bounded context paragraph. It is written to `.agent/adr-index.json` so an
+ * bounded context paragraph. It is written to `.umbra/adr-index.json` so an
  * agent can select one relevant ADR without loading the entire history.
  *
  * @param rootDir - Project root containing `docs/adr`.
@@ -141,13 +141,37 @@ function readAdrMetadata(absolutePath: string, id: string): Pick<AdrIndexEntry, 
 
   return {
     title: title || id,
-    statusLabel: extractSectionParagraph(lines, 'Estado') || 'Sin estado',
-    context: truncate(extractSectionParagraph(lines, 'Contexto') || 'Sin contexto'),
+    statusLabel: extractSectionParagraph(lines, STATUS_HEADINGS) || 'Sin estado',
+    context: truncate(extractSectionParagraph(lines, CONTEXT_HEADINGS) || 'Sin contexto'),
   };
 }
 
-function extractSectionParagraph(lines: string[], section: string): string {
-  const sectionIndex = lines.findIndex((line) => new RegExp(`^##\\s+${section}\\s*$`, 'i').test(line));
+/**
+ * Section headings that carry an ADR's status, in every form this repository
+ * has used.
+ *
+ * The first four records were written in Spanish; every record from ADR-005 on
+ * is in English, as the project convention requires. Recognising only the
+ * Spanish heading left 16 of 20 records reporting `Sin estado` and
+ * `Sin contexto` to `list_adrs` — the agent could read their titles and nothing
+ * else, which is most of what ADR-004 exists to provide.
+ */
+const STATUS_HEADINGS = ['Estado', 'Status'];
+
+/** Section headings that carry an ADR's context. @see STATUS_HEADINGS */
+const CONTEXT_HEADINGS = ['Contexto', 'Context'];
+
+/**
+ * Reads the first paragraph under the first matching section heading.
+ *
+ * @param lines - The record split into lines.
+ * @param sections - Accepted heading spellings, tried in order.
+ * @returns The paragraph, or an empty string when no heading matches.
+ */
+function extractSectionParagraph(lines: string[], sections: string[]): string {
+  const sectionIndex = lines.findIndex((line) => sections.some(
+    (section) => new RegExp(`^##\\s+${section}\\s*$`, 'i').test(line),
+  ));
   if (sectionIndex === -1) return '';
 
   const paragraph: string[] = [];

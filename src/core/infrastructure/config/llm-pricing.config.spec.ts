@@ -3,6 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { LlmPricingConfig } from './llm-pricing.config';
 import { DEFAULT_LLM_PRICING } from './default-pricing';
+import { ModelSwitcher } from '../../config/model-switcher';
 
 describe('LlmPricingConfig', () => {
   let cwd: string;
@@ -34,6 +35,42 @@ describe('LlmPricingConfig', () => {
     for (const modelName of Object.keys(DEFAULT_LLM_PRICING)) {
       expect(config.getPricingForModel(modelName)).toBeDefined();
     }
+  });
+
+  // The test above iterates the pricing table against itself, so it passes no
+  // matter which models are missing from it. The set that matters is the one an
+  // operator can actually pick: `gemini-3.5-flash` was the starred default and
+  // had no price at all, which is how `calculateCost` came to throw and the
+  // banner came to report zero.
+  it('prices every model the /model picker offers', () => {
+    const config = new LlmPricingConfig();
+    const selectable = [
+      ...ModelSwitcher.getVertexModels(),
+      ...ModelSwitcher.getVertexClaudeModels(),
+    ].filter((preset) => preset.label !== '');
+
+    const unpriced = selectable
+      .filter((preset) => config.getPricingForModel(preset.name) === undefined)
+      .map((preset) => preset.name);
+
+    expect(unpriced).toEqual([]);
+  });
+
+  it('ships the published prices for the Gemini 3.x presets', () => {
+    const config = new LlmPricingConfig();
+
+    const flash = config.getPricingForModel('gemini-3.5-flash');
+    expect(flash!.promptTokenCost.amount).toBeCloseTo(1.5 / 1_000_000, 12);
+    expect(flash!.completionTokenCost.amount).toBeCloseTo(9 / 1_000_000, 12);
+
+    const flashLite = config.getPricingForModel('gemini-3.5-flash-lite');
+    expect(flashLite!.promptTokenCost.amount).toBeCloseTo(0.3 / 1_000_000, 12);
+    expect(flashLite!.completionTokenCost.amount).toBeCloseTo(2.5 / 1_000_000, 12);
+
+    // The picker offers the GA id; only the `-preview` id had been priced.
+    const lite31 = config.getPricingForModel('gemini-3.1-flash-lite');
+    expect(lite31!.promptTokenCost.amount).toBeCloseTo(0.25 / 1_000_000, 12);
+    expect(lite31!.completionTokenCost.amount).toBeCloseTo(1.5 / 1_000_000, 12);
   });
 
   it('ships the published global Vertex prices for enabled Claude models', () => {

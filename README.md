@@ -533,6 +533,39 @@ The precedence is: explicit `--model` > `AGENT_MODEL` > project role profile.
 The role profiles and safety limits are visible and editable in
 `.umbra/agent.config.json`; `umbra init` never overwrites an existing file.
 
+### What one turn is allowed to spend
+
+Every interactive turn is bounded on four dimensions, and stops at whichever it
+reaches first. The defaults come from measured sessions, not from taste:
+
+| Ceiling | Default | Why |
+| --- | --- | --- |
+| Tool calls | 8 | 98 of 120 recorded turns used three or fewer |
+| Tokens | 250,000 | prompt plus completion, across the whole turn |
+| Wall clock | 300 s | above the 95th percentile of recorded turns (238 s) |
+| Cost | unset | set `limits.maxCostUsd` in `.umbra/agent.config.json` to enforce it |
+
+When a ceiling is reached the turn is not aborted: the model loses its tools and
+is told which ceiling ran out, so it answers with the evidence it already has
+and states what it could not verify.
+
+The running total appears live on the wait indicator — `7 calls · 51.0k tok ·
+$0.0846` — so a turn that is going wrong can be stopped while it happens. Cost
+is shown only when the active model has a published price; an unpriced model
+shows no figure rather than a misleading `$0.00`.
+
+A greeting, a thank-you or a farewell is answered directly by the CLI with no
+model call at all. Affirmations such as `ok`, `dale` or `seguí` are deliberately
+**not** treated as small talk — they usually mean *proceed*, and answering one
+locally would refuse work you just approved.
+
+Diagnostics: set `UMBRA_BUDGET_PROBE=1` to append a shape-only record of what
+the budget middleware observes to `.umbra/telemetry/budget-probe.jsonl`. It
+stores counts and message types, never message content, and is off by default.
+
+See [ADR-019](docs/adr/ADR-019-turn-cost-is-the-bound-not-tool-calls.md) and
+[ADR-020](docs/adr/ADR-020-a-message-that-asks-for-nothing-costs-nothing.md).
+
 ### Deep Agent (`deep`) — Single Autonomous Agent
 
 Ideal for most day-to-day tasks: debugging, code analysis, single-file modifications, quick questions, and medium-complexity features.

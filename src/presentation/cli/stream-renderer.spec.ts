@@ -128,16 +128,61 @@ describe('StreamRenderer — wait indicator', () => {
       expect(writes).toHaveLength(0);
     });
 
-    it('counts tokens while writing rather than printing one dot each', () => {
+    // Renamed from "tokens" deliberately. The provider decides chunk
+    // boundaries, so this counter never measured billing units; calling them
+    // tokens next to a real token count would be two different numbers under
+    // one name.
+    it('counts stream chunks while writing rather than printing one dot each', () => {
       const renderer = new StreamRenderer('deep');
       renderer.showThinking();
       for (let i = 0; i < 40; i++) renderer.streamToken('tok ');
       jest.advanceTimersByTime(120);
 
       const text = strip(writes.join(''));
-      expect(text).toContain('40 tokens');
+      expect(text).toContain('40 chunks');
       // The old renderer emitted one '.' per token — 40 of them in a row.
       expect(text).not.toContain('.'.repeat(10));
+      renderer.clearThinking();
+    });
+
+    it('shows real spend, and prefers it over the chunk counter', () => {
+      const renderer = new StreamRenderer('deep');
+      renderer.showThinking();
+      renderer.streamToken('tok ');
+      renderer.noteTurnSpend({ toolCalls: 7, tokens: 51_000, costUsd: 0.0846 });
+      jest.advanceTimersByTime(120);
+
+      const text = strip(writes.join(''));
+      expect(text).toContain('7 calls');
+      expect(text).toContain('51.0k tok');
+      expect(text).toContain('$0.0846');
+      expect(text).not.toContain('chunks');
+      renderer.clearThinking();
+    });
+
+    // An unpriced model must show no figure rather than a false zero.
+    it('omits cost entirely when the model has no published price', () => {
+      const renderer = new StreamRenderer('deep');
+      renderer.showThinking();
+      renderer.noteTurnSpend({ toolCalls: 2, tokens: 900 });
+      jest.advanceTimersByTime(120);
+
+      const text = strip(writes.join(''));
+      expect(text).toContain('2 calls');
+      expect(text).toContain('900 tok');
+      expect(text).not.toContain('$');
+      renderer.clearThinking();
+    });
+
+    it('drops back to the chunk counter once the turn spend is reset', () => {
+      const renderer = new StreamRenderer('deep');
+      renderer.showThinking();
+      renderer.noteTurnSpend({ toolCalls: 3, tokens: 10 });
+      renderer.resetTurnSpend();
+      renderer.streamToken('a');
+      jest.advanceTimersByTime(120);
+
+      expect(strip(writes.join(''))).toContain('1 chunks');
       renderer.clearThinking();
     });
   });

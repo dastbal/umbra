@@ -19,6 +19,37 @@ describe('ADR index', () => {
     fs.rmSync(rootDir, { recursive: true, force: true });
   });
 
+  // The parser recognised only the Spanish headings the first four records
+  // used. Every record from ADR-005 on is in English, as the project convention
+  // requires, so 16 of 20 reported `Sin estado` and `Sin contexto` to
+  // `list_adrs`: the agent could read their titles and nothing else.
+  it('reads status and context from English headings as well as Spanish ones', () => {
+    fs.writeFileSync(
+      path.join(rootDir, 'docs', 'adr', 'ADR-019-turn-cost.md'),
+      '# ADR-019: A turn is bounded by what it costs\n\n## Status\n\nAccepted\n\n## Context\n\nTool execution was 1.4% of recorded elapsed time.\n\nLong body that must not be returned.\n',
+    );
+    fs.writeFileSync(
+      path.join(rootDir, 'docs', 'adr', 'ADR-002-routing.md'),
+      '# ADR-002: Model routing\n\n## Estado\n\nAceptada - 2026-08-07\n\n## Contexto\n\nRoute models by role.\n',
+    );
+
+    const entries = buildAdrIndex(rootDir).entries;
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        id: 'ADR-002',
+        statusLabel: 'Aceptada - 2026-08-07',
+        context: 'Route models by role.',
+      }),
+      expect.objectContaining({
+        id: 'ADR-019',
+        statusLabel: 'Accepted',
+        context: 'Tool execution was 1.4% of recorded elapsed time.',
+      }),
+    ]);
+    expect(entries.some((entry) => entry.statusLabel === 'Sin estado')).toBe(false);
+  });
+
   it('indexes ADR title, status, and compact context without returning bodies', () => {
     fs.writeFileSync(
       path.join(rootDir, 'docs', 'adr', 'ADR-002-routing.md'),
