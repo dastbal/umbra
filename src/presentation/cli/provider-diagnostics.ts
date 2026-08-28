@@ -79,7 +79,7 @@ export function extractProviderDiagnostic(error: unknown): ProviderDiagnostic | 
  * of every file the agent read, which is not. Only the path crosses into the
  * audit record.
  *
- * @param rootDir - Workspace root; the file lands under `.agent/diagnostics/`.
+ * @param rootDir - Workspace root; the file lands under `.umbra/diagnostics/`.
  * @param auditId - Identifier that ties this file to its audit line.
  * @param diagnostic - The redacted snapshot to persist.
  * @returns The workspace-relative path written, or `undefined` on failure.

@@ -10,7 +10,7 @@ import { agentPath } from '../config/agent-directory';
  * * @example
  * ```ts
  * const backend = new SafeFilesystemBackend("/usuario/proyectos/mi-app");
- * // Ahora cada write_file o edit_file creará un backup en .agent/backups
+ * // Ahora cada write_file o edit_file creará un backup en .umbra/backups
  * ```
  */
 export class SafeFilesystemBackend extends FilesystemBackend {
@@ -93,7 +93,7 @@ export class SafeFilesystemBackend extends FilesystemBackend {
 
         fs.copyFileSync(realPath, backupPath);
         console.log(
-          `💾 [SafeBackend] Backup creado: .agent/backups/${path.basename(backupPath)}`,
+          `💾 [SafeBackend] Backup creado: .umbra/backups/${path.basename(backupPath)}`,
         );
       }
     } catch (error) {

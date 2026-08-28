@@ -36,7 +36,7 @@ export const listFilesTool = tool(
  * Lists compact ADR metadata so an agent can choose one decision record to read.
  *
  * This avoids injecting or repeatedly reading the full ADR history during
- * ordinary coding tasks. The persistent catalog remains local to `.agent/`.
+ * ordinary coding tasks. The persistent catalog remains local to `.umbra/`.
  */
 export const listAdrsTool = tool(
   async ({ refresh }) => {

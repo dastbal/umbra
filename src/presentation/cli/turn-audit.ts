@@ -58,11 +58,11 @@ export interface TurnAuditInput {
 
 /**
  * Captures only operational metadata for one turn and writes it as JSONL below
- * `.agent/telemetry/`. Prompts, tool arguments, responses, credentials, and
+ * `.umbra/telemetry/`. Prompts, tool arguments, responses, credentials, and
  * provider payloads are intentionally excluded.
  *
  * That exclusion is why a rejected provider request is *not* recorded here. When
- * one is captured it goes to its own file under `.agent/diagnostics/`, and this
+ * one is captured it goes to its own file under `.umbra/diagnostics/`, and this
  * record carries only its path in `providerDiagnosticFile` — so the JSONL stays
  * safe to hand to someone else, which is what `umbra metrics` reads it as.
  */

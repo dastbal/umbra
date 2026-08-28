@@ -97,11 +97,12 @@ export function parseAgentConfig(input: unknown): AgentConfig {
 /**
  * Loads the optional project-local runtime policy.
  *
- * The file intentionally lives under `.agent/`, which is ignored because it can
- * contain local model choices, budgets, and other machine-specific settings.
+ * The file intentionally lives under `.umbra/`, which `ensureAgentStateIgnored`
+ * keeps out of git because it can contain local model choices, budgets, and
+ * other machine-specific settings.
  * Missing configuration is safe and returns the same defaults as `parseAgentConfig({})`.
  *
- * @param rootDir - Project root containing the `.agent` directory.
+ * @param rootDir - Project root containing the `.umbra` directory.
  * @returns A validated, fully defaulted runtime policy.
  * @throws {Error} When the file contains invalid JSON or violates the policy schema.
  */
@@ -126,7 +127,7 @@ export function loadAgentConfig(rootDir: string): AgentConfig {
  * This operation is intentionally idempotent and never overwrites an existing
  * policy. It is the implementation behind the `umbra init` command.
  *
- * @param rootDir - Project root that receives the `.agent` directory.
+ * @param rootDir - Project root that receives the `.umbra` directory.
  * @returns Path, creation status, and validated configuration.
  */
 export function ensureAgentConfig(rootDir: string): AgentConfigInitResult {
