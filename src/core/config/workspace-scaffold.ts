@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AGENT_DIR_NAME, LEGACY_AGENT_DIR_NAME } from './agent-directory';
@@ -24,6 +25,12 @@ export interface WorkspaceScaffoldResult {
   createdAdrIndex: boolean;
   /** Ignore rules added to the project's `.gitignore` by this invocation. */
   addedIgnoreRules: string[];
+  /**
+   * Agent state git already tracks, which no ignore rule can stop.
+   *
+   * Untracking is the operator's call — see {@link findTrackedAgentState}.
+   */
+  trackedAgentState: string[];
 }
 
 /**
@@ -100,6 +107,51 @@ export function ensureAgentStateIgnored(rootDir: string): string[] {
   }
 
   return [...missing];
+}
+
+/**
+ * Reports agent state that git already tracks, which an ignore rule cannot stop.
+ *
+ * `.gitignore` only governs **untracked** files. A project that committed its
+ * workspace before the ignore rules existed keeps pushing it on every commit,
+ * and the new rules are silently powerless — session databases and the RAG index
+ * would keep travelling to the remote.
+ *
+ * Detection only. Untracking is `git rm --cached`, which rewrites the index and,
+ * once committed, deletes the file for every teammate who pulls. That is the
+ * operator's decision, not an installer's.
+ *
+ * @param rootDir - Absolute path of the target project.
+ * @returns Tracked paths matching the agent-state rules; empty when none, when
+ *   the project is not a git repository, or when git is unavailable.
+ */
+export function findTrackedAgentState(rootDir: string): string[] {
+  let tracked = '';
+  try {
+    tracked = execFileSync('git', ['ls-files'], {
+      cwd: rootDir,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    // Not a git repository, or git is not installed. Nothing to warn about.
+    return [];
+  }
+
+  const bareNames = AGENT_LOCAL_STATE_IGNORES.map((rule) => rule.replace(/\/$/, ''));
+
+  return tracked
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) =>
+      bareNames.some(
+        (name) =>
+          // A directory rule matches everything beneath it; a file rule matches
+          // the file at any depth, which is how git reads a slash-less pattern.
+          line === name || line.startsWith(`${name}/`) || line.endsWith(`/${name}`),
+      ),
+    );
 }
 
 /**
@@ -190,6 +242,7 @@ export function ensureWorkspaceSkills(
     preservedSkills: preservedSkills.sort(),
     createdAdrIndex,
     addedIgnoreRules: ensureAgentStateIgnored(resolvedRoot),
+    trackedAgentState: findTrackedAgentState(resolvedRoot),
   };
 }
 

@@ -403,6 +403,22 @@ program
           `Local agent state ignored: ${scaffold.addedIgnoreRules.join(', ')}`,
         );
       }
+      if (scaffold.trackedAgentState.length > 0) {
+        // An ignore rule is powerless over a file git already tracks, so this
+        // state keeps being pushed on every commit until it is untracked.
+        // Untracking deletes it for teammates who pull, so it is not done here.
+        const sample = scaffold.trackedAgentState.slice(0, 5);
+        const rest = scaffold.trackedAgentState.length - sample.length;
+        log.error(
+          `${scaffold.trackedAgentState.length} agent-state file(s) are already tracked by git; ` +
+            `the ignore rules cannot stop them: ${sample.join(', ')}${rest > 0 ? `, +${rest} more` : ''}`,
+        );
+        log.sys(
+          'Untrack them when you are ready (they stay on disk, and teammates lose them on pull): ' +
+            'git rm --cached -r ' +
+            sample.join(' '),
+        );
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       log.error(

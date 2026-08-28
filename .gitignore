@@ -8,6 +8,7 @@ dist/
 # --- Persistencia y Estado del Agente ---
 # No queremos subir tu base de datos local ni tus memorias
 .agent/
+.umbra/
 history.db
 history.db-journal
 /memories/

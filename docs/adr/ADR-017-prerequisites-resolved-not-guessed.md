@@ -133,6 +133,32 @@ rewriting nothing.
 them into the consumer project precisely so they are versioned there; ignoring
 them would quietly undo an accepted decision.
 
+### Amendment: an ignore rule cannot stop a file git already tracks
+
+On 2026-08-28, David pointed out what the decision above quietly assumed:
+*"pero ignorarlo en github después se sube"*. He is right, and the gap is real.
+
+`.gitignore` governs **untracked** files only. A project that committed its
+workspace under an older Umbra keeps pushing it on every commit, and the rules
+added here are silently powerless — session databases and the RAG index keep
+travelling to the remote while the operator believes they are excluded.
+
+`findTrackedAgentState` runs `git ls-files` and reports any tracked path matching
+the agent-state rules. `umbra init` prints the count, up to five paths, and the
+exact `git rm --cached -r` command.
+
+It **reports and does not act**. Untracking rewrites the index, and once
+committed it deletes the file for every teammate who pulls. That is the
+operator's call, not an installer's. A project that is not a git repository, or a
+machine without git, yields nothing rather than an error.
+
+Verified end to end: a project that had committed `.agent/index.meta.json` and
+`deep_agent_history.db` was warned by `umbra init`, with both paths named and the
+untrack command printed, while the files stayed tracked until the operator acts.
+
+The guides and decision records are never reported — they are meant to be
+tracked, which is the same boundary the ignore list respects.
+
 ## Alternatives considered
 
 ### Have `umbra deep` offer to run the login when a prerequisite is missing
