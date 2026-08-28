@@ -48,6 +48,7 @@ import {
   agentPath,
   migrateLegacyAgentDirectory,
 } from '../config/agent-directory';
+import { ensureAgentStateIgnored } from '../config/workspace-scaffold';
 
 /** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
 const REPLACED_BUILTIN_TOOLS = [
@@ -347,6 +348,20 @@ export class DeepAgentFactory {
 
     const agentDir = agentPath(rootDir);
     if (!fs.existsSync(agentDir)) fs.mkdirSync(agentDir, { recursive: true });
+
+    // The ignore rules are ensured here, not only in `umbra init`.
+    //
+    // A project that had the previous directory ignored keeps a rule naming a
+    // directory that no longer exists once the migration above runs, which
+    // leaves the new one exposed. That is not hypothetical: it happened to
+    // Umbra's own repository, and a 199 MB session database reached a commit
+    // before GitHub's file-size limit rejected the push.
+    //
+    // Appending only what is missing makes this a no-op on every later start.
+    const addedRules = ensureAgentStateIgnored(rootDir);
+    if (addedRules.length > 0) {
+      interaction?.logInfo(`Added to .gitignore: ${addedRules.join(', ')}`);
+    }
 
     // 2. Register provider-specific harness profile
     //
