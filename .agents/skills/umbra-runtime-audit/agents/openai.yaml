@@ -1,0 +1,6 @@
+interface:
+  display_name: "Umbra Runtime Audit"
+  short_description: "Audita calidad, herramientas, performance y modelos de Umbra"
+  default_prompt: "Usa $umbra-runtime-audit para auditar Umbra sin modificar su funcionalidad."
+policy:
+  allow_implicit_invocation: true
