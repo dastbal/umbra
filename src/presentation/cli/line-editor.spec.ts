@@ -232,7 +232,11 @@ describe('the live palette', () => {
   it('filters as more is typed', async () => {
     const term = makeTerm();
     const pending = run(term, ['/', 'm', 'o']);
-    await new Promise((r) => setTimeout(r, 30));
+    // Wait until the final key has reached the raw-mode listener. A fixed 30ms
+    // delay races the per-key delivery on loaded Windows terminals.
+    for (let attempts = 0; attempts < 20 && !term.written().includes('You: /mo'); attempts += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
     // The last paint is what the operator is looking at.
     const lastPaint = term.written().split('You: ').pop() ?? '';
@@ -280,13 +284,24 @@ describe('the live palette', () => {
 
   });
 
-  it('repaints the palette from the prompt line without moving into prior output', async () => {
+  it('returns to the prompt row before clearing a wrapped input', async () => {
+    const term = makeTerm(20);
+    await run(term, [...'a'.repeat(40), 'b', KEY.ctrlC]);
+
+    // The 41-character buffer starts after `You: ` and leaves the cursor on
+    // row 2. The next key must travel back to row 0 before erasing the prior
+    // paint; otherwise every earlier physical row remains on screen and the
+    // full buffer is visibly duplicated.
+    expect(term.written()).toContain('\x1b[2A\r\x1b[0J');
+  });
+
+  it('repaints the palette from the prompt row without moving into prior output', async () => {
     const term = makeTerm();
     const pending = run(term, ['/', 'm', KEY.down]);
     await new Promise((r) => setTimeout(r, 30));
 
-    // `paint` leaves the cursor on `You:`. Moving up before clearing would
-    // redraw over earlier terminal output and make the viewport jump upward.
+    // A one-line input leaves the cursor on the prompt row, so no cursor-up
+    // escape is needed before clearing the palette.
     expect(term.written()).not.toMatch(/\x1b\[\d+A\r\x1b\[0J/);
 
     term.send(KEY.ctrlC);
