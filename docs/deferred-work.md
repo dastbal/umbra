@@ -138,7 +138,7 @@ exercised, because the tool was never callable. Treat that limit as unproven.
 >
 > The fix was not the one planned here. Step 2 expected a per-subagent exclusion
 > middleware; what happened instead is that this project stopped letting
->  build the graphs at all.  compiles the three
+> `deepagents` build the graphs at all. `subagent-registry.ts` compiles the three
 > delegates from the same specifications that already described them, so **a
 > delegate holds exactly the tools its specification declares** and the list is
 > no longer assembled in a second, unverified place.
