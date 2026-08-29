@@ -21,6 +21,8 @@ import {
   type DelegationLedger,
 } from './delegation/delegation-registry';
 import { classifyDelegationOutcome } from './delegation/delegation-outcome';
+import { readPromotion } from './lane-registry';
+import { readLane } from './route-lane';
 
 const ROUTE_MARKER = '[ORCHESTRATION_ROUTE';
 
@@ -92,7 +94,11 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       // when the guard runs, so the in-flight id must be excluded — otherwise the
       // guard counts the delegation it is authorizing as a previous one.
       const decision = evaluateDelegation(
-        readDelegationHistory(request.state.messages, request.toolCall.id),
+        readDelegationHistory(
+          request.state.messages,
+          request.toolCall.id,
+          readThreadId(request),
+        ),
         subagent,
         limits.maxRetries,
       );
@@ -176,13 +182,18 @@ export function createOrchestrationGuard(limits: GuardLimits) {
 export function readDelegationHistory(
   messages: readonly unknown[],
   inFlightToolCallId?: string,
+  threadId?: string,
 ): DelegationHistory {
   const currentTurnMessages = messages.slice(findCurrentTurnStart(messages));
   const text = currentTurnMessages.map(toText).join('\n');
   const artifacts = readDelegationArtifacts(currentTurnMessages, inFlightToolCallId);
 
   return {
-    routeRequiresImplementation: !text.includes('implementation=false]'),
+    // The lane the envelope declared, unless the turn has since been raised —
+    // triage sorts an unrecognised request down, and escalate_route is how one
+    // that turned out to need a change says so.
+    routeRequiresImplementation:
+      (readPromotion(threadId, readTurnKey(messages))?.lane ?? readLane(text)) === 'change',
     researcherCalls: artifacts.researcherCalls,
     coderCalls: artifacts.coderCalls,
     verifierResults: artifacts.verifierResults,
@@ -241,6 +252,14 @@ export function describeSubagentRejection(args: unknown): string {
 export function readTurnKey(messages: readonly unknown[]): string {
   const humanMessages = messages.filter(isHumanMessage).length;
   return `${findCurrentTurnStart(messages)}:${humanMessages}`;
+}
+
+/** Reads the thread a request belongs to, when it has one. */
+function readThreadId(request: unknown): string | undefined {
+  const configurable = (request as { runtime?: { configurable?: Record<string, unknown> } })
+    .runtime?.configurable;
+  const threadId = configurable?.['thread_id'];
+  return typeof threadId === 'string' ? threadId : undefined;
 }
 
 function openTurnForRequest(request: unknown, totalBudget: number): DelegationLedger | undefined {

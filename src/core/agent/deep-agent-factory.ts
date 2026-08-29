@@ -41,6 +41,7 @@ import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import { buildSubagentGraphs } from './delegation/subagent-registry';
 import { createDelegateTool } from './delegation/delegate.tool';
+import { escalateRouteTool } from '../tools/interaction/escalate-route.tool';
 import {
   DEFAULT_INTERACTIVE_TOOL_BUDGET,
   createIterationBudgetMiddleware,
@@ -324,6 +325,7 @@ export class DeepAgentFactory {
         refreshIndexTool,
         integrityCheckTool,
         delegateTool,
+        escalateRouteTool,
       ] as any[],
     });
   }
@@ -1070,7 +1072,12 @@ You do NOT implement code yourself — you delegate to the right specialist.
 📋 MANDATORY ORCHESTRATION PROTOCOL:
 Every interactive request carries a trusted \`[ORCHESTRATION_ROUTE ...]\` envelope generated
 before it enters this graph. Obey it exactly:
-- When \`implementation=false\`, do not call a subagent or write. Answer using read-only tools.
+- \`lane=answer\` — the message asked for no work. Answer it and call nothing.
+- \`lane=read\` — you may read, and you may not change files. If reading shows the request
+  genuinely needs a code change, call \`escalate_route\` once with the reason, then delegate.
+  The route is sorted before anyone has read anything, so it starts low on purpose; raising
+  it is expected, not a failure.
+- \`lane=change\` — the full route applies.
 - When \`implementation=true\`, follow the required route in its exact order. The Coder is the
   only writer and uses its quality-oriented model profile.
 - Call the registered task identifiers exactly as \`researcher\`, \`coder\`, and \`verifier\`

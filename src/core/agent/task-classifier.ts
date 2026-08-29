@@ -1,4 +1,5 @@
 import type { TaskComplexity } from './contracts';
+import { triage, type RouteLane } from './route-lane';
 
 /** Subagents that the interactive orchestrator may invoke for one user turn. */
 export type OrchestrationSubagent = 'researcher' | 'coder' | 'verifier';
@@ -10,6 +11,13 @@ export type OrchestrationSubagent = 'researcher' | 'coder' | 'verifier';
  * every request that can change code.
  */
 export interface OrchestrationRoute {
+  /**
+   * The lane this turn starts in, sorted by what being wrong in it costs.
+   *
+   * `requiresImplementation` is kept alongside it and derived from it, so a
+   * checkpoint written by an earlier version still reads correctly.
+   */
+  lane: RouteLane;
   /** Size of the requested work. */
   complexity: TaskComplexity;
   /** Whether the request can change project files. */
@@ -50,14 +58,15 @@ const LARGE_PATTERN = /\b(module|feature|architecture|major|migration|database|p
  * @returns The safe route the Supervisor must follow.
  */
 export function classifyOrchestrationTask(request: string): OrchestrationRoute {
-  const isImplementation = IMPLEMENTATION_PATTERN.test(request);
+  const lane = triage(request);
 
-  if (!isImplementation && (isQuestion(request) || READ_ONLY_PATTERN.test(request) || classifySmallTalk(request) !== null || asksForNothing(request))) {
-    return { complexity: 'small', requiresImplementation: false, subagents: [] };
+  if (lane !== 'change') {
+    return { lane, complexity: 'small', requiresImplementation: false, subagents: [] };
   }
 
   if (LARGE_PATTERN.test(request)) {
     return {
+      lane,
       complexity: 'large',
       requiresImplementation: true,
       subagents: ['researcher', 'coder', 'verifier'],
@@ -65,6 +74,7 @@ export function classifyOrchestrationTask(request: string): OrchestrationRoute {
   }
 
   return {
+    lane,
     complexity: 'medium',
     requiresImplementation: true,
     subagents: ['researcher', 'coder', 'verifier'],
@@ -85,7 +95,7 @@ export function formatOrchestrationRoute(route: OrchestrationRoute, request: str
     ? 'none (answer with read-only tools only)'
     : route.subagents.join(' -> ');
 
-  return `[ORCHESTRATION_ROUTE trusted=true complexity=${route.complexity} implementation=${route.requiresImplementation}]
+  return `[ORCHESTRATION_ROUTE trusted=true complexity=${route.complexity} lane=${route.lane} implementation=${route.requiresImplementation}]
 Required route: ${subagents}.
 User request (preserve intent exactly):
 ${request}`;
@@ -182,4 +192,29 @@ export function classifySmallTalk(request: string): SmallTalkKind | null {
   if (THANKS_PATTERN.test(request)) return 'thanks';
   if (FAREWELL_PATTERN.test(request)) return 'farewell';
   return null;
+}
+
+/**
+ * Reports an unmistakable request to change something.
+ *
+ * Exported so {@link RouteLane} triage can use it as a fast path. Since triage
+ * sorts anything unrecognised **down**, a gap in this vocabulary costs one extra
+ * tool call rather than a wrong route — which is the whole point of moving the
+ * decision out of the word list.
+ *
+ * @param request - Raw interactive user request.
+ * @returns Whether the message plainly asks for a change.
+ */
+export function isImplementationRequest(request: string): boolean {
+  return IMPLEMENTATION_PATTERN.test(request);
+}
+
+/**
+ * Reports a request phrased as observation rather than change.
+ *
+ * @param request - Raw interactive user request.
+ * @returns Whether the message asks to be told something.
+ */
+export function isReadOnlyRequest(request: string): boolean {
+  return READ_ONLY_PATTERN.test(request);
 }

@@ -136,16 +136,26 @@ describe('a message that asks for nothing is not routed as work', () => {
     }
   });
 
-  it('keeps a real request on the implementation route', () => {
+  it('keeps an unmistakable request on the implementation route', () => {
     for (const request of [
       'crear un modulo de calculadora',
       'crea un modulo',
       'agregar un endpoint',
       'arreglar el bug del login',
-      'el login esta roto',
     ]) {
       expect(classifyOrchestrationTask(request).requiresImplementation).toBe(true);
     }
+  });
+
+  it('starts a request it cannot recognise in the reading lane', () => {
+    // Superseded on purpose. This assertion used to demand the implementation
+    // route for 'el login esta roto', because at the time every unrecognised
+    // message went there and widening the vocabulary was the only repair
+    // available. Triage inverted that: an unrecognised message sorts down, and
+    // an agent that finds it must write asks to be raised, with a reason. The
+    // cost of a gap in the vocabulary is now one promotion, not a wrong route.
+    expect(classifyOrchestrationTask('el login esta roto').lane).toBe('read');
+    expect(classifyOrchestrationTask('el login esta roto').requiresImplementation).toBe(false);
   });
 
   it('recognises a Spanish infinitive, which the vocabulary never matched', () => {
@@ -158,6 +168,8 @@ describe('a message that asks for nothing is not routed as work', () => {
   });
 
   it('does not mistake a message that names a file for small talk', () => {
-    expect(classifyOrchestrationTask('src/app.ts').requiresImplementation).toBe(true);
+    // It is not conversation, so it may use tools. It is not an instruction to
+    // change anything either, so it does not start where writing is allowed.
+    expect(classifyOrchestrationTask('src/app.ts').lane).toBe('read');
   });
 });
