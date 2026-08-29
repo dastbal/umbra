@@ -437,6 +437,10 @@ export class ChatSession {
       // The stream never reports a suspension, so ask the graph itself before
       // handing the prompt back. See settlePendingInterrupts.
       await this.settlePendingInterrupts();
+      const turnTokens = spend.inputTokens + spend.outputTokens;
+      const turnCost = this.costOf(spend);
+      audit.recordSpend(turnTokens, turnCost);
+      this.renderer.showTurnSpend?.({ toolCalls: spend.toolCalls, tokens: turnTokens, costUsd: turnCost });
 
       if (shouldRetryEmptyTurn({ hasTextOutput, hasToolActivity, retryCount })) {
         audit.record('empty_response_retry');

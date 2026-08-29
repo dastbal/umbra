@@ -223,3 +223,47 @@ describe('StreamRenderer — wait indicator', () => {
     });
   });
 });
+
+describe('showTurnSpend', () => {
+  /** Captures what the renderer wrote to stdout. */
+  function captured(spend: { toolCalls: number; tokens: number; costUsd?: number }): string {
+    const written: string[] = [];
+    const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+
+    try {
+      new StreamRenderer('orchestrate').showTurnSpend(spend);
+    } finally {
+      write.mockRestore();
+    }
+
+    return written.join('');
+  }
+
+  it('leaves the price on screen after the turn ends', () => {
+    // The wait indicator is transient by contract, so the counter it carried
+    // was erased exactly when the operator could read it. Fast turns made that
+    // total: the cheaper the work became, the more completely its price
+    // disappeared.
+    const line = captured({ toolCalls: 3, tokens: 12_400, costUsd: 0.0041 });
+
+    expect(line).toContain('3 calls');
+    expect(line).toContain('12.4k tok');
+    expect(line).toContain('$0.0041');
+  });
+
+  it('omits the cost for an unpriced model instead of printing zero', () => {
+    const line = captured({ toolCalls: 1, tokens: 900 });
+
+    expect(line).toContain('1 call');
+    expect(line).not.toContain('$');
+  });
+
+  it('says nothing for a turn that spent nothing', () => {
+    // A greeting answered locally has no price to report, and a line reading
+    // "0 calls" on every hello is noise.
+    expect(captured({ toolCalls: 0, tokens: 0 })).toBe('');
+  });
+});

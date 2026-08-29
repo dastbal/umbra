@@ -41,6 +41,18 @@ export interface TurnAuditRecord {
   tools: string[];
   toolDurationsMs: Record<string, number[]>;
   textOutput: boolean;
+  /**
+   * Prompt plus completion tokens observed for the turn, when the provider
+   * reported them. Absent rather than zero when it did not: a recorded zero
+   * cannot be told apart from a turn that genuinely spent nothing.
+   */
+  tokens?: number;
+  /**
+   * Turn cost in USD, when the model has a published price. Omitted for an
+   * unpriced model, because a stored 0.00 is what made cost tracking report
+   * nothing for the starred default (ADR-019).
+   */
+  costUsd?: number;
   outcome: TurnAuditOutcome;
   errorCategory?: 'recursion_limit' | 'provider_400' | 'model_output' | 'other';
   /**
@@ -80,6 +92,8 @@ export class TurnAudit {
   private readonly toolStartTimes = new Map<string, number>();
   private readonly toolDurationsMs: Record<string, number[]> = {};
   private textOutput = false;
+  private tokens?: number;
+  private costUsd?: number;
   private recorded = false;
 
   /** @param input - Session-safe context for one interactive turn. */
@@ -132,6 +146,21 @@ export class TurnAudit {
    * context, a redacted snapshot is written to its own file and only the path
    * appears in this record.
    */
+  /**
+   * Records what the turn spent, so the price survives the screen.
+   *
+   * Until now the JSONL held tool calls and elapsed time and no cost at all, so
+   * a day of work could not be priced even with the file in hand. The counter
+   * that did exist lived on the wait indicator and was erased with it.
+   *
+   * @param tokens - Prompt plus completion tokens observed.
+   * @param costUsd - Turn cost, or undefined for an unpriced model.
+   */
+  public recordSpend(tokens: number, costUsd?: number): void {
+    if (tokens > 0) this.tokens = tokens;
+    if (costUsd !== undefined) this.costUsd = costUsd;
+  }
+
   public record(outcome: TurnAuditOutcome, errorMessage?: string, error?: unknown): void {
     if (this.recorded) return;
     this.recorded = true;
@@ -155,6 +184,8 @@ export class TurnAudit {
       tools: [...this.tools],
       toolDurationsMs: this.toolDurationsMs,
       textOutput: this.textOutput,
+      ...(this.tokens === undefined ? {} : { tokens: this.tokens }),
+      ...(this.costUsd === undefined ? {} : { costUsd: this.costUsd }),
       outcome,
       ...(errorMessage ? { errorCategory: classifyError(errorMessage) } : {}),
       ...(diagnosticFile ? { providerDiagnosticFile: diagnosticFile } : {}),

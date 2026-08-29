@@ -409,6 +409,36 @@ export class StreamRenderer {
   }
 
   /**
+   * Prints what the finished turn cost, on a line that stays.
+   *
+   * ## Why the wait indicator was not enough
+   *
+   * `noteTurnSpend` paints the counter onto the wait indicator, and the wait
+   * indicator is transient by contract: it is erased the moment an answer
+   * arrives. So the cost of a turn was visible only while the operator was
+   * waiting for it, and vanished exactly when they could read it.
+   *
+   * That went unnoticed while turns were slow. Then the conversation gate and
+   * the routing lanes made them fast, and a fast turn barely spins — the
+   * cheaper the work became, the more completely its price disappeared. The
+   * operator asked where the token counter had gone; it had not gone anywhere,
+   * it had never been anywhere durable.
+   *
+   * @param spend - Tool calls, tokens and USD observed for the turn.
+   */
+  public showTurnSpend(spend: { toolCalls: number; tokens: number; costUsd?: number }): void {
+    if (spend.toolCalls === 0 && spend.tokens === 0) return;
+
+    const parts = [`${spend.toolCalls} call${spend.toolCalls === 1 ? '' : 's'}`];
+    if (spend.tokens > 0) parts.push(`${formatTokens(spend.tokens)} tok`);
+    // Omitted rather than shown as zero when the model has no published price:
+    // a counter reading $0.0000 for a real spend is the failure this started from.
+    if (spend.costUsd !== undefined) parts.push(`$${spend.costUsd.toFixed(4)}`);
+
+    process.stdout.write(colors.dim(`  ↳ ${parts.join(' · ')}\n`));
+  }
+
+  /**
    * Reports what the current turn has spent, for the live indicator.
    *
    * A recorded turn ran 108 seconds on the word "hey" and another ran 921
