@@ -31,6 +31,8 @@ import { isInteractive, selectOutcome, type SelectChoice } from './interactive-s
 import { askText } from './prompts';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
 import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
+import { readVisibleText } from './visible-text';
+import { diagnoseOffline } from './offline-diagnosis';
 
 import { recordBudgetProbe } from '../../core/agent/budget-probe';
 import {
@@ -365,9 +367,7 @@ export class ChatSession {
           // ── Token streaming ──────────────────────────────────────────────
           case 'on_chat_model_stream': {
             const chunk = event.data?.chunk;
-            const token = typeof chunk?.content === 'string'
-              ? chunk.content
-              : (chunk?.content?.[0]?.text ?? '');
+            const token = readVisibleText(chunk?.content);
             if (token) {
               hasTextOutput = true;
               audit.markTextOutput();
@@ -742,12 +742,10 @@ export class ChatSession {
 
     for await (const event of resumeStream) {
       if (event.event === 'on_chat_model_stream') {
-        // Use the same extraction logic as sendMessage() to handle Gemini
-        // array-of-parts format (chunk.content can be string or [{text:'...'}])
+        // One extraction for both stream loops: reasoning blocks stay hidden and
+        // every text block is kept, not only the first.
         const chunk = event.data?.chunk;
-        const token = typeof chunk?.content === 'string'
-          ? chunk.content
-          : (chunk?.content?.[0]?.text ?? '');
+        const token = readVisibleText(chunk?.content);
         if (token) this.renderer.streamToken(token);
       } else if (event.event === 'on_tool_start') {
         this.renderer.showToolStart(event.name, event.data?.input ?? {});
