@@ -1,6 +1,6 @@
 {
   "name": "@dastbal/umbra",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "Umbra is a secure autonomous engineering orchestrator for NestJS projects.",
   "author": "David Balladares",
   "license": "MIT",
