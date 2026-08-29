@@ -13,19 +13,14 @@ import {
   isVertexAnthropicModel,
 } from '../config/model-resolver';
 import {
-  askCodebaseTool,
-  executeTestsTool,
-  integrityCheckTool,
-  refreshIndexTool,
-  safeWriteFileTool,
-  safeReadFileTool,
-  deleteFileTool,
-  listFilesTool,
-  listAdrsTool,
-} from '../tools';
-import { createResearcherSubAgent } from '../subagents/researcher.subagent';
-import { createCoderSubAgent } from '../subagents/coder.subagent';
-import { createVerifierSubAgent } from '../subagents/verifier.subagent';
+  createResearcherRoleProfile,
+} from '../subagents/researcher.subagent';
+import {
+  createCoderRoleProfile,
+} from '../subagents/coder.subagent';
+import {
+  createVerifierRoleProfile,
+} from '../subagents/verifier.subagent';
 import {
   AgentConfig,
   AgentConfigInput,
@@ -60,6 +55,17 @@ import {
   migrateLegacyAgentDirectory,
 } from '../config/agent-directory';
 import { ensureAgentStateIgnored } from '../config/workspace-scaffold';
+import {
+  KERNEL_API_VERSION,
+  buildKernelInstructions,
+  buildSubagentFromProfile,
+  registerAgentKernelTelemetry,
+  resolveCapabilityTools,
+  validateRoleExtensions,
+  type AgentRoleExtension,
+  type AgentRuntimeContext,
+  type RoleProfile,
+} from './agent-kernel';
 
 /** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
 const REPLACED_BUILTIN_TOOLS = [
@@ -126,6 +132,13 @@ export interface DeepAgentFactoryConfig {
    * is loaded; when both are absent, safe defaults are used.
    */
   agentConfig?: AgentConfigInput;
+
+  /**
+   * Explicit, code-owned advisory roles supplied by an application or a future
+   * role library. They are validated against the AgentKernel before startup;
+   * configuration files and automatic plugin discovery are deliberately absent.
+   */
+  roleExtensions?: readonly AgentRoleExtension[];
 }
 
 /**
@@ -191,10 +204,11 @@ export class DeepAgentFactory {
 
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir);
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'simple', agentConfig);
+    const profile = DeepAgentFactory.createDeepRoleProfile();
 
     const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
 
-    return createDeepAgent({
+    const agent = createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
@@ -202,20 +216,9 @@ export class DeepAgentFactory {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
       })],
-      tools: [                           // ADR-002
-        safeWriteFileTool,
-        safeReadFileTool,
-        // Gated by the security policy: every delete raises a HITL interrupt
-        // that ChatSession renders for the operator (ADR-011).
-        deleteFileTool,
-        listFilesTool,
-        listAdrsTool,
-        askCodebaseTool,
-        refreshIndexTool,
-        integrityCheckTool,
-        executeTestsTool,
-      ] as any[],
+      tools: resolveCapabilityTools(profile.capabilities) as any[],
     });
+    return registerAgentKernelTelemetry(agent, [profile]);
   }
 
   /**
@@ -251,7 +254,7 @@ export class DeepAgentFactory {
     );
     const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
 
-    return createDeepAgent({
+    const agent = createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       responseFormat: groundedAnalysisSchema as any, // ADR-002: dual Zod package boundary
@@ -262,6 +265,7 @@ export class DeepAgentFactory {
       // modes retain focused reads and RAG for interactive work.
       tools: [] as any[],
     });
+    return agent;
   }
 
   /**
@@ -297,8 +301,7 @@ export class DeepAgentFactory {
     // must reach the provider (ADR-013).
     await DeepAgentFactory.bootstrap(rootDir, model, interaction, false);
 
-    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
-    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator', agentConfig);
+    const runtimeContext: AgentRuntimeContext = { rootDir, agentConfig };
 
     // Same Ollama adapter pattern as create() — pass BaseChatModel for Ollama,
     // string for Vertex AI.
@@ -307,17 +310,41 @@ export class DeepAgentFactory {
     // The delegates are compiled here rather than handed to deepagents, because
     // the delegation tool's schema is the mandate and a tool with our schema has
     // to own its dispatch (ADR-021).
-    const subagentSpecs = {
-      researcher: createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
-      coder: createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
-      verifier: createVerifierSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
-    };
+    const builtInProfiles: RoleProfile[] = [
+      createResearcherRoleProfile(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
+      createCoderRoleProfile(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
+      createVerifierRoleProfile(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
+    ];
+    const roleExtensions = config.roleExtensions ?? [];
+    validateRoleExtensions(roleExtensions, builtInProfiles.map((profile) => profile.id));
+    const subagentProfiles = [
+      ...builtInProfiles,
+      ...roleExtensions.flatMap((extension) => extension.roles),
+    ];
+    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(
+      rootDir,
+      'orchestrator',
+      agentConfig,
+      '',
+      subagentProfiles.filter((profile) => profile.workflowRole === 'advisory'),
+    );
+    const subagentSpecs = Object.fromEntries(
+      subagentProfiles.map((profile) => [
+        profile.id,
+        buildSubagentFromProfile(profile, runtimeContext),
+      ]),
+    );
     const delegateTool = createDelegateTool(
       buildSubagentGraphs(subagentSpecs),
       buildReadbackGraphs(subagentSpecs),
     );
+    const supervisorProfile = DeepAgentFactory.createSupervisorRoleProfile();
+    const advisoryRoleIds = subagentProfiles
+      .filter((profile) => profile.workflowRole === 'advisory')
+      .map((profile) => profile.id);
 
-    return createDeepAgent({
+    const agent = createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
@@ -334,16 +361,15 @@ export class DeepAgentFactory {
         createOrchestrationGuard({
           maxRetries: agentConfig.limits.maxRetries,
           maxAgentTurns: agentConfig.limits.maxAgentTurns,
+          advisoryRoleIds,
         }),
       ] as any[],
-      tools: [                           // ADR-002
-        askCodebaseTool,
-        refreshIndexTool,
-        integrityCheckTool,
+      tools: resolveCapabilityTools(supervisorProfile.capabilities, {
         delegateTool,
         escalateRouteTool,
-      ] as any[],
+      }) as any[],
     });
+    return registerAgentKernelTelemetry(agent, [supervisorProfile, ...subagentProfiles]);
   }
 
   // ── Private Helpers ────────────────────────────────────────────────────────
@@ -484,6 +510,40 @@ export class DeepAgentFactory {
     input?: AgentConfigInput,
   ): AgentConfig {
     return input === undefined ? loadAgentConfig(rootDir) : parseAgentConfig(input);
+  }
+
+  /** The direct generalist's role profile; its task-specific prompt stays in this factory. */
+  private static createDeepRoleProfile(): RoleProfile {
+    return {
+      id: 'deep',
+      displayName: 'Deep',
+      description: 'Resolves direct engineering tasks without delegating to specialists.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'deep',
+      rolePrompt: 'Resolve the assigned task directly.',
+      capabilities: [
+        'write_code',
+        'delete_files',
+        'read_code',
+        'read_adrs',
+        'search_codebase',
+        'run_tests',
+        'verify_integrity',
+      ],
+    };
+  }
+
+  /** The coordinator's role profile; it receives delegation but no write capability. */
+  private static createSupervisorRoleProfile(): RoleProfile {
+    return {
+      id: 'supervisor',
+      displayName: 'Supervisor',
+      description: 'Coordinates specialist agents and reports their verified result.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'supervisor',
+      rolePrompt: 'Coordinate specialist agents without implementing code yourself.',
+      capabilities: ['search_codebase', 'verify_integrity', 'delegate', 'escalate_route'],
+    };
   }
 
   /**
@@ -898,11 +958,14 @@ export class DeepAgentFactory {
     type: 'simple' | 'orchestrator' | 'analysis',
     agentConfig: AgentConfig = parseAgentConfig({}),
     evidenceManifest = '',
+    advisoryRoles: readonly RoleProfile[] = [],
   ): string {
     const evidenceProtocol = buildEvidenceProtocolPrompt(
       type === 'analysis' ? 'preloaded-manifest' : 'tool-research',
     );
-    const base = `You are a Principal Software Engineer specialized in NestJS (Node.js).
+    const base = `${buildKernelInstructions({ rootDir, agentConfig })}
+
+You are a Principal Software Engineer specialized in NestJS (Node.js).
 You operate directly on the local file system of a live, real-world project at: ${rootDir}
 
 💬 CONVERSATION GATE — this takes precedence over every protocol below:
@@ -1077,6 +1140,11 @@ low-cost, and bounded; do not invent evidence that is absent from the manifest.
 ${evidenceManifest}`;
     }
 
+    const advisoryCatalog = advisoryRoles.length === 0
+      ? ''
+      : `\n\n🔎 AVAILABLE ADVISORY ROLES:\n${advisoryRoles
+        .map((role) => `- **${role.id}**: ${role.description} Read-only; it cannot replace the core lifecycle.`)
+        .join('\n')}\nUse an advisory role only for focused evidence. It never authorizes implementation.`;
 
     // Orchestrator prompt
     return base + policy + `
@@ -1150,6 +1218,6 @@ reserve is held back so you can always answer. Consequences you must handle:
 - \`ask_codebase\`: For quick questions you can answer yourself without delegating.
 - \`run_integrity_check\`: Final verification after coder finishes.
 - \`refresh_project_index\`: If RAG seems stale after coder writes files.
-- \`write_todos\`, \`delegate\`: Standard orchestration tools.`;
+- \`write_todos\`, \`delegate\`: Standard orchestration tools.${advisoryCatalog}`;
   }
 }

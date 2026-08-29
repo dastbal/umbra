@@ -14,6 +14,7 @@ jest.mock('../llm/provider', () => ({
 }));
 
 import { DeepAgentFactory } from './deep-agent-factory';
+import { KERNEL_API_VERSION } from './agent-kernel';
 
 interface DeepAgentFactoryInternals {
   registerAnthropicHarnessProfile(taskExclusions?: string[]): void;
@@ -132,5 +133,14 @@ describe('DeepAgentFactory model routing', () => {
 
     expect(prompt).toContain('Do not call list_files');
     expect(prompt).toContain('Do not load a skill');
+  });
+
+  it('puts the shared kernel before every root-agent role prompt', () => {
+    const internals = DeepAgentFactory as unknown as DeepAgentFactoryInternals;
+
+    for (const type of ['simple', 'orchestrator', 'analysis'] as const) {
+      expect(internals.buildSystemPrompt('C:\\project', type))
+        .toContain(`Umbra Agent Kernel v${KERNEL_API_VERSION}`);
+    }
   });
 });

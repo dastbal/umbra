@@ -42,9 +42,7 @@ import { log } from '../../tools/utils/logger';
  * being handed a diagnosis by us.
  */
 const delegateSchema = z.object({
-  subagent: z
-    .enum(['researcher', 'coder', 'verifier'])
-    .describe('Who carries out this delegation.'),
+  subagent: z.string().min(1).describe('Who carries out this delegation.'),
   userRequest: z
     .string()
     .describe('The request of the user, copied word for word. Never a paraphrase.'),
@@ -85,6 +83,17 @@ export type DelegateInput = z.infer<typeof delegateSchema>;
  * @returns The `delegate` tool, ready to declare on the orchestrator.
  */
 export function createDelegateTool(graphs: SubagentGraphs, readbacks?: ReadbackGraphs) {
+  const registeredRoles = Object.keys(graphs);
+  const schema = delegateSchema.superRefine((input, ctx) => {
+    if (!registeredRoles.includes(input.subagent)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['subagent'],
+        message: `Unknown subagent '${input.subagent}'. Registered roles: ${registeredRoles.join(', ')}.`,
+      });
+    }
+  });
+
   return tool(
     async (input: DelegateInput) => {
       const scope = readScope();
@@ -107,7 +116,9 @@ export function createDelegateTool(graphs: SubagentGraphs, readbacks?: ReadbackG
 
       log.sys(`delegate → ${input.subagent} (${delegationId}), ${mandate.budget.toolCalls} attempts`);
 
-      const result = await graphs[input.subagent].invoke(
+      const graph = graphs[input.subagent];
+      if (graph === undefined) return `No graph is registered for '${input.subagent}'.`;
+      const result = await graph.invoke(
         toSubagentState(parentState, order),
         getConfig(),
       );
@@ -132,7 +143,7 @@ export function createDelegateTool(graphs: SubagentGraphs, readbacks?: ReadbackG
         'Hand work to a specialist. Every field is part of the order the delegate receives: '
         + 'it cannot see this conversation, so whatever you leave out, it cannot look up. '
         + 'researcher analyzes and plans, coder implements, verifier checks.',
-      schema: delegateSchema,
+      schema,
     },
   );
 }
@@ -152,14 +163,16 @@ export function createDelegateTool(graphs: SubagentGraphs, readbacks?: ReadbackG
  */
 async function readBackTheOrder(
   readbacks: ReadbackGraphs | undefined,
-  role: DelegateInput['subagent'],
+  role: string,
   order: string,
 ): Promise<string | undefined> {
   if (!readbacks) return undefined;
 
   let readback;
   try {
-    readback = parseReadback(await readbacks[role].invoke(
+    const graph = readbacks[role];
+    if (graph === undefined) return `No readback graph is registered for '${role}'.`;
+    readback = parseReadback(await graph.invoke(
       { messages: [{ role: 'human', content: asReadbackOrder(order) }] },
       getConfig(),
     ));

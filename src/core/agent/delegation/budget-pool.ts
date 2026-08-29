@@ -1,5 +1,8 @@
 import type { GuardedSubagent } from '../orchestration-policy';
 
+/** Roles that can draw from the shared delegation pool. Advisory roles use the research share. */
+export type BudgetedRole = GuardedSubagent | 'advisory';
+
 /**
  * Share of a turn's budget granted to each role, and the share held back.
  *
@@ -102,11 +105,12 @@ export class BudgetPool {
    * @param role - Role the grant is sized for.
    * @returns Tool attempts granted; zero when only the reserve remains.
    */
-  public allocate(delegationId: DelegationId, role: GuardedSubagent): number {
+  public allocate(delegationId: DelegationId, role: BudgetedRole): number {
     const existing = this.allocations.get(delegationId);
     if (existing) return existing.granted;
 
-    const nominal = Math.max(1, Math.floor(this.total * this.split[role]));
+    const shareRole = role === 'advisory' ? 'researcher' : role;
+    const nominal = Math.max(1, Math.floor(this.total * this.split[shareRole]));
     const granted = Math.max(0, Math.min(nominal, this.available));
 
     this.available -= granted;

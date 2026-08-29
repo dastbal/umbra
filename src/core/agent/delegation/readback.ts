@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { createAgent } from 'langchain';
 import type { SubAgent } from 'deepagents';
-import type { GuardedSubagent } from '../orchestration-policy';
 import type { CompiledSubagent } from './subagent-registry';
 
 /**
@@ -82,7 +81,7 @@ export function buildReadbackGraph(spec: SubAgent): CompiledSubagent {
 }
 
 /** Readback counterparts of the three delegates. */
-export type ReadbackGraphs = Record<GuardedSubagent, CompiledSubagent>;
+export type ReadbackGraphs = Record<string, CompiledSubagent>;
 
 /**
  * Compiles a readback counterpart for each delegate.
@@ -91,13 +90,11 @@ export type ReadbackGraphs = Record<GuardedSubagent, CompiledSubagent>;
  * @returns The readback graphs.
  */
 export function buildReadbackGraphs(
-  specs: Record<GuardedSubagent, SubAgent>,
+  specs: Record<string, SubAgent>,
 ): ReadbackGraphs {
-  return {
-    researcher: buildReadbackGraph(specs.researcher),
-    coder: buildReadbackGraph(specs.coder),
-    verifier: buildReadbackGraph(specs.verifier),
-  };
+  return Object.fromEntries(
+    Object.entries(specs).map(([roleId, spec]) => [roleId, buildReadbackGraph(spec)]),
+  );
 }
 
 /** Appends the readback instruction to a rendered order. */
@@ -139,7 +136,7 @@ export function parseReadback(result: unknown): Readback | undefined {
  * @param readback - What they understood.
  * @returns The line to show.
  */
-export function renderReadback(role: GuardedSubagent, readback: Readback): string {
+export function renderReadback(role: string, readback: Readback): string {
   const bounds = readback.outOfScope.trim().toLowerCase().startsWith('nothing')
     ? ''
     : ` · fuera: ${readback.outOfScope}`;

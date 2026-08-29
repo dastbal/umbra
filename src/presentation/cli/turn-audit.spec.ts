@@ -3,6 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { TurnAudit, type TurnAuditRecord } from './turn-audit';
 import { AGENT_DIR_NAME } from '../../core/config/agent-directory';
+import { KERNEL_API_VERSION } from '../../core/agent/agent-kernel';
 
 describe('TurnAudit', () => {
   it('persists safe metrics without prompts, tool arguments, or raw errors', () => {
@@ -51,5 +52,29 @@ describe('TurnAudit', () => {
     expect(metadata.agent_audit_id).toEqual(expect.any(String));
     expect(metadata.agent_recursion_limit).toBe(50);
     expect(metadata.agent_tool_budget).toBe(8);
+  });
+
+  it('keeps kernel role metadata safe enough for local telemetry and trace correlation', () => {
+    const audit = new TurnAudit({
+      rootDir: tmpdir(),
+      mode: 'orchestrate',
+      model: 'gemini-3.5-flash',
+      threadId: 'thread',
+      recursionLimit: 50,
+      kernel: {
+        kernelVersion: KERNEL_API_VERSION,
+        roles: [{
+          kernelVersion: KERNEL_API_VERSION,
+          roleId: 'security-reviewer',
+          capabilities: ['read_code'],
+          workflowRole: 'advisory',
+        }],
+      },
+    });
+
+    expect(audit.getTraceMetadata()).toMatchObject({
+      agent_kernel_version: KERNEL_API_VERSION,
+      agent_role_ids: ['security-reviewer'],
+    });
   });
 });

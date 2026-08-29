@@ -1,6 +1,5 @@
 import { BudgetPool, type BudgetSplit, type DelegationId } from './budget-pool';
 import type { Mandate } from './mandate';
-import type { GuardedSubagent } from '../orchestration-policy';
 
 /**
  * Everything one interactive turn shares between the orchestrator and the
@@ -41,7 +40,7 @@ export interface DelegationLedger {
   /** Questions asked per delegation, counted against the mandate's allowance. */
   readonly questionsAsked: Map<DelegationId, number>;
   /** Delegations opened per role, used to mint identifiers. */
-  readonly delegationCounts: Map<GuardedSubagent, number>;
+  readonly delegationCounts: Map<string, number>;
   /**
    * The delegation currently running, or `undefined` between delegations.
    *
@@ -57,6 +56,16 @@ export interface DelegationLedger {
    * per-run association or the two delegates will spend each other's budget.
    */
   activeDelegationId?: DelegationId;
+  /**
+   * The lane this turn was raised to, and why.
+   *
+   * Recorded rather than merely applied: a turn that changed what it is allowed
+   * to do should say so in the audit trail, and the reason is what makes that
+   * trail worth reading.
+   */
+  promotedLane?: string;
+  /** Why the turn was raised. */
+  promotionReason?: string;
 }
 
 /**
@@ -136,7 +145,7 @@ export function currentTurn(threadId: string | undefined): DelegationLedger | un
  * @param role - Role about to be delegated to.
  * @returns The new delegation identifier.
  */
-export function nextDelegationId(ledger: DelegationLedger, role: GuardedSubagent): DelegationId {
+export function nextDelegationId(ledger: DelegationLedger, role: string): DelegationId {
   const ordinal = (ledger.delegationCounts.get(role) ?? 0) + 1;
   ledger.delegationCounts.set(role, ordinal);
   return `${role}#${ordinal}`;

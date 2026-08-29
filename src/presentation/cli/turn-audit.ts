@@ -4,6 +4,7 @@ import * as path from 'path';
 import { DEFAULT_INTERACTIVE_TOOL_BUDGET } from '../../core/agent/iteration-budget.middleware';
 import { extractProviderDiagnostic, writeProviderDiagnostic } from './provider-diagnostics';
 import { agentPath } from '../../core/config/agent-directory';
+import type { AgentKernelTelemetry } from '../../core/agent/agent-kernel';
 
 /** Terminal outcome captured for one interactive agent turn. */
 export type TurnAuditOutcome =
@@ -21,6 +22,8 @@ export interface TurnTraceMetadata {
   agent_model: string;
   agent_recursion_limit: number;
   agent_tool_budget: number;
+  agent_kernel_version?: number;
+  agent_role_ids?: string[];
 }
 
 /** Serialized local record used to audit interactive performance over time. */
@@ -45,6 +48,8 @@ export interface TurnAuditRecord {
    * was captured. A **path**, never the payload: this record stays shareable.
    */
   providerDiagnosticFile?: string;
+  /** Kernel and role metadata only; prompts, arguments, and file contents stay excluded. */
+  kernel?: AgentKernelTelemetry;
 }
 
 /** Input required to initialize a privacy-safe interactive turn audit. */
@@ -54,6 +59,8 @@ export interface TurnAuditInput {
   model: string;
   threadId: string;
   recursionLimit: number;
+  /** Metadata composed by the factory, when the session receives a kernel-built graph. */
+  kernel?: AgentKernelTelemetry;
 }
 
 /**
@@ -86,6 +93,10 @@ export class TurnAudit {
       agent_model: this.input.model,
       agent_recursion_limit: this.input.recursionLimit,
       agent_tool_budget: DEFAULT_INTERACTIVE_TOOL_BUDGET,
+      ...(this.input.kernel === undefined ? {} : {
+        agent_kernel_version: this.input.kernel.kernelVersion,
+        agent_role_ids: this.input.kernel.roles.map((role) => role.roleId),
+      }),
     };
   }
 
@@ -147,6 +158,7 @@ export class TurnAudit {
       outcome,
       ...(errorMessage ? { errorCategory: classifyError(errorMessage) } : {}),
       ...(diagnosticFile ? { providerDiagnosticFile: diagnosticFile } : {}),
+      ...(this.input.kernel === undefined ? {} : { kernel: this.input.kernel }),
     };
 
     try {

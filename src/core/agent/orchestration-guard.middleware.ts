@@ -55,6 +55,8 @@ export interface GuardLimits {
   maxRetries: number;
   /** Tool attempts available to the whole turn, shared by every delegate. */
   maxAgentTurns: number;
+  /** Explicit external roles allowed to provide read-only advisory evidence. */
+  advisoryRoleIds?: readonly string[];
 }
 
 /**
@@ -87,24 +89,32 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       // The provider validated the shape before this ran: `subagent` is a
       // required enum on the tool's own schema. A call that reaches here without
       // one could only come from a caller bypassing the declaration.
-      const subagent = getGuardedSubagent(request.toolCall.args);
+      const subagent = getRequestedSubagent(request.toolCall.args);
       if (!subagent) {
         throw new Error(describeSubagentRejection(request.toolCall.args));
+      }
+
+      const guarded = toGuardedSubagent(subagent);
+      const advisory = limits.advisoryRoleIds?.includes(subagent) === true;
+      if (guarded === undefined && !advisory) {
+        throw new Error(`Orchestration guard rejected unregistered subagent '${subagent}'.`);
       }
 
       // The assistant message holding this call is already in `state.messages`
       // when the guard runs, so the in-flight id must be excluded — otherwise the
       // guard counts the delegation it is authorizing as a previous one.
-      const decision = evaluateDelegation(
-        readDelegationHistory(
-          request.state.messages,
-          request.toolCall.id,
-          readThreadId(request),
-        ),
-        subagent,
-        limits.maxRetries,
-      );
-      assertDelegationAllowed(decision);
+      if (guarded !== undefined) {
+        const decision = evaluateDelegation(
+          readDelegationHistory(
+            request.state.messages,
+            request.toolCall.id,
+            readThreadId(request),
+          ),
+          guarded,
+          limits.maxRetries,
+        );
+        assertDelegationAllowed(decision);
+      }
 
       const ledger = openTurnForRequest(request, limits.maxAgentTurns);
       if (!ledger) return handler(request);
@@ -118,7 +128,7 @@ export function createOrchestrationGuard(limits: GuardLimits) {
       }
 
       const delegationId = nextDelegationId(ledger, subagent);
-      const granted = ledger.pool.allocate(delegationId, subagent);
+      const granted = ledger.pool.allocate(delegationId, guarded ?? 'advisory');
       if (granted === 0) {
         return refuseForBudget(request.toolCall.id, subagent);
       }
@@ -220,19 +230,19 @@ export function readDelegationHistory(
  * @returns A message naming the actual defect.
  */
 export function describeSubagentRejection(args: unknown): string {
-  const allowed = 'researcher, coder, and verifier';
+  const allowed = 'researcher, coder, verifier, or an explicitly registered advisory role';
 
   if (!isRecord(args)) {
-    return `Orchestration guard rejected a task call with no arguments object. `
-      + `Call task with subagent_type set to one of ${allowed}.`;
+    return `Orchestration guard rejected a delegate call with no arguments object. `
+      + `Call delegate with subagent set to one of ${allowed}.`;
   }
 
-  const requested = args.subagent_type;
+  const requested = args.subagent;
   if (typeof requested !== 'string' || requested.trim() === '') {
     const keys = Object.keys(args);
     const received = keys.length > 0 ? `keys received: ${keys.join(', ')}` : 'no arguments were supplied';
-    return `Orchestration guard rejected a task call with no 'subagent_type' argument (${received}). `
-      + `Set subagent_type to one of ${allowed}.`;
+    return `Orchestration guard rejected a delegate call with no 'subagent' argument (${received}). `
+      + `Set subagent to one of ${allowed}.`;
   }
 
   return `Orchestration guard rejected an unregistered subagent '${requested.trim()}'. `
@@ -306,7 +316,7 @@ Fill those arguments on the delegate call and issue it again.`,
   });
 }
 
-function refuseForBudget(toolCallId: string | undefined, subagent: GuardedSubagent): ToolMessage {
+function refuseForBudget(toolCallId: string | undefined, subagent: string): ToolMessage {
   return new ToolMessage({
     tool_call_id: toolCallId ?? '',
     content:
@@ -339,9 +349,14 @@ function harvestFindings(ledger: DelegationLedger, result: unknown): void {
   }
 }
 
-function getGuardedSubagent(args: unknown): GuardedSubagent | undefined {
+function getRequestedSubagent(args: unknown): string | undefined {
   if (!isRecord(args) || typeof args.subagent !== 'string') return undefined;
-  const normalized = args.subagent.trim().toLowerCase();
+  const normalized = args.subagent.trim();
+  return normalized === '' ? undefined : normalized;
+}
+
+function toGuardedSubagent(value: string): GuardedSubagent | undefined {
+  const normalized = value.toLowerCase();
   return normalized === 'researcher' || normalized === 'coder' || normalized === 'verifier'
     ? normalized
     : undefined;
@@ -439,9 +454,10 @@ function readTaskCalls(message: unknown, inFlightToolCallId?: string): TaskCall[
     if (!isRecord(toolCall) || toolCall.name !== DELEGATION_TOOL) return [];
     // The call being authorized is not part of its own history.
     if (inFlightToolCallId !== undefined && toolCall.id === inFlightToolCallId) return [];
-    const subagent = getGuardedSubagent(toolCall.args);
-    if (subagent === undefined) return [];
-    return [{ id: typeof toolCall.id === 'string' ? toolCall.id : undefined, subagent }];
+    const subagent = getRequestedSubagent(toolCall.args);
+    const guarded = subagent === undefined ? undefined : toGuardedSubagent(subagent);
+    if (guarded === undefined) return [];
+    return [{ id: typeof toolCall.id === 'string' ? toolCall.id : undefined, subagent: guarded }];
   });
 }
 

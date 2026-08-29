@@ -53,6 +53,16 @@ function graphsReturning(result: unknown) {
   };
 }
 
+function advisoryGraphsReturning(result: unknown) {
+  const invoke = jest.fn().mockResolvedValue(result);
+  return {
+    graphs: {
+      researcher: { invoke }, coder: { invoke }, verifier: { invoke }, 'security-reviewer': { invoke },
+    },
+    invoke,
+  };
+}
+
 const run = (input: unknown, tool: ReturnType<typeof createDelegateTool>): Promise<unknown> =>
   (tool as unknown as { invoke(value: unknown): Promise<unknown> }).invoke(input);
 
@@ -129,6 +139,17 @@ describe('delegate', () => {
     await run({ ...order, subagent: 'coder' }, tool);
 
     expect((graphs.coder.invoke as jest.Mock)).toHaveBeenCalled();
+  });
+
+  it('dispatches a registered advisory role without widening the core schema by hand', async () => {
+    const ledger = openTurn('thread-delegate', 'turn-1', 50);
+    ledger.mandates.set('security-reviewer#1', mandate);
+    ledger.activeDelegationId = 'security-reviewer#1';
+    const { graphs, invoke } = advisoryGraphsReturning({ messages: [{ content: 'done' }] });
+
+    await run({ ...order, subagent: 'security-reviewer' }, createDelegateTool(graphs as never));
+
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 
   it('returns the artifact so the policy can read its status', async () => {

@@ -78,6 +78,7 @@ import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
 import { flushPendingTraces } from '../../core/observability';
+import { getAgentKernelTelemetry } from '../../core/agent/agent-kernel';
 
 /**
  * Resolves the reasoning level the given model will actually run at.
@@ -329,6 +330,7 @@ export class ChatSession {
       model: this.currentModel,
       threadId: this.config.threadId,
       recursionLimit: this.config.recursionLimit,
+      kernel: getAgentKernelTelemetry(this.agent),
     });
     let hasTextOutput = false;
     let hasToolActivity = false;

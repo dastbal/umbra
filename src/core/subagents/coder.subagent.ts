@@ -1,14 +1,12 @@
 import { SubAgent } from 'deepagents';
-import {
-  safeWriteFileTool,
-  safeReadFileTool,
-  listFilesTool,
-  executeTestsTool,
-  integrityCheckTool,
-  listAdrsTool,
-  askDelegatorTool,
-} from '../tools';
 import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-budget.middleware';
+import {
+  KERNEL_API_VERSION,
+  buildSubagentFromProfile,
+  createDefaultAgentRuntimeContext,
+  type AgentRuntimeContext,
+  type RoleProfile,
+} from '../agent/agent-kernel';
 
 /**
  * System prompt for the Coder SubAgent.
@@ -18,7 +16,7 @@ import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-bud
  *
  * It NEVER performs analysis — it receives a complete plan and implements it.
  */
-const CODER_SYSTEM_PROMPT = `You are a Principal Software Engineer specialized in NestJS and Test-Driven Development (TDD).
+export const CODER_SYSTEM_PROMPT = `You are a Principal Software Engineer specialized in NestJS and Test-Driven Development (TDD).
 
 You receive a complete implementation plan and execute it with surgical precision.
 Your output is working, tested, type-safe code following DDD principles.
@@ -93,30 +91,24 @@ remains — never leave a half-written change described as finished.`;
  * The Coder returns a summary of what was implemented, test results,
  * and the result of run_integrity_check.
  */
-const baseCoderSubAgent: SubAgent = {
-  name: 'coder',
-  description:
-    'Implements NestJS code following DDD and TDD. Receives a detailed implementation plan ' +
-    'and executes it with surgical precision — writes tests BEFORE implementation, ' +
-    'verifies with run_tests after each file, and runs run_integrity_check before finishing. ' +
-    'WRITE-FOCUSED: this agent implements, does not re-analyze.',
-  systemPrompt: CODER_SYSTEM_PROMPT,
-  // ADR: Cast to any[] — DynamicStructuredTool type boundary (dual @langchain/core)
-  tools: [
-    safeWriteFileTool,
-    safeReadFileTool,
-    listFilesTool,
-    executeTestsTool,
-    integrityCheckTool,
-    // list_adrs was declared only by the Researcher, which left the agent that
-    // actually writes code unable to consult the decision records of the
-    // project it is writing in — including a consumer project that received
-    // docs/adr/ from `umbra init` (ADR-012, ADR-014).
-    listAdrsTool,
-    askDelegatorTool,
-  ] as any[],
-  middleware: [createSubagentBudgetMiddleware()] as any[],
-};
+/** Creates the Coder profession, leaving tool resolution to the AgentKernel. */
+export function createCoderRoleProfile(model?: SubAgent['model']): RoleProfile {
+  return {
+    id: 'coder',
+    displayName: 'Coder',
+    description:
+      'Implements NestJS code following DDD and TDD. Receives a detailed implementation plan ' +
+      'and executes it with surgical precision — writes tests BEFORE implementation, ' +
+      'verifies with run_tests after each file, and runs run_integrity_check before finishing. ' +
+      'WRITE-FOCUSED: this agent implements, does not re-analyze.',
+    kernelApiVersion: KERNEL_API_VERSION,
+    workflowRole: 'coder',
+    rolePrompt: CODER_SYSTEM_PROMPT,
+    capabilities: ['write_code', 'read_code', 'run_tests', 'verify_integrity', 'read_adrs', 'ask_delegator'],
+    ...(model === undefined ? {} : { model }),
+    middleware: [createSubagentBudgetMiddleware()] as any[],
+  };
+}
 
 /**
  * Creates a Coder specification with an optional role-specific model.
@@ -124,10 +116,11 @@ const baseCoderSubAgent: SubAgent = {
  * @param model - Model string or chat model selected by the orchestration policy.
  * @returns A write-focused Coder subagent specification.
  */
-export function createCoderSubAgent(model?: SubAgent['model']): SubAgent {
-  return model === undefined
-    ? baseCoderSubAgent
-    : { ...baseCoderSubAgent, model };
+export function createCoderSubAgent(
+  model?: SubAgent['model'],
+  context: AgentRuntimeContext = createDefaultAgentRuntimeContext(),
+): SubAgent {
+  return buildSubagentFromProfile(createCoderRoleProfile(model), context);
 }
 
 /** Default Coder specification retained for callers using the legacy import. */

@@ -99,16 +99,16 @@ describe('describeSubagentRejection', () => {
   it('names the missing argument instead of blaming the subagent', () => {
     const message = describeSubagentRejection({ context: 'analyze', name: 'researcher', agent: 'researcher' });
 
-    expect(message).toContain("no 'subagent_type' argument");
+    expect(message).toContain("no 'subagent' argument");
     expect(message).toContain('keys received: context, name, agent');
     expect(message).not.toContain('unregistered subagent');
   });
 
   it('names the value when a subagent is genuinely not allowed', () => {
-    const message = describeSubagentRejection({ subagent_type: 'deployer' });
+    const message = describeSubagentRejection({ subagent: 'deployer' });
 
     expect(message).toContain("unregistered subagent 'deployer'");
-    expect(message).toContain('researcher, coder, and verifier');
+    expect(message).toContain('researcher, coder, verifier');
   });
 
   it('handles a call with no arguments object at all', () => {
@@ -173,6 +173,22 @@ describe('the guard at the moment of delegation', () => {
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(result).toBe('delegated');
+  });
+
+  it('allows an explicitly registered advisory role without making it part of the writer lifecycle', async () => {
+    const guard = createOrchestrationGuard({
+      ...LIMITS,
+      advisoryRoleIds: ['security-reviewer'],
+    });
+    const handler = jest.fn().mockResolvedValue('advice');
+
+    const result = await guard.wrapToolCall!(
+      requestFor('call-advice', 'security-reviewer', [routeEnvelope, call('call-advice', 'security-reviewer')]) as never,
+      handler as never,
+    );
+
+    expect(result).toBe('advice');
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('records the order and the grant where the delegation tool will find them', async () => {
