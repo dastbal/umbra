@@ -131,6 +131,25 @@ exercised, because the tool was never callable. Treat that limit as unproven.
 
 ## Harness tool exclusions never reach the subagents
 
+> **Closed 2026-08-28** by
+> [ADR-023](./adr/ADR-023-interlocking-triage-readback-and-balanced-books.md).
+> Kept rather than deleted, because the reasoning below is what a future reader
+> needs before handing subagent construction back to a library.
+>
+> The fix was not the one planned here. Step 2 expected a per-subagent exclusion
+> middleware; what happened instead is that this project stopped letting
+>  build the graphs at all.  compiles the three
+> delegates from the same specifications that already described them, so **a
+> delegate holds exactly the tools its specification declares** and the list is
+> no longer assembled in a second, unverified place.
+>
+> That was not done for this defect — it was forced by ADR-023, whose delegation
+> tool carries the order in its schema and therefore has to own its dispatch.
+> Closing this was the consequence, which is worth noting: the entry sat open for
+> two days as a defect worth fixing, and was closed as a side effect of something
+> else. Step 3 of the plan below shipped separately: the contract test now covers
+> all three subagent prompts.
+
 > Recorded 2026-08-26, branch `2.0.0`. Found by the first `umbra orchestrate` run
 > that got past the delegation guard (see the amendment to
 > [ADR-013](./adr/ADR-013-subagent-tool-exclusion-and-provider-diagnostics.md)).
