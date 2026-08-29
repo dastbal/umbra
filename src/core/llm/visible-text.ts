@@ -28,6 +28,18 @@ const THOUGHT_TYPES: readonly string[] = ['thinking', 'redacted_thinking', 'reas
  *
  * And a chunk carrying more than one text block lost everything past the first.
  *
+ * ## What it cannot fix, and who does
+ *
+ * This function can only separate reasoning from answer while they are still
+ * *separate blocks*. A provider that hands over one flat string has already
+ * fused them, and no reader can tell the halves apart afterwards — which is
+ * exactly what the Vertex non-streaming transport of
+ * [ADR-006](../../../docs/adr/ADR-006-vertex-tool-cycle-streaming-fallback.md)
+ * does. That case is therefore repaired at the source, in
+ * {@link VertexChatAdapter}, which calls this function on the structured
+ * message *before* the flat string is ever produced. This one stays as the
+ * second line of defence, for every provider that does stream blocks.
+ *
  * The repair was attempted once in the prompt, by instructing the model never to
  * narrate its reasoning. It did not hold, and it could not have: the model was
  * not disobeying. It was returning its reasoning in the channel meant for

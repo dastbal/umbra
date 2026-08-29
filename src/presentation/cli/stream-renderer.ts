@@ -424,13 +424,34 @@ export class StreamRenderer {
    * operator asked where the token counter had gone; it had not gone anywhere,
    * it had never been anywhere durable.
    *
-   * @param spend - Tool calls, tokens and USD observed for the turn.
+   * ## The thinking share
+   *
+   * Since the [ADR-006](../../../docs/adr/ADR-006-vertex-tool-cycle-streaming-fallback.md)
+   * amendment the model's reasoning is generated, billed, and never printed.
+   * Money leaving without a trace on screen is exactly the failure this line
+   * was built to end, so the share is shown beside the total whenever the
+   * provider reports it — never as a separate charge, because those tokens are
+   * already inside the total.
+   *
+   * @param spend - Tool calls, tokens, thinking share and USD for the turn.
    */
-  public showTurnSpend(spend: { toolCalls: number; tokens: number; costUsd?: number }): void {
+  public showTurnSpend(spend: {
+    toolCalls: number;
+    tokens: number;
+    costUsd?: number;
+    reasoningTokens?: number;
+    reasoningCostUsd?: number;
+  }): void {
     if (spend.toolCalls === 0 && spend.tokens === 0) return;
 
     const parts = [`${spend.toolCalls} call${spend.toolCalls === 1 ? '' : 's'}`];
     if (spend.tokens > 0) parts.push(`${formatTokens(spend.tokens)} tok`);
+    if (spend.reasoningTokens !== undefined && spend.reasoningTokens > 0) {
+      const price = spend.reasoningCostUsd === undefined
+        ? ''
+        : ` $${spend.reasoningCostUsd.toFixed(4)}`;
+      parts.push(`${formatTokens(spend.reasoningTokens)} thinking${price}`);
+    }
     // Omitted rather than shown as zero when the model has no published price:
     // a counter reading $0.0000 for a real spend is the failure this started from.
     if (spend.costUsd !== undefined) parts.push(`$${spend.costUsd.toFixed(4)}`);

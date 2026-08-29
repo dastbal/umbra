@@ -18,7 +18,7 @@ describe('turn governor', () => {
   it('starts a turn with nothing spent', () => {
     const spend = createTurnSpend(1_000);
     expect(spend).toEqual({
-      toolCalls: 0, inputTokens: 0, outputTokens: 0, startedAtMs: 1_000,
+      toolCalls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, startedAtMs: 1_000,
     });
     expect(exceededDimension(spend, limits(), 1_000)).toBeNull();
   });
@@ -101,9 +101,54 @@ describe('turn governor', () => {
       expect(readUsage(message)).toBeNull();
     });
 
+    it('reads the thinking share Gemini reports beside the totals', () => {
+      // `thoughtsTokenCount`, normalized by the library to
+      // `output_token_details.reasoning`. This is the number that answers what
+      // the reasoning nobody reads is costing.
+      expect(readUsage({
+        usage_metadata: {
+          input_tokens: 1_200,
+          output_tokens: 900,
+          output_token_details: { reasoning: 640 },
+        },
+      })).toEqual({ inputTokens: 1_200, outputTokens: 900, reasoningTokens: 640 });
+    });
+
+    it('reports no share at all when the provider published none', () => {
+      // Absent, never zero. `@langchain/anthropic` publishes no breakdown, and
+      // a stored zero would claim Claude did not think.
+      expect(readUsage({ usage_metadata: { input_tokens: 10, output_tokens: 20 } }))
+        .not.toHaveProperty('reasoningTokens');
+    });
+
     it('tolerates a partial report rather than discarding it', () => {
       expect(readUsage({ usage_metadata: { output_tokens: 42 } }))
         .toEqual({ inputTokens: 0, outputTokens: 42 });
+    });
+  });
+
+  describe('the thinking share of a turn', () => {
+    it('accumulates across model calls without inflating the totals', () => {
+      // The share is a subset of the completion tokens, so counting it into
+      // them would double-charge the turn and could trip the token ceiling on
+      // spend that never happened.
+      const spend = createTurnSpend(0);
+
+      recordUsage(spend, { inputTokens: 100, outputTokens: 400, reasoningTokens: 250 });
+      recordUsage(spend, { inputTokens: 80, outputTokens: 200, reasoningTokens: 60 });
+
+      expect(spend.outputTokens).toBe(600);
+      expect(spend.reasoningTokens).toBe(310);
+      expect(spend.inputTokens).toBe(180);
+    });
+
+    it('leaves the share at zero for a provider that reports none', () => {
+      const spend = createTurnSpend(0);
+
+      recordUsage(spend, { inputTokens: 100, outputTokens: 400 });
+
+      expect(spend.reasoningTokens).toBe(0);
+      expect(spend.outputTokens).toBe(400);
     });
   });
 

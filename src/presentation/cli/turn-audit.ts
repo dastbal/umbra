@@ -53,6 +53,17 @@ export interface TurnAuditRecord {
    * nothing for the starred default (ADR-019).
    */
   costUsd?: number;
+  /**
+   * The share of the turn's completion tokens spent thinking, when the provider
+   * reported it. Already counted inside `tokens` — recorded separately so the
+   * price of reasoning can be read across real sessions instead of estimated.
+   *
+   * Absent for a provider that publishes no breakdown (`@langchain/anthropic`
+   * in the installed version) and for a turn that reported none.
+   */
+  reasoningTokens?: number;
+  /** USD attributable to `reasoningTokens`, when the model has a published price. */
+  reasoningCostUsd?: number;
   outcome: TurnAuditOutcome;
   errorCategory?: 'recursion_limit' | 'provider_400' | 'model_output' | 'other';
   /**
@@ -94,6 +105,8 @@ export class TurnAudit {
   private textOutput = false;
   private tokens?: number;
   private costUsd?: number;
+  private reasoningTokens?: number;
+  private reasoningCostUsd?: number;
   private recorded = false;
 
   /** @param input - Session-safe context for one interactive turn. */
@@ -155,10 +168,21 @@ export class TurnAudit {
    *
    * @param tokens - Prompt plus completion tokens observed.
    * @param costUsd - Turn cost, or undefined for an unpriced model.
+   * @param reasoning - The thinking share of those tokens and its price, when
+   * the provider reported one. Recorded only when non-zero, so an unreported
+   * turn is not stored as a turn that thought nothing.
    */
-  public recordSpend(tokens: number, costUsd?: number): void {
+  public recordSpend(
+    tokens: number,
+    costUsd?: number,
+    reasoning?: { tokens: number; costUsd?: number },
+  ): void {
     if (tokens > 0) this.tokens = tokens;
     if (costUsd !== undefined) this.costUsd = costUsd;
+    if (reasoning !== undefined && reasoning.tokens > 0) {
+      this.reasoningTokens = reasoning.tokens;
+      if (reasoning.costUsd !== undefined) this.reasoningCostUsd = reasoning.costUsd;
+    }
   }
 
   public record(outcome: TurnAuditOutcome, errorMessage?: string, error?: unknown): void {
@@ -186,6 +210,8 @@ export class TurnAudit {
       textOutput: this.textOutput,
       ...(this.tokens === undefined ? {} : { tokens: this.tokens }),
       ...(this.costUsd === undefined ? {} : { costUsd: this.costUsd }),
+      ...(this.reasoningTokens === undefined ? {} : { reasoningTokens: this.reasoningTokens }),
+      ...(this.reasoningCostUsd === undefined ? {} : { reasoningCostUsd: this.reasoningCostUsd }),
       outcome,
       ...(errorMessage ? { errorCategory: classifyError(errorMessage) } : {}),
       ...(diagnosticFile ? { providerDiagnosticFile: diagnosticFile } : {}),

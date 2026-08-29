@@ -226,7 +226,13 @@ describe('StreamRenderer — wait indicator', () => {
 
 describe('showTurnSpend', () => {
   /** Captures what the renderer wrote to stdout. */
-  function captured(spend: { toolCalls: number; tokens: number; costUsd?: number }): string {
+  function captured(spend: {
+    toolCalls: number;
+    tokens: number;
+    costUsd?: number;
+    reasoningTokens?: number;
+    reasoningCostUsd?: number;
+  }): string {
     const written: string[] = [];
     const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       written.push(String(chunk));
@@ -252,6 +258,37 @@ describe('showTurnSpend', () => {
     expect(line).toContain('3 calls');
     expect(line).toContain('12.4k tok');
     expect(line).toContain('$0.0041');
+  });
+
+  it('shows what the turn paid for thinking nobody sees', () => {
+    // Since the ADR-006 amendment the reasoning is generated, billed and never
+    // printed. One measured call spent 601 of 670 completion tokens that way,
+    // so the share belongs beside the total rather than inside it.
+    const line = captured({
+      toolCalls: 1,
+      tokens: 12_400,
+      costUsd: 0.0041,
+      reasoningTokens: 6_010,
+      reasoningCostUsd: 0.0012,
+    });
+
+    expect(line).toContain('6.0k thinking $0.0012');
+    expect(line).toContain('$0.0041');
+  });
+
+  it('says nothing about thinking when the provider reported none', () => {
+    // Anthropic publishes no breakdown. A '0 thinking' would claim the model
+    // did not think, when the truth is that nobody said.
+    const line = captured({ toolCalls: 1, tokens: 900, costUsd: 0.0002, reasoningTokens: 0 });
+
+    expect(line).not.toContain('thinking');
+  });
+
+  it('prints the share even when the model has no published price', () => {
+    const line = captured({ toolCalls: 1, tokens: 900, reasoningTokens: 400 });
+
+    expect(line).toContain('400 thinking');
+    expect(line).not.toContain('$');
   });
 
   it('omits the cost for an unpriced model instead of printing zero', () => {

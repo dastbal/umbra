@@ -31,7 +31,8 @@ import { isInteractive, selectOutcome, type SelectChoice } from './interactive-s
 import { askText } from './prompts';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
 import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
-import { readVisibleText } from './visible-text';
+import { describeErrorOrigin } from './error-origin';
+import { readVisibleText } from '../../core/llm/visible-text';
 import { diagnoseOffline } from './offline-diagnosis';
 
 import { recordBudgetProbe } from '../../core/agent/budget-probe';
@@ -439,8 +440,18 @@ export class ChatSession {
       await this.settlePendingInterrupts();
       const turnTokens = spend.inputTokens + spend.outputTokens;
       const turnCost = this.costOf(spend);
-      audit.recordSpend(turnTokens, turnCost);
-      this.renderer.showTurnSpend?.({ toolCalls: spend.toolCalls, tokens: turnTokens, costUsd: turnCost });
+      const reasoningCost = this.costOfReasoning(spend);
+      audit.recordSpend(turnTokens, turnCost, {
+        tokens: spend.reasoningTokens,
+        costUsd: reasoningCost,
+      });
+      this.renderer.showTurnSpend?.({
+        toolCalls: spend.toolCalls,
+        tokens: turnTokens,
+        costUsd: turnCost,
+        reasoningTokens: spend.reasoningTokens,
+        reasoningCostUsd: reasoningCost,
+      });
 
       if (shouldRetryEmptyTurn({ hasTextOutput, hasToolActivity, retryCount })) {
         audit.record('empty_response_retry');
@@ -487,10 +498,12 @@ export class ChatSession {
         );
       }
 
-      this.renderer.showError(
-        error?.message ?? 'Unknown error',
-        error?.stack?.split('\n')[1]?.trim(),
-      );
+      // The frame is taken from the end of the `cause` chain, not from the top
+      // of the stack. LangChain's `MiddlewareError` copies its cause's message
+      // and keeps its own stack, so the top frame named the wrapper inside
+      // LangChain while the code that failed sat one level down, unprinted.
+      const origin = describeErrorOrigin(err);
+      this.renderer.showError(origin.message, origin.detail);
       audit.record(
         error.message.includes('Recursion limit') ? 'recursion_limit' : 'error',
         error.message,
@@ -1258,6 +1271,30 @@ export class ChatSession {
    * @param spend - Running spend for the current turn.
    * @returns Cost in USD, or undefined when no published price applies.
    */
+  /**
+   * Prices the part of the turn the model spent thinking.
+   *
+   * Reasoning tokens are completion tokens, so they are priced as output and
+   * nothing else: the call is `(0 input, reasoningTokens output)`. This is not
+   * an extra charge on top of {@link costOf} — it is the slice of that same
+   * total which bought deliberation the operator never reads, since the
+   * ADR-006 amendment stopped printing it.
+   *
+   * @param spend - Running spend for the current turn.
+   * @returns Cost in USD of the thinking share, or undefined when nothing was
+   * reported or the model has no published price.
+   */
+  private costOfReasoning(spend: TurnSpend): number | undefined {
+    if (spend.reasoningTokens === 0) return undefined;
+    try {
+      return this.costTracker
+        .calculateCost(this.currentModel, new TokenUsage(0, spend.reasoningTokens))
+        .amount;
+    } catch {
+      return undefined;
+    }
+  }
+
   private costOf(spend: TurnSpend): number | undefined {
     if (spend.inputTokens === 0 && spend.outputTokens === 0) return undefined;
     try {
