@@ -6,6 +6,13 @@ import { currentTurn } from './delegation-registry';
 import { renderMandate } from './mandate';
 import { toParentUpdate, toSubagentState } from './state-bridge';
 import type { SubagentGraphs } from './subagent-registry';
+import {
+  asReadbackOrder,
+  parseReadback,
+  renderReadback,
+  type ReadbackGraphs,
+} from './readback';
+import { requestApproval, rethrowIfSuspension } from '../../tools/utils/approval';
 import { log } from '../../tools/utils/logger';
 
 /**
@@ -77,7 +84,7 @@ export type DelegateInput = z.infer<typeof delegateSchema>;
  * @param graphs - The compiled delegates, from `buildSubagentGraphs`.
  * @returns The `delegate` tool, ready to declare on the orchestrator.
  */
-export function createDelegateTool(graphs: SubagentGraphs) {
+export function createDelegateTool(graphs: SubagentGraphs, readbacks?: ReadbackGraphs) {
   return tool(
     async (input: DelegateInput) => {
       const scope = readScope();
@@ -94,6 +101,9 @@ export function createDelegateTool(graphs: SubagentGraphs) {
 
       const order = renderMandate(mandate) + inheritedFindings(ledger.findings);
       const parentState = readParentState();
+
+      const refusal = await readBackTheOrder(readbacks, input.subagent, order);
+      if (refusal) return refusal;
 
       log.sys(`delegate → ${input.subagent} (${delegationId}), ${mandate.budget.toolCalls} attempts`);
 
@@ -125,6 +135,60 @@ export function createDelegateTool(graphs: SubagentGraphs) {
       schema: delegateSchema,
     },
   );
+}
+
+/**
+ * Has the delegate read its order back before any work begins.
+ *
+ * The aviation loop: a clearance is given when the pilot reads it back and the
+ * controller hears it. Routine clearances are read back and acted on; crossing a
+ * runway waits for confirmation. The Coder writes to disk, so it waits.
+ *
+ * A readback that cannot be produced does not block the delegation — the channel
+ * is a check on understanding, not another way for a turn to die — but it is
+ * reported, because a check nobody can see is not a check.
+ *
+ * @returns A refusal to hand back, or `undefined` to proceed.
+ */
+async function readBackTheOrder(
+  readbacks: ReadbackGraphs | undefined,
+  role: DelegateInput['subagent'],
+  order: string,
+): Promise<string | undefined> {
+  if (!readbacks) return undefined;
+
+  let readback;
+  try {
+    readback = parseReadback(await readbacks[role].invoke(
+      { messages: [{ role: 'human', content: asReadbackOrder(order) }] },
+      getConfig(),
+    ));
+  } catch (error: unknown) {
+    rethrowIfSuspension(error);
+    log.sys(`${role} could not read its order back; proceeding without one`);
+    return undefined;
+  }
+
+  if (!readback) {
+    log.sys(`${role} returned no readable readback; proceeding without one`);
+    return undefined;
+  }
+
+  log.sys(`↩ ${renderReadback(role, readback)}`);
+
+  // Crossing the runway. Only the delegate that writes waits for a human.
+  if (role !== 'coder') return undefined;
+
+  const approved = requestApproval(
+    'delegate',
+    { subagent: role, understood: readback.objective, firstAction: readback.firstAction },
+    'The coder is about to change files. Confirm it understood the order.',
+  );
+
+  return approved
+    ? undefined
+    : `The operator did not confirm this delegation. The coder understood: "${readback.objective}". `
+      + 'Do not delegate it again unchanged — report what was refused, or issue a corrected order.';
 }
 
 /**

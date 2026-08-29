@@ -1,4 +1,5 @@
 import { ToolMessage } from '@langchain/core/messages';
+import { log } from '../tools/utils/logger';
 import { isGraphInterrupt } from '@langchain/langgraph';
 import { createMiddleware } from 'langchain';
 import {
@@ -21,6 +22,7 @@ import {
   type DelegationLedger,
 } from './delegation/delegation-registry';
 import { classifyDelegationOutcome } from './delegation/delegation-outcome';
+import { describeDiscrepancies, reconcile } from './delegation/budget-pool';
 import { readPromotion } from './lane-registry';
 import { readLane } from './route-lane';
 
@@ -278,6 +280,13 @@ function openTurnForRequest(request: unknown, totalBudget: number): DelegationLe
 function closeDelegation(ledger: DelegationLedger, delegationId: string): void {
   ledger.pool.release(delegationId);
   ledger.activeDelegationId = undefined;
+
+  // The second book, checked where it can still be acted on. A delegation that
+  // spent past its grant means something consumed the budget through a door this
+  // project did not open, and an imbalance that is only visible afterwards is an
+  // imbalance nobody sees.
+  const imbalance = describeDiscrepancies(reconcile(ledger.pool));
+  if (imbalance) log.error(imbalance);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { BudgetPool, DEFAULT_BUDGET_SPLIT } from './budget-pool';
+import { BudgetPool, DEFAULT_BUDGET_SPLIT, describeDiscrepancies, reconcile } from './budget-pool';
 
 describe('BudgetPool', () => {
   it('holds a reserve back so the turn can always close', () => {
@@ -93,5 +93,45 @@ describe('BudgetPool', () => {
     const { researcher, coder, verifier, reserve } = DEFAULT_BUDGET_SPLIT;
 
     expect(researcher + coder + verifier + reserve).toBeCloseTo(1, 5);
+  });
+});
+
+describe('reconcile', () => {
+  it('reports nothing when every delegation stayed inside its grant', () => {
+    const pool = new BudgetPool(50);
+    pool.allocate('researcher#1', 'researcher');
+    pool.consume('researcher#1', 14);
+
+    expect(reconcile(pool)).toEqual([]);
+    expect(describeDiscrepancies(reconcile(pool))).toBeUndefined();
+  });
+
+  it('announces a delegation that spent more than it was granted', () => {
+    // The middleware refuses the attempt that would overspend, so an imbalance
+    // means something consumed the budget through a door nobody opened.
+    const pool = new BudgetPool(50);
+    pool.allocate('coder#1', 'coder');
+    pool.consume('coder#1', 21);
+
+    expect(reconcile(pool)).toEqual([{ delegationId: 'coder#1', granted: 18, spent: 21 }]);
+  });
+
+  it('says plainly what did not balance', () => {
+    const pool = new BudgetPool(50);
+    pool.allocate('coder#1', 'coder');
+    pool.consume('coder#1', 21);
+
+    const message = describeDiscrepancies(reconcile(pool));
+
+    expect(message).toContain('coder#1 spent 21 of 18');
+    expect(message).toContain('outside the granted allowance');
+  });
+
+  it('carries no prompt or argument into telemetry', () => {
+    const pool = new BudgetPool(50);
+    pool.allocate('coder#1', 'coder');
+    pool.consume('coder#1', 21);
+
+    expect(JSON.stringify(reconcile(pool))).not.toMatch(/prompt|content|args/i);
   });
 });

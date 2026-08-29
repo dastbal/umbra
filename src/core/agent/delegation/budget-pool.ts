@@ -194,3 +194,66 @@ export class BudgetPool {
     };
   }
 }
+
+/** A delegation that consumed more than it was granted. */
+export interface BudgetDiscrepancy {
+  /** The delegation whose books do not balance. */
+  delegationId: DelegationId;
+  /** What the turn granted it. */
+  granted: number;
+  /** What it actually consumed. */
+  spent: number;
+}
+
+/**
+ * Reports every delegation that spent more than it was granted.
+ *
+ * ## Why the books are kept twice
+ *
+ * What Luca Pacioli published in 1494 was not the idea of writing transactions
+ * down. It was writing each one **twice**, in two places that must agree, so
+ * that an error stops hiding and starts announcing itself as an imbalance.
+ *
+ * This pool keeps both halves. The grant is written when a delegation is
+ * authorized; the spend is written by the delegate's own middleware, one entry
+ * per tool attempt. Nothing should ever be able to make the second exceed the
+ * first, because the middleware refuses the attempt that would.
+ *
+ * So an imbalance is not a rounding difference — it means something consumed the
+ * turn's budget through a door this project did not open. That is not
+ * hypothetical: `docs/deferred-work.md` records deepagents' filesystem
+ * middleware handing subagents tools the harness had excluded, and a delegation
+ * dying on one. Owning the subagent graphs closed that particular door; this
+ * reports the next one instead of waiting for a run to fail on it.
+ *
+ * @returns The delegations whose books do not balance, empty when they do.
+ */
+export function reconcile(pool: BudgetPool): BudgetDiscrepancy[] {
+  return pool
+    .describe()
+    .allocations
+    .filter((allocation) => allocation.spent > allocation.granted)
+    .map(({ delegationId, granted, spent }) => ({ delegationId, granted, spent }));
+}
+
+/**
+ * Describes an imbalance for an operator and for telemetry.
+ *
+ * Counts only, no prompts and no arguments, so it can be joined to a LangSmith
+ * trace under the rules ADR-008 set for `TurnAudit`.
+ *
+ * @param discrepancies - What {@link reconcile} found.
+ * @returns A line to report, or `undefined` when the books balance.
+ */
+export function describeDiscrepancies(
+  discrepancies: readonly BudgetDiscrepancy[],
+): string | undefined {
+  if (discrepancies.length === 0) return undefined;
+
+  const detail = discrepancies
+    .map((one) => `${one.delegationId} spent ${one.spent} of ${one.granted}`)
+    .join('; ');
+
+  return `Budget books do not balance: ${detail}. `
+    + 'Something consumed the turn budget outside the granted allowance.';
+}

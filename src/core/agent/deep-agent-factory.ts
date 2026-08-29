@@ -41,6 +41,7 @@ import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import { buildSubagentGraphs } from './delegation/subagent-registry';
 import { createDelegateTool } from './delegation/delegate.tool';
+import { buildReadbackGraphs } from './delegation/readback';
 import { escalateRouteTool } from '../tools/interaction/escalate-route.tool';
 import {
   DEFAULT_INTERACTIVE_TOOL_BUDGET,
@@ -306,20 +307,35 @@ export class DeepAgentFactory {
     // The delegates are compiled here rather than handed to deepagents, because
     // the delegation tool's schema is the mandate and a tool with our schema has
     // to own its dispatch (ADR-021).
-    const delegateTool = createDelegateTool(buildSubagentGraphs({
+    const subagentSpecs = {
       researcher: createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
       coder: createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
       verifier: createVerifierSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
-    }));
+    };
+    const delegateTool = createDelegateTool(
+      buildSubagentGraphs(subagentSpecs),
+      buildReadbackGraphs(subagentSpecs),
+    );
 
     return createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      middleware: [createOrchestrationGuard({
-        maxRetries: agentConfig.limits.maxRetries,
-        maxAgentTurns: agentConfig.limits.maxAgentTurns,
-      })] as any[],
+      // The governor first, so a turn that has spent its tokens, its seconds or
+      // its dollars stops before the guard does any delegation bookkeeping.
+      // ADR-019 installed these ceilings on the single-agent path and left the
+      // orchestrated one out — the same omission ADR-008 made, which is how a
+      // greeting came to cost /usr/bin/bash.0729.
+      middleware: [
+        createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+          limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
+          costOf: DeepAgentFactory.buildCostResolver(model),
+        }),
+        createOrchestrationGuard({
+          maxRetries: agentConfig.limits.maxRetries,
+          maxAgentTurns: agentConfig.limits.maxAgentTurns,
+        }),
+      ] as any[],
       tools: [                           // ADR-002
         askCodebaseTool,
         refreshIndexTool,
