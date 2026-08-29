@@ -31,6 +31,9 @@ import { isInteractive, selectOutcome, type SelectChoice } from './interactive-s
 import { askText } from './prompts';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
 import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
+import { describeErrorOrigin } from './error-origin';
+import { readVisibleText } from '../../core/llm/visible-text';
+import { diagnoseOffline } from './offline-diagnosis';
 
 import { recordBudgetProbe } from '../../core/agent/budget-probe';
 import {
@@ -78,6 +81,7 @@ import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
 import { flushPendingTraces } from '../../core/observability';
+import { getAgentKernelTelemetry } from '../../core/agent/agent-kernel';
 
 /**
  * Resolves the reasoning level the given model will actually run at.
@@ -121,7 +125,7 @@ export function rejectionDecision(): { type: string; message: string } {
  * hiding an option the gate offered would misrepresent the operator's choices.
  *
  * @param allowed - Decision identifiers permitted for this action.
- * @returns Rows for the approval prompt, approve first.
+ * @returns Rows for the approval prompt, reject first so Enter fails closed.
  */
 export function buildDecisionChoices(allowed: string[]): SelectChoice<string>[] {
   const known: Record<string, { label: string; hint?: string }> = {
@@ -130,7 +134,10 @@ export function buildDecisionChoices(allowed: string[]): SelectChoice<string>[] 
     edit:    { label: '✎  Change it',         hint: 'send it back with an instruction' },
   };
 
-  const order = ['approve', 'edit', 'reject'];
+  // A decision prompt may receive the newline that completed the preceding
+  // chat input. Keeping reject under the default cursor makes that stale input
+  // safe: it blocks the operation instead of authorising it.
+  const order = ['reject', 'edit', 'approve'];
   const sorted = [...allowed].sort((a, b) => {
     const ia = order.indexOf(a), ib = order.indexOf(b);
     return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib);
@@ -329,6 +336,7 @@ export class ChatSession {
       model: this.currentModel,
       threadId: this.config.threadId,
       recursionLimit: this.config.recursionLimit,
+      kernel: getAgentKernelTelemetry(this.agent),
     });
     let hasTextOutput = false;
     let hasToolActivity = false;
@@ -360,9 +368,7 @@ export class ChatSession {
           // ── Token streaming ──────────────────────────────────────────────
           case 'on_chat_model_stream': {
             const chunk = event.data?.chunk;
-            const token = typeof chunk?.content === 'string'
-              ? chunk.content
-              : (chunk?.content?.[0]?.text ?? '');
+            const token = readVisibleText(chunk?.content);
             if (token) {
               hasTextOutput = true;
               audit.markTextOutput();
@@ -432,6 +438,20 @@ export class ChatSession {
       // The stream never reports a suspension, so ask the graph itself before
       // handing the prompt back. See settlePendingInterrupts.
       await this.settlePendingInterrupts();
+      const turnTokens = spend.inputTokens + spend.outputTokens;
+      const turnCost = this.costOf(spend);
+      const reasoningCost = this.costOfReasoning(spend);
+      audit.recordSpend(turnTokens, turnCost, {
+        tokens: spend.reasoningTokens,
+        costUsd: reasoningCost,
+      });
+      this.renderer.showTurnSpend?.({
+        toolCalls: spend.toolCalls,
+        tokens: turnTokens,
+        costUsd: turnCost,
+        reasoningTokens: spend.reasoningTokens,
+        reasoningCostUsd: reasoningCost,
+      });
 
       if (shouldRetryEmptyTurn({ hasTextOutput, hasToolActivity, retryCount })) {
         audit.record('empty_response_retry');
@@ -478,10 +498,12 @@ export class ChatSession {
         );
       }
 
-      this.renderer.showError(
-        error?.message ?? 'Unknown error',
-        error?.stack?.split('\n')[1]?.trim(),
-      );
+      // The frame is taken from the end of the `cause` chain, not from the top
+      // of the stack. LangChain's `MiddlewareError` copies its cause's message
+      // and keeps its own stack, so the top frame named the wrapper inside
+      // LangChain while the code that failed sat one level down, unprinted.
+      const origin = describeErrorOrigin(err);
+      this.renderer.showError(origin.message, origin.detail);
       audit.record(
         error.message.includes('Recursion limit') ? 'recursion_limit' : 'error',
         error.message,
@@ -733,12 +755,10 @@ export class ChatSession {
 
     for await (const event of resumeStream) {
       if (event.event === 'on_chat_model_stream') {
-        // Use the same extraction logic as sendMessage() to handle Gemini
-        // array-of-parts format (chunk.content can be string or [{text:'...'}])
+        // One extraction for both stream loops: reasoning blocks stay hidden and
+        // every text block is kept, not only the first.
         const chunk = event.data?.chunk;
-        const token = typeof chunk?.content === 'string'
-          ? chunk.content
-          : (chunk?.content?.[0]?.text ?? '');
+        const token = readVisibleText(chunk?.content);
         if (token) this.renderer.streamToken(token);
       } else if (event.event === 'on_tool_start') {
         this.renderer.showToolStart(event.name, event.data?.input ?? {});
@@ -1251,6 +1271,30 @@ export class ChatSession {
    * @param spend - Running spend for the current turn.
    * @returns Cost in USD, or undefined when no published price applies.
    */
+  /**
+   * Prices the part of the turn the model spent thinking.
+   *
+   * Reasoning tokens are completion tokens, so they are priced as output and
+   * nothing else: the call is `(0 input, reasoningTokens output)`. This is not
+   * an extra charge on top of {@link costOf} — it is the slice of that same
+   * total which bought deliberation the operator never reads, since the
+   * ADR-006 amendment stopped printing it.
+   *
+   * @param spend - Running spend for the current turn.
+   * @returns Cost in USD of the thinking share, or undefined when nothing was
+   * reported or the model has no published price.
+   */
+  private costOfReasoning(spend: TurnSpend): number | undefined {
+    if (spend.reasoningTokens === 0) return undefined;
+    try {
+      return this.costTracker
+        .calculateCost(this.currentModel, new TokenUsage(0, spend.reasoningTokens))
+        .amount;
+    } catch {
+      return undefined;
+    }
+  }
+
   private costOf(spend: TurnSpend): number | undefined {
     if (spend.inputTokens === 0 && spend.outputTokens === 0) return undefined;
     try {

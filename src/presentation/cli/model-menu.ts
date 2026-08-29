@@ -346,25 +346,38 @@ const LEVEL_HINTS: Readonly<Record<ReasoningLevel, string>> = {
   max: 'correctness over cost',
 };
 
-/** Why the display row is or is not actionable, in the operator's words. */
+/**
+ * Why the display row is or is not actionable, in the operator's words.
+ *
+ * Corrected 2026-08-28. These read as they now behave, not as they were
+ * designed: since the ADR-006 amendment, no provider's reasoning is printed at
+ * all. The `controllable` toggle still changes the *request* — Anthropic is
+ * asked for summarized thinking — and the CLI does not yet render what comes
+ * back, which is recorded in `docs/deferred-work.md`. Saying so is the point:
+ * this module's own rule is that a switch which silently does nothing is worse
+ * than one that admits what it cannot do.
+ */
 const DISPLAY_HINTS: Readonly<Record<ReasoningDisplaySupport, string>> = {
-  controllable: 'visibility only — thinking is billed either way',
-  'forced-on': 'always shown once a level is set — cannot be turned off',
+  controllable: 'asks the provider for it — not printed yet; billed either way',
+  'forced-on': 'always generated and billed once a level is set — not printed',
   unavailable: 'not available for this model',
 };
 
 /**
  * Renders the display row's checkbox for each support state.
  *
- * A forced-on model shows a filled box the operator cannot clear, which is
- * honest about the state; an unavailable one shows an empty box it cannot fill.
+ * The box answers "is this reasoning shown to me?", so it is empty wherever
+ * nothing reaches the screen. A `forced-on` model held a filled box until
+ * 2026-08-28, on the understanding that its reasoning was always displayed;
+ * the ADR-006 amendment stops printing it, so a filled box would now be a
+ * claim the CLI does not honour. The hint carries why it cannot be filled.
  *
  * @param support - How much control Umbra has over showing reasoning.
  * @param showReasoning - The current toggle state, when it is controllable.
  * @returns The checkbox glyph to render.
  */
 function displayCheckbox(support: ReasoningDisplaySupport, showReasoning: boolean): string {
-  if (support === 'forced-on') return '☑';
+  if (support === 'forced-on') return '☐';
   if (support === 'unavailable') return '☐';
   return showReasoning ? '☑' : '☐';
 }

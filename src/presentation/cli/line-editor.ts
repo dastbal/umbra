@@ -189,6 +189,8 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
   let selected = -1;
   /** Palette rows drawn by the last paint, needed to erase them. */
   let drawnRows = 0;
+  /** Physical input row where the previous paint left the cursor. */
+  let drawnCursorRow = 0;
   /** Position in `history`; equals `history.length` when not browsing. */
   let historyIndex = history.length;
   /** The in-progress line, stashed while browsing history. */
@@ -254,10 +256,12 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
     let out = '';
     const layout = inputLayout();
 
-    // The previous paint already returned the cursor to the prompt line. Clear
-    // from there; moving up by `drawnRows` would overwrite earlier output and
-    // make the terminal viewport jump whenever the palette is navigated.
-    out += COLUMN_ZERO + CLEAR_DOWN;
+    // The previous paint leaves the cursor inside the input, which can be a
+    // wrapped physical row. Return to the prompt origin before clearing; a
+    // carriage return alone only reaches column zero on the *current* row and
+    // would preserve the earlier wrapped rows, then print the entire buffer
+    // below them again on every keystroke.
+    out += up(drawnCursorRow) + COLUMN_ZERO + CLEAR_DOWN;
     out += opts.prompt + text();
 
     const lines = paletteLines();
@@ -269,6 +273,7 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
     // horizontal offset from the prompt origin.
     out += up(drawnRows + layout.endRow - layout.cursorRow) +
       COLUMN_ZERO + right(layout.cursorColumn);
+    drawnCursorRow = layout.cursorRow;
 
     output.write(out);
   };
@@ -349,8 +354,9 @@ export function editLine(opts: EditLineOptions): Promise<string | null> {
      */
     const finish = (value: string | null): void => {
       // Erase the palette, redraw the bare line, and move past it.
-      output.write(COLUMN_ZERO + CLEAR_DOWN + opts.prompt + text() + '\n');
+      output.write(up(drawnCursorRow) + COLUMN_ZERO + CLEAR_DOWN + opts.prompt + text() + '\n');
       drawnRows = 0;
+      drawnCursorRow = 0;
       teardown();
       resolve(value);
     };

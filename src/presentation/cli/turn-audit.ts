@@ -4,6 +4,7 @@ import * as path from 'path';
 import { DEFAULT_INTERACTIVE_TOOL_BUDGET } from '../../core/agent/iteration-budget.middleware';
 import { extractProviderDiagnostic, writeProviderDiagnostic } from './provider-diagnostics';
 import { agentPath } from '../../core/config/agent-directory';
+import type { AgentKernelTelemetry } from '../../core/agent/agent-kernel';
 
 /** Terminal outcome captured for one interactive agent turn. */
 export type TurnAuditOutcome =
@@ -21,6 +22,8 @@ export interface TurnTraceMetadata {
   agent_model: string;
   agent_recursion_limit: number;
   agent_tool_budget: number;
+  agent_kernel_version?: number;
+  agent_role_ids?: string[];
 }
 
 /** Serialized local record used to audit interactive performance over time. */
@@ -38,6 +41,29 @@ export interface TurnAuditRecord {
   tools: string[];
   toolDurationsMs: Record<string, number[]>;
   textOutput: boolean;
+  /**
+   * Prompt plus completion tokens observed for the turn, when the provider
+   * reported them. Absent rather than zero when it did not: a recorded zero
+   * cannot be told apart from a turn that genuinely spent nothing.
+   */
+  tokens?: number;
+  /**
+   * Turn cost in USD, when the model has a published price. Omitted for an
+   * unpriced model, because a stored 0.00 is what made cost tracking report
+   * nothing for the starred default (ADR-019).
+   */
+  costUsd?: number;
+  /**
+   * The share of the turn's completion tokens spent thinking, when the provider
+   * reported it. Already counted inside `tokens` — recorded separately so the
+   * price of reasoning can be read across real sessions instead of estimated.
+   *
+   * Absent for a provider that publishes no breakdown (`@langchain/anthropic`
+   * in the installed version) and for a turn that reported none.
+   */
+  reasoningTokens?: number;
+  /** USD attributable to `reasoningTokens`, when the model has a published price. */
+  reasoningCostUsd?: number;
   outcome: TurnAuditOutcome;
   errorCategory?: 'recursion_limit' | 'provider_400' | 'model_output' | 'other';
   /**
@@ -45,6 +71,8 @@ export interface TurnAuditRecord {
    * was captured. A **path**, never the payload: this record stays shareable.
    */
   providerDiagnosticFile?: string;
+  /** Kernel and role metadata only; prompts, arguments, and file contents stay excluded. */
+  kernel?: AgentKernelTelemetry;
 }
 
 /** Input required to initialize a privacy-safe interactive turn audit. */
@@ -54,6 +82,8 @@ export interface TurnAuditInput {
   model: string;
   threadId: string;
   recursionLimit: number;
+  /** Metadata composed by the factory, when the session receives a kernel-built graph. */
+  kernel?: AgentKernelTelemetry;
 }
 
 /**
@@ -73,6 +103,10 @@ export class TurnAudit {
   private readonly toolStartTimes = new Map<string, number>();
   private readonly toolDurationsMs: Record<string, number[]> = {};
   private textOutput = false;
+  private tokens?: number;
+  private costUsd?: number;
+  private reasoningTokens?: number;
+  private reasoningCostUsd?: number;
   private recorded = false;
 
   /** @param input - Session-safe context for one interactive turn. */
@@ -86,6 +120,10 @@ export class TurnAudit {
       agent_model: this.input.model,
       agent_recursion_limit: this.input.recursionLimit,
       agent_tool_budget: DEFAULT_INTERACTIVE_TOOL_BUDGET,
+      ...(this.input.kernel === undefined ? {} : {
+        agent_kernel_version: this.input.kernel.kernelVersion,
+        agent_role_ids: this.input.kernel.roles.map((role) => role.roleId),
+      }),
     };
   }
 
@@ -121,6 +159,32 @@ export class TurnAudit {
    * context, a redacted snapshot is written to its own file and only the path
    * appears in this record.
    */
+  /**
+   * Records what the turn spent, so the price survives the screen.
+   *
+   * Until now the JSONL held tool calls and elapsed time and no cost at all, so
+   * a day of work could not be priced even with the file in hand. The counter
+   * that did exist lived on the wait indicator and was erased with it.
+   *
+   * @param tokens - Prompt plus completion tokens observed.
+   * @param costUsd - Turn cost, or undefined for an unpriced model.
+   * @param reasoning - The thinking share of those tokens and its price, when
+   * the provider reported one. Recorded only when non-zero, so an unreported
+   * turn is not stored as a turn that thought nothing.
+   */
+  public recordSpend(
+    tokens: number,
+    costUsd?: number,
+    reasoning?: { tokens: number; costUsd?: number },
+  ): void {
+    if (tokens > 0) this.tokens = tokens;
+    if (costUsd !== undefined) this.costUsd = costUsd;
+    if (reasoning !== undefined && reasoning.tokens > 0) {
+      this.reasoningTokens = reasoning.tokens;
+      if (reasoning.costUsd !== undefined) this.reasoningCostUsd = reasoning.costUsd;
+    }
+  }
+
   public record(outcome: TurnAuditOutcome, errorMessage?: string, error?: unknown): void {
     if (this.recorded) return;
     this.recorded = true;
@@ -144,9 +208,14 @@ export class TurnAudit {
       tools: [...this.tools],
       toolDurationsMs: this.toolDurationsMs,
       textOutput: this.textOutput,
+      ...(this.tokens === undefined ? {} : { tokens: this.tokens }),
+      ...(this.costUsd === undefined ? {} : { costUsd: this.costUsd }),
+      ...(this.reasoningTokens === undefined ? {} : { reasoningTokens: this.reasoningTokens }),
+      ...(this.reasoningCostUsd === undefined ? {} : { reasoningCostUsd: this.reasoningCostUsd }),
       outcome,
       ...(errorMessage ? { errorCategory: classifyError(errorMessage) } : {}),
       ...(diagnosticFile ? { providerDiagnosticFile: diagnosticFile } : {}),
+      ...(this.input.kernel === undefined ? {} : { kernel: this.input.kernel }),
     };
 
     try {

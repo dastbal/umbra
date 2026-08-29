@@ -531,6 +531,11 @@ async function runPrompt<T>(
 
     readline.emitKeypressEvents(input);
     if (typeof input.setRawMode === 'function') input.setRawMode(true);
+    // `readline` may leave the line-feed paired with a prior carriage return
+    // buffered while control moves from the chat editor to this prompt. That
+    // byte belongs to the completed chat message, never to this selection.
+    // Drain only already-buffered data before listening for new input.
+    while (input.read() !== null) { /* discard stale input */ }
     input.resume();
     input.on('keypress', onKeypress);
 

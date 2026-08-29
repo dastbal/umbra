@@ -150,6 +150,17 @@ describe("Tools Unit Tests", () => {
       expect(mockFs.writeFileSync).not.toHaveBeenCalled();
     });
 
+    it("should return a tool error when a non-Error value reaches the write catch", async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockRequestApproval.mockImplementation(() => {
+        throw undefined;
+      });
+
+      await expect(safeWriteFileTool.invoke({ file_path: "package.json", content: "{}" }))
+        .resolves.toContain("Error writing file: undefined");
+      expect(mockFs.writeFileSync).not.toHaveBeenCalled();
+    });
+
     it("should leave the file untouched when approval is refused", async () => {
       mockFs.existsSync.mockReturnValue(true);
       mockRequestApproval.mockReturnValue(false);

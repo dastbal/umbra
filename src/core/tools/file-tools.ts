@@ -70,12 +70,13 @@ export const safeWriteFileTool = tool(
       }, 3000);
 
       return `✅ SUCCESS: File ${action} at ${filePath}. [METADATA: {"path": "${filePath}", "action": "${action}"}]`;
-    } catch (error: any) {
+    } catch (error: unknown) {
       // The approval interrupt travels as a thrown value; swallowing it here
       // would silently write the file without ever asking anyone.
       rethrowIfSuspension(error);
-      log.error(`Failed to write file ${filePath}: ${error.message}`);
-      return `❌ Error writing file: ${error.message}`;
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(`Failed to write file ${filePath}: ${message}`);
+      return `❌ Error writing file: ${message}`;
     }
   },
   {

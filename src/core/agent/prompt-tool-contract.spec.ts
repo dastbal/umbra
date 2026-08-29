@@ -9,6 +9,7 @@ jest.mock('../llm/provider', () => ({
 
 import * as tools from '../tools';
 import { DeepAgentFactory } from './deep-agent-factory';
+import { resolveCapabilityTools, type AgentCapability } from './agent-kernel';
 import { researcherSubAgent } from '../subagents/researcher.subagent';
 import { coderSubAgent } from '../subagents/coder.subagent';
 import { verifierSubAgent } from '../subagents/verifier.subagent';
@@ -58,6 +59,34 @@ const SIMPLE_DECLARED = [
  * tasks" — so only a backticked or called form means the tool.
  */
 const AMBIGUOUS_NAMES = new Set(['task']);
+
+/**
+ * Reports whether a prompt names a tool only in order to forbid it.
+ *
+ * A prohibition and an instruction look identical to a regex, which is why this
+ * check needs one and why the exception is a *shape* rather than a list. Two
+ * mentions in this codebase are real prohibitions and must survive: the Coder is
+ * told to use `safe_write_file` "(not write_file)" because deepagents
+ * contributes a `write_file` that breaks on Windows paths, and every mode is
+ * told that "Attempting to `safe_write_file` to these paths is FORBIDDEN",
+ * which protects `skills/*.md` and `AGENTS.md` from the agent that can write.
+ *
+ * Deleting either sentence to satisfy a test would remove a real safeguard, and
+ * excusing them by name would grow the list that turns a guard into decoration.
+ * So the sentence containing the mention has to read as a prohibition.
+ *
+ * Scoped to the sentence, never the whole prompt: a document that says "never"
+ * somewhere would otherwise excuse every tool it advertises.
+ */
+function forbiddenInPrompt(prompt: string, name: string): boolean {
+  // Word-bounded, so `safe_write_file` is not read as a mention of `write_file`.
+  const mentions = new RegExp(`\\b${name}\\b`);
+  const sentences = prompt.split(/(?<=[.!?])\s+|\n/);
+
+  return sentences
+    .filter((sentence) => mentions.test(sentence))
+    .every((sentence) => /\bnot\b|\bnever\b|\bforbidden\b/i.test(sentence));
+}
 
 /** Returns the tool names a prompt names as tools. */
 function toolsNamedIn(prompt: string): string[] {
@@ -145,19 +174,6 @@ describe('the deep prompt only names tools the model can actually call', () => {
 describe('a subagent prompt only names tools that subagent declares', () => {
   const SUBAGENTS = [researcherSubAgent, coderSubAgent, verifierSubAgent];
 
-  /**
-   * Reports whether a prompt names a tool in order to forbid it.
-   *
-   * A prohibition and an instruction look identical to a regex, which is why
-   * the check above is scoped to one mode. Rather than excusing such a mention
-   * with an exception list — five entries is how a guard becomes decoration —
-   * this demands the prohibiting form itself. The Coder is told to use
-   * safe_write_file "(not write_file)" precisely because deepagents contributes
-   * write_file and it breaks on Windows paths; deleting that sentence to satisfy
-   * a test would remove a real safeguard.
-   */
-  const forbiddenInPrompt = (prompt: string, name: string): boolean =>
-    new RegExp('\\bnot\\s+`?' + name + '\\b').test(prompt);
 
   it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
     'the %s prompt advertises nothing it cannot call',
@@ -199,5 +215,62 @@ describe('a subagent prompt only names tools that subagent declares', () => {
     const coderTools = (coderSubAgent.tools ?? []).map((tool) => (tool as { name: string }).name);
 
     expect(coderTools).toContain('list_adrs');
+  });
+});
+
+/**
+ * The same check, aimed where the defect actually happened.
+ *
+ * On 2026-08-28 the orchestrator was asked to review the project's decision
+ * records. Its prompt said *"call `list_adrs` first"*; its capability profile
+ * granted `search_codebase`, `verify_integrity`, `delegate` and
+ * `escalate_route`, and nothing else. The model spent most of its reasoning
+ * reconciling an order it could not obey, searched the code instead, and then
+ * delivered architecture conclusions inferred from two source files it happened
+ * to find.
+ *
+ * That is ADR-013's defect exactly — a prompt naming a tool the mode does not
+ * declare — and the test written to prevent it never looked here, because it was
+ * scoped to the `simple` agent while this prompt was left to inheritance.
+ *
+ * The capability list is the authority now, so the check reads the profile
+ * rather than a list retyped in a test. A capability added to the Supervisor
+ * widens what its prompt may name, with no edit here.
+ */
+describe('the orchestrator prompt only names tools its profile grants', () => {
+  const internals = DeepAgentFactory as unknown as {
+    buildSystemPrompt(rootDir: string, type: 'simple' | 'orchestrator' | 'analysis'): string;
+    createSupervisorRoleProfile(): { capabilities: readonly AgentCapability[] };
+  };
+
+  /** Tool names the Supervisor's own capabilities resolve to, plus the harness todo list. */
+  const supervisorDeclares = (): string[] => [
+    ...resolveCapabilityTools(internals.createSupervisorRoleProfile().capabilities, {
+      delegateTool: { name: 'delegate' } as never,
+      escalateRouteTool: { name: 'escalate_route' } as never,
+    }).map((one) => (one as { name: string }).name),
+    'write_todos',
+  ];
+
+  it('advertises nothing the Supervisor cannot call', () => {
+    const declared = supervisorDeclares();
+    const prompt = internals.buildSystemPrompt('C:\\project', 'orchestrator');
+    const undeclared = toolsNamedIn(prompt)
+      .filter((name) => !forbiddenInPrompt(prompt, name))
+      .filter((name) => !declared.includes(name));
+
+    expect(undeclared).toEqual([]);
+  });
+
+  it('can still name the ADR index, which is the capability that was missing', () => {
+    // Consulting the decision index is read-only and cheap. The prompt asks for
+    // it, so the profile has to grant it — this is the pair that broke.
+    expect(supervisorDeclares()).toContain('list_adrs');
+    expect(internals.buildSystemPrompt('C:\\project', 'orchestrator')).toContain('list_adrs');
+  });
+
+  it('names enough tools that the check cannot pass vacuously', () => {
+    expect(toolsNamedIn(internals.buildSystemPrompt('C:\\project', 'orchestrator')).length)
+      .toBeGreaterThan(2);
   });
 });

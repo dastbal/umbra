@@ -13,19 +13,14 @@ import {
   isVertexAnthropicModel,
 } from '../config/model-resolver';
 import {
-  askCodebaseTool,
-  executeTestsTool,
-  integrityCheckTool,
-  refreshIndexTool,
-  safeWriteFileTool,
-  safeReadFileTool,
-  deleteFileTool,
-  listFilesTool,
-  listAdrsTool,
-} from '../tools';
-import { createResearcherSubAgent } from '../subagents/researcher.subagent';
-import { createCoderSubAgent } from '../subagents/coder.subagent';
-import { createVerifierSubAgent } from '../subagents/verifier.subagent';
+  createResearcherRoleProfile,
+} from '../subagents/researcher.subagent';
+import {
+  createCoderRoleProfile,
+} from '../subagents/coder.subagent';
+import {
+  createVerifierRoleProfile,
+} from '../subagents/verifier.subagent';
 import {
   AgentConfig,
   AgentConfigInput,
@@ -41,6 +36,8 @@ import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import { buildSubagentGraphs } from './delegation/subagent-registry';
 import { createDelegateTool } from './delegation/delegate.tool';
+import { buildReadbackGraphs } from './delegation/readback';
+import { escalateRouteTool } from '../tools/interaction/escalate-route.tool';
 import {
   DEFAULT_INTERACTIVE_TOOL_BUDGET,
   createIterationBudgetMiddleware,
@@ -58,6 +55,17 @@ import {
   migrateLegacyAgentDirectory,
 } from '../config/agent-directory';
 import { ensureAgentStateIgnored } from '../config/workspace-scaffold';
+import {
+  KERNEL_API_VERSION,
+  buildKernelInstructions,
+  buildSubagentFromProfile,
+  registerAgentKernelTelemetry,
+  resolveCapabilityTools,
+  validateRoleExtensions,
+  type AgentRoleExtension,
+  type AgentRuntimeContext,
+  type RoleProfile,
+} from './agent-kernel';
 
 /** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
 const REPLACED_BUILTIN_TOOLS = [
@@ -124,6 +132,13 @@ export interface DeepAgentFactoryConfig {
    * is loaded; when both are absent, safe defaults are used.
    */
   agentConfig?: AgentConfigInput;
+
+  /**
+   * Explicit, code-owned advisory roles supplied by an application or a future
+   * role library. They are validated against the AgentKernel before startup;
+   * configuration files and automatic plugin discovery are deliberately absent.
+   */
+  roleExtensions?: readonly AgentRoleExtension[];
 }
 
 /**
@@ -164,6 +179,30 @@ export interface DeepAgentFactoryConfig {
  * );
  * ```
  */
+/**
+ * Operational rules that only mean something to an agent holding write tools.
+ *
+ * These lived in the prompt every mode inherited, so the Orchestrator — which
+ * delegates and holds no writer — was told to verify its writes with
+ * `safe_read_file` and to count files it would never create. On 2026-08-28 a
+ * contract check finally aimed at that prompt found four such tools named and
+ * ungranted, which is ADR-013 defect in the place ADR-013 test never looked.
+ *
+ * Appended by the modes that declare the tools it names, and by no other.
+ */
+const WRITER_PROTOCOL = `
+🔍 SESSION STATE VERIFICATION — when the work depends on earlier file changes:
+History is a record of intent — disk is ground truth.
+- If history mentions files you created before → verify with \`safe_read_file\` before assuming.
+- If a file is missing → create it from scratch. Never skip a write because history says it was done.
+
+🚨 FILE CREATION LAW:
+Describing a file ≠ creating it. A file only exists on disk after \`safe_write_file\` is called.
+- After EVERY \`safe_write_file\` → immediately verify with \`safe_read_file\`. Count your writes.
+- Never mark a todo step done until disk confirmation.
+
+`;
+
 export class DeepAgentFactory {
   /**
    * Creates a simple deep agent for quick, single-agent tasks.
@@ -189,10 +228,11 @@ export class DeepAgentFactory {
 
     const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir);
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'simple', agentConfig);
+    const profile = DeepAgentFactory.createDeepRoleProfile();
 
     const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
 
-    return createDeepAgent({
+    const agent = createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
@@ -200,20 +240,9 @@ export class DeepAgentFactory {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
       })],
-      tools: [                           // ADR-002
-        safeWriteFileTool,
-        safeReadFileTool,
-        // Gated by the security policy: every delete raises a HITL interrupt
-        // that ChatSession renders for the operator (ADR-011).
-        deleteFileTool,
-        listFilesTool,
-        listAdrsTool,
-        askCodebaseTool,
-        refreshIndexTool,
-        integrityCheckTool,
-        executeTestsTool,
-      ] as any[],
+      tools: resolveCapabilityTools(profile.capabilities) as any[],
     });
+    return registerAgentKernelTelemetry(agent, [profile]);
   }
 
   /**
@@ -249,7 +278,7 @@ export class DeepAgentFactory {
     );
     const modelParam = DeepAgentFactory.resolveRuntimeModel(model);
 
-    return createDeepAgent({
+    const agent = createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       responseFormat: groundedAnalysisSchema as any, // ADR-002: dual Zod package boundary
@@ -260,6 +289,7 @@ export class DeepAgentFactory {
       // modes retain focused reads and RAG for interactive work.
       tools: [] as any[],
     });
+    return agent;
   }
 
   /**
@@ -295,8 +325,7 @@ export class DeepAgentFactory {
     // must reach the provider (ADR-013).
     await DeepAgentFactory.bootstrap(rootDir, model, interaction, false);
 
-    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
-    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'orchestrator', agentConfig);
+    const runtimeContext: AgentRuntimeContext = { rootDir, agentConfig };
 
     // Same Ollama adapter pattern as create() — pass BaseChatModel for Ollama,
     // string for Vertex AI.
@@ -305,27 +334,66 @@ export class DeepAgentFactory {
     // The delegates are compiled here rather than handed to deepagents, because
     // the delegation tool's schema is the mandate and a tool with our schema has
     // to own its dispatch (ADR-021).
-    const delegateTool = createDelegateTool(buildSubagentGraphs({
-      researcher: createResearcherSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
-      coder: createCoderSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
-      verifier: createVerifierSubAgent(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
-    }));
+    const builtInProfiles: RoleProfile[] = [
+      createResearcherRoleProfile(DeepAgentFactory.resolveRoleModel(agentConfig.models.researcher)),
+      createCoderRoleProfile(DeepAgentFactory.resolveRoleModel(agentConfig.models.coder)),
+      createVerifierRoleProfile(DeepAgentFactory.resolveRoleModel(agentConfig.models.verifier)),
+    ];
+    const roleExtensions = config.roleExtensions ?? [];
+    validateRoleExtensions(roleExtensions, builtInProfiles.map((profile) => profile.id));
+    const subagentProfiles = [
+      ...builtInProfiles,
+      ...roleExtensions.flatMap((extension) => extension.roles),
+    ];
+    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, 'orchestrator');
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(
+      rootDir,
+      'orchestrator',
+      agentConfig,
+      '',
+      subagentProfiles.filter((profile) => profile.workflowRole === 'advisory'),
+    );
+    const subagentSpecs = Object.fromEntries(
+      subagentProfiles.map((profile) => [
+        profile.id,
+        buildSubagentFromProfile(profile, runtimeContext),
+      ]),
+    );
+    const delegateTool = createDelegateTool(
+      buildSubagentGraphs(subagentSpecs),
+      buildReadbackGraphs(subagentSpecs),
+    );
+    const supervisorProfile = DeepAgentFactory.createSupervisorRoleProfile();
+    const advisoryRoleIds = subagentProfiles
+      .filter((profile) => profile.workflowRole === 'advisory')
+      .map((profile) => profile.id);
 
-    return createDeepAgent({
+    const agent = createDeepAgent({
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      middleware: [createOrchestrationGuard({
-        maxRetries: agentConfig.limits.maxRetries,
-        maxAgentTurns: agentConfig.limits.maxAgentTurns,
-      })] as any[],
-      tools: [                           // ADR-002
-        askCodebaseTool,
-        refreshIndexTool,
-        integrityCheckTool,
-        delegateTool,
+      // The governor first, so a turn that has spent its tokens, its seconds or
+      // its dollars stops before the guard does any delegation bookkeeping.
+      // ADR-019 installed these ceilings on the single-agent path and left the
+      // orchestrated one out — the same omission ADR-008 made, which is how a
+      // greeting came to cost /usr/bin/bash.0729.
+      middleware: [
+        createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+          limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
+          costOf: DeepAgentFactory.buildCostResolver(model),
+        }),
+        createOrchestrationGuard({
+          maxRetries: agentConfig.limits.maxRetries,
+          maxAgentTurns: agentConfig.limits.maxAgentTurns,
+          advisoryRoleIds,
+        }),
       ] as any[],
+      tools: resolveCapabilityTools(supervisorProfile.capabilities, {
+        delegateTool,
+        escalateRouteTool,
+      }) as any[],
     });
+    return registerAgentKernelTelemetry(agent, [supervisorProfile, ...subagentProfiles]);
   }
 
   // ── Private Helpers ────────────────────────────────────────────────────────
@@ -466,6 +534,44 @@ export class DeepAgentFactory {
     input?: AgentConfigInput,
   ): AgentConfig {
     return input === undefined ? loadAgentConfig(rootDir) : parseAgentConfig(input);
+  }
+
+  /** The direct generalist's role profile; its task-specific prompt stays in this factory. */
+  private static createDeepRoleProfile(): RoleProfile {
+    return {
+      id: 'deep',
+      displayName: 'Deep',
+      description: 'Resolves direct engineering tasks without delegating to specialists.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'deep',
+      rolePrompt: 'Resolve the assigned task directly.',
+      capabilities: [
+        'write_code',
+        'delete_files',
+        'read_code',
+        'read_adrs',
+        'search_codebase',
+        'run_tests',
+        'verify_integrity',
+      ],
+    };
+  }
+
+  /** The coordinator's role profile; it receives delegation but no write capability. */
+  private static createSupervisorRoleProfile(): RoleProfile {
+    return {
+      id: 'supervisor',
+      displayName: 'Supervisor',
+      description: 'Coordinates specialist agents and reports their verified result.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'supervisor',
+      rolePrompt: 'Coordinate specialist agents without implementing code yourself.',
+      // read_adrs is read-only and cheap: the index returns paths, titles and
+      // status, never bodies. Delegating a catalogue lookup to the Researcher
+      // costs a whole model call, and without it the shared prompt ordered a
+      // `list_adrs` the Supervisor could not call — ADR-013 defect, reborn.
+      capabilities: ['search_codebase', 'read_adrs', 'read_code', 'verify_integrity', 'delegate', 'escalate_route'],
+    };
   }
 
   /**
@@ -866,6 +972,7 @@ export class DeepAgentFactory {
     };
   }
 
+
   /**
    * Builds the system prompt for the given agent type.
    *
@@ -880,11 +987,14 @@ export class DeepAgentFactory {
     type: 'simple' | 'orchestrator' | 'analysis',
     agentConfig: AgentConfig = parseAgentConfig({}),
     evidenceManifest = '',
+    advisoryRoles: readonly RoleProfile[] = [],
   ): string {
     const evidenceProtocol = buildEvidenceProtocolPrompt(
       type === 'analysis' ? 'preloaded-manifest' : 'tool-research',
     );
-    const base = `You are a Principal Software Engineer specialized in NestJS (Node.js).
+    const base = `${buildKernelInstructions({ rootDir, agentConfig })}
+
+You are a Principal Software Engineer specialized in NestJS (Node.js).
 You operate directly on the local file system of a live, real-world project at: ${rootDir}
 
 💬 CONVERSATION GATE — this takes precedence over every protocol below:
@@ -892,6 +1002,12 @@ If the message asks for no work — a greeting, an acknowledgement, a thank you,
 a one-line remark with no question about this project — answer it in one or two
 sentences and call no tools at all. The protocols below describe how to carry out
 work; they begin to apply at the first message that asks for some, not before.
+This outranks any routing envelope: an envelope says how work would be carried
+out, never that there is any.
+
+Answer as a person would. Never mention this gate, a protocol, an envelope, or
+your reasoning about which to apply — an operator who says hello gets a greeting
+back, not a description of the rule that produced it.
 
 ${evidenceProtocol}
 🎯 SKILL DISCOVERY — before starting a task:
@@ -945,16 +1061,6 @@ When asked to fix a bug or explain something:
 - NEVER say "you should consider X" — say what to do and do it.
 - NEVER give 3 vague alternatives — give THE answer with reasoning.
 
-🔍 SESSION STATE VERIFICATION — when the work depends on earlier file changes:
-History is a record of intent — disk is ground truth.
-- If history mentions files you created before → verify with \`safe_read_file\` before assuming.
-- If a file is missing → create it from scratch. Never skip a write because history says it was done.
-
-🚨 FILE CREATION LAW:
-Describing a file ≠ creating it. A file only exists on disk after \`safe_write_file\` is called.
-- After EVERY \`safe_write_file\` → immediately verify with \`safe_read_file\`. Count your writes.
-- Never mark a todo step done until disk confirmation.
-
 🛑 SAFETY RULES (universal — apply to every task):
 - Deleting a file always raises an operator approval prompt on its own; never
   assume a delete happened until the tool result confirms it.
@@ -995,7 +1101,7 @@ For deep explanations, load \`skills/mentor-mode.md\` (triggered by keywords: me
 Keep handoffs compact; never copy full subagent transcripts into your working context.`;
 
     if (type === 'simple') {
-      return base + policy + `
+      return base + WRITER_PROTOCOL + policy + `
 
 ⚡ TASK SIZING — classify before acting:
 - **SMALL** (1-2 files, obvious change): No \`write_todos\`. Read → Write → Done. Max 3 tool calls.
@@ -1053,6 +1159,11 @@ low-cost, and bounded; do not invent evidence that is absent from the manifest.
 ${evidenceManifest}`;
     }
 
+    const advisoryCatalog = advisoryRoles.length === 0
+      ? ''
+      : `\n\n🔎 AVAILABLE ADVISORY ROLES:\n${advisoryRoles
+        .map((role) => `- **${role.id}**: ${role.description} Read-only; it cannot replace the core lifecycle.`)
+        .join('\n')}\nUse an advisory role only for focused evidence. It never authorizes implementation.`;
 
     // Orchestrator prompt
     return base + policy + `
@@ -1064,7 +1175,12 @@ You do NOT implement code yourself — you delegate to the right specialist.
 📋 MANDATORY ORCHESTRATION PROTOCOL:
 Every interactive request carries a trusted \`[ORCHESTRATION_ROUTE ...]\` envelope generated
 before it enters this graph. Obey it exactly:
-- When \`implementation=false\`, do not call a subagent or write. Answer using read-only tools.
+- \`lane=answer\` — the message asked for no work. Answer it and call nothing.
+- \`lane=read\` — you may read, and you may not change files. If reading shows the request
+  genuinely needs a code change, call \`escalate_route\` once with the reason, then delegate.
+  The route is sorted before anyone has read anything, so it starts low on purpose; raising
+  it is expected, not a failure.
+- \`lane=change\` — the full route applies.
 - When \`implementation=true\`, follow the required route in its exact order. The Coder is the
   only writer and uses its quality-oriented model profile.
 - Call the registered task identifiers exactly as \`researcher\`, \`coder\`, and \`verifier\`
@@ -1109,7 +1225,7 @@ reserve is held back so you can always answer. Consequences you must handle:
   implement: report what is known and what is missing.
 - If a delegation is refused for lack of budget, do NOT delegate again. Answer with what
   has been established and state plainly what was not investigated.
-- A delegate may ask a question through \`ask_delegator\`. It is answered from the order you
+- A delegate may ask you a question about its order. It is answered from what you
   wrote, or put to the operator. The better your order, the fewer interruptions.
 
 🤖 AVAILABLE SUBAGENTS:
@@ -1121,6 +1237,6 @@ reserve is held back so you can always answer. Consequences you must handle:
 - \`ask_codebase\`: For quick questions you can answer yourself without delegating.
 - \`run_integrity_check\`: Final verification after coder finishes.
 - \`refresh_project_index\`: If RAG seems stale after coder writes files.
-- \`write_todos\`, \`delegate\`: Standard orchestration tools.`;
+- \`write_todos\`, \`delegate\`: Standard orchestration tools.${advisoryCatalog}`;
   }
 }

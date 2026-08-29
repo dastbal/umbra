@@ -1,6 +1,5 @@
 import { createAgent } from 'langchain';
 import type { SubAgent } from 'deepagents';
-import type { GuardedSubagent } from '../orchestration-policy';
 import { createSubagentBudgetMiddleware } from './subagent-budget.middleware';
 
 /** A compiled delegate, invocable with a state and a config. */
@@ -10,7 +9,7 @@ export interface CompiledSubagent {
 }
 
 /** The three delegates of the orchestration lifecycle, compiled and ready. */
-export type SubagentGraphs = Record<GuardedSubagent, CompiledSubagent>;
+export type SubagentGraphs = Record<string, CompiledSubagent>;
 
 /**
  * Compiles the delegates this project dispatches to.
@@ -49,13 +48,11 @@ export type SubagentGraphs = Record<GuardedSubagent, CompiledSubagent>;
  * @returns The compiled delegates.
  */
 export function buildSubagentGraphs(
-  specs: Record<GuardedSubagent, SubAgent>,
+  specs: Record<string, SubAgent>,
 ): SubagentGraphs {
-  return {
-    researcher: compile(specs.researcher),
-    coder: compile(specs.coder),
-    verifier: compile(specs.verifier),
-  };
+  return Object.fromEntries(
+    Object.entries(specs).map(([roleId, spec]) => [roleId, compile(spec)]),
+  );
 }
 
 /**

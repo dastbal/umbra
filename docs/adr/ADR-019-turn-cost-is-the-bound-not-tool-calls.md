@@ -8,7 +8,7 @@ Date: 2026-08-28
 
 ## Status
 
-Accepted
+Accepted — amended 2026-08-28
 
 ## Deciders
 
@@ -218,3 +218,24 @@ flowchart TD
 - `src/presentation/cli/stream-renderer.ts` — `StreamRenderer.noteTurnSpend`,
   `StreamRenderer.resetTurnSpend`, `buildCounter`, `formatTokens`.
 - `src/presentation/cli/turn-audit.ts` — `TurnAudit`, `TurnAuditRecord`.
+
+---
+
+## Amendment — 2026-08-28: the orchestrated path was left out again
+
+The ceilings this record installed were applied to `DeepAgentFactory#create` and
+not to `createOrchestrator`, which carried only its delegation guard. So
+`umbra orchestrate` had no token, wall-clock or cost bound of any kind.
+
+That is the same omission [ADR-008](./ADR-008-bounded-interactive-iteration-audit.md)
+made, in the same place, and it had already been amended once for exactly it. The
+cost of repeating it was measured the following day: the word maestro ran the
+full implementation route for 27 calls and 677.8k tokens at $0.0729, and wrote a
+file to disk. No ceiling was reached because none was installed.
+
+The governor now runs on the orchestrated path too, ahead of the delegation
+guard, so a turn that has spent its allowance stops before any delegation
+bookkeeping begins. Nothing this record decided changed — only where it applies.
+
+The routing repair that accompanies it is recorded in
+[ADR-023](./ADR-023-interlocking-triage-readback-and-balanced-books.md).

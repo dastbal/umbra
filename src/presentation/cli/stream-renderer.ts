@@ -409,6 +409,57 @@ export class StreamRenderer {
   }
 
   /**
+   * Prints what the finished turn cost, on a line that stays.
+   *
+   * ## Why the wait indicator was not enough
+   *
+   * `noteTurnSpend` paints the counter onto the wait indicator, and the wait
+   * indicator is transient by contract: it is erased the moment an answer
+   * arrives. So the cost of a turn was visible only while the operator was
+   * waiting for it, and vanished exactly when they could read it.
+   *
+   * That went unnoticed while turns were slow. Then the conversation gate and
+   * the routing lanes made them fast, and a fast turn barely spins — the
+   * cheaper the work became, the more completely its price disappeared. The
+   * operator asked where the token counter had gone; it had not gone anywhere,
+   * it had never been anywhere durable.
+   *
+   * ## The thinking share
+   *
+   * Since the [ADR-006](../../../docs/adr/ADR-006-vertex-tool-cycle-streaming-fallback.md)
+   * amendment the model's reasoning is generated, billed, and never printed.
+   * Money leaving without a trace on screen is exactly the failure this line
+   * was built to end, so the share is shown beside the total whenever the
+   * provider reports it — never as a separate charge, because those tokens are
+   * already inside the total.
+   *
+   * @param spend - Tool calls, tokens, thinking share and USD for the turn.
+   */
+  public showTurnSpend(spend: {
+    toolCalls: number;
+    tokens: number;
+    costUsd?: number;
+    reasoningTokens?: number;
+    reasoningCostUsd?: number;
+  }): void {
+    if (spend.toolCalls === 0 && spend.tokens === 0) return;
+
+    const parts = [`${spend.toolCalls} call${spend.toolCalls === 1 ? '' : 's'}`];
+    if (spend.tokens > 0) parts.push(`${formatTokens(spend.tokens)} tok`);
+    if (spend.reasoningTokens !== undefined && spend.reasoningTokens > 0) {
+      const price = spend.reasoningCostUsd === undefined
+        ? ''
+        : ` $${spend.reasoningCostUsd.toFixed(4)}`;
+      parts.push(`${formatTokens(spend.reasoningTokens)} thinking${price}`);
+    }
+    // Omitted rather than shown as zero when the model has no published price:
+    // a counter reading $0.0000 for a real spend is the failure this started from.
+    if (spend.costUsd !== undefined) parts.push(`$${spend.costUsd.toFixed(4)}`);
+
+    process.stdout.write(colors.dim(`  ↳ ${parts.join(' · ')}\n`));
+  }
+
+  /**
    * Reports what the current turn has spent, for the live indicator.
    *
    * A recorded turn ran 108 seconds on the word "hey" and another ran 921

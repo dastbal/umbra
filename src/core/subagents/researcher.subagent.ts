@@ -1,14 +1,14 @@
 import { SubAgent } from 'deepagents';
 import { researchArtifactSchema } from '../agent/contracts';
 import { buildEvidenceProtocolPrompt } from '../agent/evidence-protocol';
-import {
-  askCodebaseTool,
-  safeReadFileTool,
-  listFilesTool,
-  listAdrsTool,
-  askDelegatorTool,
-} from '../tools';
 import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-budget.middleware';
+import {
+  KERNEL_API_VERSION,
+  buildSubagentFromProfile,
+  createDefaultAgentRuntimeContext,
+  type AgentRuntimeContext,
+  type RoleProfile,
+} from '../agent/agent-kernel';
 
 /**
  * System prompt for the Researcher SubAgent.
@@ -21,7 +21,7 @@ import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-bud
  * 2. Identify relevant files and their relationships
  * 3. Produce a detailed, actionable implementation plan
  */
-const RESEARCHER_SYSTEM_PROMPT = `${buildEvidenceProtocolPrompt()}
+export const RESEARCHER_SYSTEM_PROMPT = `${buildEvidenceProtocolPrompt()}
 You are a Senior Software Architect specialized in NestJS and Domain-Driven Design (DDD).
 
 Your role is ANALYSIS ONLY — you do not write code. Your job is to understand the codebase deeply
@@ -93,28 +93,27 @@ transcript or large code blocks.
  * The Researcher returns a detailed implementation plan that the Coder
  * agent uses to implement without needing to re-read the codebase.
  */
-const baseResearcherSubAgent: SubAgent = {
-  name: 'researcher',
-  description:
-    'Analyzes the NestJS codebase using RAG and produces a detailed, actionable implementation plan. ' +
-    'Use this subagent BEFORE any implementation task to understand existing patterns, ' +
-    'identify files to create/modify, and define the exact code structure to follow. ' +
-    'READ-ONLY: this agent never writes files.',
-  systemPrompt: RESEARCHER_SYSTEM_PROMPT,
-  responseFormat: researchArtifactSchema,
-  // ADR: Cast to any[] — DynamicStructuredTool type boundary (dual @langchain/core)
-  tools: [
-    askCodebaseTool,
-    safeReadFileTool,
-    listFilesTool,
-    listAdrsTool,
-    askDelegatorTool,
-  ] as any[],
-  // The budget this delegate was granted lives in the turn ledger, not in the
-  // recursion limit: deepagents starts every subagent with a fresh graph run
-  // and therefore a fresh allowance (ADR-014).
-  middleware: [createSubagentBudgetMiddleware()] as any[],
-};
+/** Creates the role profile without coupling its profession to tool assembly. */
+export function createResearcherRoleProfile(model?: SubAgent['model']): RoleProfile {
+  return {
+    id: 'researcher',
+    displayName: 'Researcher',
+    description:
+      'Analyzes the NestJS codebase using RAG and produces a detailed, actionable implementation plan. ' +
+      'Use this subagent BEFORE any implementation task to understand existing patterns, ' +
+      'identify files to create/modify, and define the exact code structure to follow. ' +
+      'READ-ONLY: this agent never writes files.',
+    kernelApiVersion: KERNEL_API_VERSION,
+    workflowRole: 'researcher',
+    rolePrompt: RESEARCHER_SYSTEM_PROMPT,
+    capabilities: ['search_codebase', 'read_code', 'read_adrs', 'ask_delegator'],
+    ...(model === undefined ? {} : { model }),
+    responseFormat: researchArtifactSchema as never,
+    // The budget this delegate was granted lives in the turn ledger, not in the
+    // recursion limit: deepagents starts every subagent with a fresh graph run.
+    middleware: [createSubagentBudgetMiddleware()] as any[],
+  };
+}
 
 /**
  * Creates a Researcher specification with an optional role-specific model.
@@ -122,10 +121,11 @@ const baseResearcherSubAgent: SubAgent = {
  * @param model - Model string or chat model selected by the orchestration policy.
  * @returns A read-only Researcher subagent specification.
  */
-export function createResearcherSubAgent(model?: SubAgent['model']): SubAgent {
-  return model === undefined
-    ? baseResearcherSubAgent
-    : { ...baseResearcherSubAgent, model };
+export function createResearcherSubAgent(
+  model?: SubAgent['model'],
+  context: AgentRuntimeContext = createDefaultAgentRuntimeContext(),
+): SubAgent {
+  return buildSubagentFromProfile(createResearcherRoleProfile(model), context);
 }
 
 /** Default Researcher specification retained for callers using the legacy import. */

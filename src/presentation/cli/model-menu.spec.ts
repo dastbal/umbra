@@ -230,7 +230,12 @@ describe('showModelMenu reasoning screen', () => {
     );
   });
 
-  it('marks the display row forced-on for the budget-based models', async () => {
+  // Corrected 2026-08-28 with the ADR-006 amendment. This row used to assert a
+  // filled box, on the understanding that a forced-on model's reasoning was
+  // always displayed. It is no longer printed by anyone, so a filled box would
+  // claim something the CLI does not do — the row stays unactionable, and the
+  // hint now says the reasoning is billed rather than shown.
+  it('marks the display row unactionable for the budget-based models', async () => {
     mockSelectOutcome
       .mockResolvedValueOnce({ status: 'selected', value: 'vertex-gemini' })
       .mockResolvedValueOnce({ status: 'selected', value: 'gemini-2.5-pro' })
@@ -242,8 +247,8 @@ describe('showModelMenu reasoning screen', () => {
       (row) => (row.value as { kind?: string } | undefined)?.kind === 'toggle-display',
     );
     expect(toggle?.disabled).toBe(true);
-    expect(toggle?.label).toContain('☑');
-    expect(toggle?.hint).toContain('cannot be turned off');
+    expect(toggle?.label).toContain('☐');
+    expect(toggle?.hint).toContain('not printed');
   });
 
   it('skips the reasoning screen for Ollama, which has no reasoning controls', async () => {

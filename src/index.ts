@@ -5,6 +5,7 @@ export * from "./ai-agent.module";
 export * from "./core/agent/factory";
 export * from "./core/agent/deep-agent-factory";
 export * from "./core/agent/contracts";
+export * from "./core/agent/agent-kernel";
 export * from './core/agent/tokens';
 export * from "./core/agent/evidence-protocol";
 export * from "./core/agent/workspace-evidence";

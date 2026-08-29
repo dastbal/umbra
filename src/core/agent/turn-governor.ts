@@ -32,6 +32,21 @@ export interface TurnSpend {
   toolCalls: number;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * The share of `outputTokens` the model spent thinking rather than answering.
+   *
+   * A **subset**, never an addition: providers that report it already counted
+   * it inside `outputTokens`, so adding it anywhere would double-count the
+   * turn. It is tracked separately only to answer one question — how much of
+   * this turn was paid for deliberation the operator never sees, since
+   * [ADR-006](../../../docs/adr/ADR-006-vertex-tool-cycle-streaming-fallback.md)
+   * stopped printing it.
+   *
+   * Stays 0 when the provider reports nothing, which is not the same as a turn
+   * that genuinely did not think. `@langchain/anthropic` reports no breakdown
+   * at all in the installed version; Gemini reports `thoughtsTokenCount`.
+   */
+  reasoningTokens: number;
   startedAtMs: number;
 }
 
@@ -39,6 +54,8 @@ export interface TurnSpend {
 export interface ObservedUsage {
   inputTokens: number;
   outputTokens: number;
+  /** Thinking tokens, already included in `outputTokens`. Absent when unreported. */
+  reasoningTokens?: number;
 }
 
 /** Converts observed usage into USD, when pricing for the model is known. */
@@ -64,7 +81,13 @@ export const DEFAULT_TURN_LIMITS: Readonly<TurnLimits> = {
  * @returns A zeroed spend record.
  */
 export function createTurnSpend(nowMs: number): TurnSpend {
-  return { toolCalls: 0, inputTokens: 0, outputTokens: 0, startedAtMs: nowMs };
+  return {
+    toolCalls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    startedAtMs: nowMs,
+  };
 }
 
 /**
@@ -91,6 +114,8 @@ export function recordToolCall(spend: TurnSpend): void {
 export function recordUsage(spend: TurnSpend, usage: ObservedUsage): void {
   spend.inputTokens += usage.inputTokens;
   spend.outputTokens += usage.outputTokens;
+  // Accumulated, never added to the totals: it is already inside outputTokens.
+  spend.reasoningTokens += usage.reasoningTokens ?? 0;
 }
 
 /**
@@ -114,7 +139,26 @@ export function readUsage(message: unknown): ObservedUsage | null {
   const outputTokens = typeof record.output_tokens === 'number' ? record.output_tokens : 0;
   if (inputTokens === 0 && outputTokens === 0) return null;
 
-  return { inputTokens, outputTokens };
+  return { inputTokens, outputTokens, ...readReasoningTokens(record) };
+}
+
+/**
+ * Reads the thinking share of a response's completion tokens.
+ *
+ * LangChain normalizes this to `output_token_details.reasoning`; for Gemini it
+ * is `thoughtsTokenCount` (`@langchain/google-common/utils/gemini.js`:587).
+ * Providers that report no breakdown yield nothing rather than a zero, so an
+ * unreported turn is never mistaken for a turn that did not think.
+ *
+ * @param usage - The response's `usage_metadata`, already narrowed to a record.
+ * @returns `{ reasoningTokens }` when reported, an empty object otherwise.
+ */
+function readReasoningTokens(usage: Record<string, unknown>): { reasoningTokens?: number } {
+  const details = usage.output_token_details;
+  if (typeof details !== 'object' || details === null) return {};
+
+  const reasoning = (details as Record<string, unknown>).reasoning;
+  return typeof reasoning === 'number' ? { reasoningTokens: reasoning } : {};
 }
 
 /**

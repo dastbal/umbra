@@ -131,6 +131,25 @@ exercised, because the tool was never callable. Treat that limit as unproven.
 
 ## Harness tool exclusions never reach the subagents
 
+> **Closed 2026-08-28** by
+> [ADR-023](./adr/ADR-023-interlocking-triage-readback-and-balanced-books.md).
+> Kept rather than deleted, because the reasoning below is what a future reader
+> needs before handing subagent construction back to a library.
+>
+> The fix was not the one planned here. Step 2 expected a per-subagent exclusion
+> middleware; what happened instead is that this project stopped letting
+> `deepagents` build the graphs at all. `subagent-registry.ts` compiles the three
+> delegates from the same specifications that already described them, so **a
+> delegate holds exactly the tools its specification declares** and the list is
+> no longer assembled in a second, unverified place.
+>
+> That was not done for this defect — it was forced by ADR-023, whose delegation
+> tool carries the order in its schema and therefore has to own its dispatch.
+> Closing this was the consequence, which is worth noting: the entry sat open for
+> two days as a defect worth fixing, and was closed as a side effect of something
+> else. Step 3 of the plan below shipped separately: the contract test now covers
+> all three subagent prompts.
+
 > Recorded 2026-08-26, branch `2.0.0`. Found by the first `umbra orchestrate` run
 > that got past the delegation guard (see the amendment to
 > [ADR-013](./adr/ADR-013-subagent-tool-exclusion-and-provider-diagnostics.md)).
@@ -735,3 +754,128 @@ Compare the zod schemas of `listFilesTool` and `safeReadFileTool` in
 `src/core/tools/file-tools.ts`. The likely difference is a single-argument
 schema being collapsed by deepagents into an `input` envelope, in which case the
 fix is the schema shape, not the tool.
+
+---
+
+## Rendering the model's reasoning, when the operator asks for it
+
+> Recorded 2026-08-28, branch `2.1.3`. Surfaced by the ADR-006 amendment that
+> stopped the reasoning leaking into the answer. Deferred because it is a
+> feature with a UI decision inside it, not the defect that was being fixed.
+
+### The idea
+
+`Show the model's reasoning` should actually show it — visually separated from
+the answer, the way a thinking block reads in a chat client: dimmed, boxed, and
+skippable.
+
+### What is actually true today
+
+No provider's reasoning reaches the screen, whatever the operator chooses:
+
+| Model family | What Umbra sends | What the CLI does |
+|---|---|---|
+| Claude 5 (`controllable`) | `thinking: { type: 'adaptive', display: 'summarized' }` when the toggle is on | hides it — `readVisibleText` drops `thinking` blocks |
+| Claude 4.5 (`forced-on`) | thinking budget, reasoning always returned | hides it |
+| Gemini 2.5 (`forced-on`) | thinking budget, `includeThoughts` derived by the library | stripped in `VertexChatAdapter._generate` |
+| Gemini 3.x (`unavailable`) | `thinkingLevel`, no thoughts returned | nothing to hide |
+
+So the `controllable` toggle changes the request and nothing else. It is
+**billed and discarded**. The menu now says exactly that rather than implying a
+display — see `DISPLAY_HINTS` in `src/presentation/cli/model-menu.ts` — because
+this repository's own rule, written in `reasoning-profile.ts`, is that a switch
+which silently does nothing is worse than one that admits what it cannot do.
+
+### The mechanism to reuse
+
+Everything needed already exists and is verified:
+
+- `readVisibleText` (`src/core/llm/visible-text.ts`) already **identifies**
+  reasoning blocks across all three provider spellings. It discards them; the
+  feature needs it to return them separately instead — a second return value,
+  not a second classifier.
+- `VertexChatAdapter._generate` already splits the two halves before the Vertex
+  transport fuses them into one string. It emits the visible half; the reasoning
+  half is right there beside it.
+- `StreamRenderer` already owns transient, styled, non-answer output — the tool
+  box and the wait indicator prove the pattern.
+
+### The plan
+
+1. `readVisibleText` returns `{ visible, reasoning }` rather than a string.
+   Every current caller reads `.visible` and behaves exactly as it does now.
+2. `StreamRenderer.streamReasoning(text)` renders the reasoning half dimmed and
+   clearly outside the answer. This is the actual design decision, and it is why
+   this is deferred: inline dim text, a collapsible box, and a `/thinking` pager
+   are three different products.
+3. The CLI passes the reasoning half only when
+   `describeReasoning(model).display === 'controllable'` **and**
+   `AGENT_REASONING_DISPLAY` is on. `forced-on` stays hidden: the operator did
+   not ask, and Anthropic's unsummarized thinking is long.
+4. `ReasoningDisplaySupport` then means what it says again, and ADR-016's
+   `forced-on` row gets an amendment noting that the library limitation it
+   describes is about the *request*, never about the display.
+
+### Why it was not done now
+
+The session was scoped to a rendering defect: the model's private deliberation
+was reaching the operator as if it were the reply. Adding a deliberate way to
+show that same text, in the same session, is how a fix turns into a feature
+nobody reviewed.
+
+---
+
+## The middleware that threw `undefined`
+
+> Recorded 2026-08-28, branch `2.1.3`. Open defect, **not** a design choice:
+> deferred because it could not be reproduced, not because it was judged not
+> worth fixing.
+
+### What was seen
+
+A `umbra deep` turn died immediately, before any output:
+
+```
+✗ Error
+└─ Cannot read properties of undefined (reading 'message')
+   at MiddlewareError.wrap (…/langchain/dist/agents/errors.cjs:69:10)
+```
+
+### What is known
+
+`MiddlewareError` is LangChain's wrapper for anything a middleware throws. It
+copies the wrapped error's message onto itself (`errors.cjs`:54) and keeps the
+original in `cause` (`errors.cjs`:57). So:
+
+- The message shown **is the original's**, repeated by the wrapper.
+- The frame shown is **the wrapper's**, not the failure's.
+- Something inside a middleware read `.message` on `undefined`.
+
+The four hooks this repository owns are `wrapToolCall` in
+`orchestration-guard.middleware.ts`, `iteration-budget.middleware.ts` and
+`delegation/subagent-budget.middleware.ts`, plus `beforeAgent` in
+`iteration-budget.middleware.ts`. None of them reads `.message` on a value that
+can be undefined by inspection, so the read is either in a helper they call or
+in a code path only a specific failure reaches.
+
+### What already changed
+
+Nothing that fixes it. `describeErrorOrigin`
+(`src/presentation/cli/error-origin.ts`) now walks the `cause` chain and prints
+the deepest frame, so **the next occurrence will name the file and line
+itself**. That is the whole reason this can wait: the next report will be a
+diagnosis rather than a mystery.
+
+### The plan
+
+1. Wait for a recurrence and read the frame the CLI now prints.
+2. If it recurs without a usable frame, the fallback is to have the middleware
+   boundary catch, log, and rethrow — but that is a scaffold to remove
+   afterwards, not a fix, and it should not be built before step 1.
+
+### What must not be done
+
+Do not "fix" this by making the middleware boundary swallow a non-`Error`. It
+would silence the crash and destroy the only evidence, and the constitution's
+rule stands: a caught exception is handled or rethrown with context, never
+dropped.
