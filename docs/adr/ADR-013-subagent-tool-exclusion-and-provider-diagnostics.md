@@ -6,7 +6,7 @@
 
 ## Status
 
-Accepted — 2026-08-26
+Accepted — amended 2026-08-28
 
 > **On the number:** this is 013 because **012 is taken three times** —
 > `ADR-012-arrow-key-selection-prompts`, `ADR-012-cli-wait-indicator-and-transient-line-contract`
@@ -365,3 +365,21 @@ Related files added by the amendment:
 
 - `src/core/agent/orchestration-guard.middleware.ts` — `readDelegationHistory` (in-flight exclusion), `createOrchestrationGuard`.
 - `src/core/agent/orchestration-guard.middleware.spec.ts` — the cases that drive `wrapToolCall` directly.
+
+---
+
+## Amendment — 2026-08-28: the exclusion returns, for the opposite reason
+
+This record reversed a `task` exclusion because the tool was withheld from the
+provider while three prompts ordered the model to delegate through it. That
+diagnosis was right and the fix was right.
+
+`task` is now excluded from the orchestrator again, and the reason is the
+opposite one. The orchestrator declares its own `delegate`, whose schema is the
+delegation order itself
+([ADR-023](./ADR-023-interlocking-triage-readback-and-balanced-books.md)), so
+`task` would be a second way to do one thing rather than the only way to do it.
+The rule this record established is unchanged and is what makes the new exclusion
+safe: the prompt names only tools the mode declares, and a contract test now
+fails if the orchestrator prompt orders a `task` call — which it immediately did
+for four route instructions.

@@ -8,7 +8,7 @@ Date: 2026-08-27
 
 ## Status
 
-Accepted — amended 2× 2026-08-27
+Accepted — amended 3× 2026-08-27/28
 
 ## Context
 
@@ -465,3 +465,23 @@ confidence than an unexecuted read of a library deserves. Recorded here rather
 than rewritten above, because the mistake is the useful part: **a source file
 read is a hypothesis, and this project has a spike harness cheap enough that
 there was no excuse for not running one.**
+
+---
+
+## Amendment — 2026-08-28, third: the order stopped being text
+
+This record had the orchestrator write its order as JSON inside `description` and
+the guard parse it back, because `task` had no field to put it in. That was the
+only option available and it failed twice in production: a bare instruction with
+no context, then the order flattened into the call with `subagent_type` lost.
+Both were answered with more tolerance in the parser.
+
+[ADR-023](./ADR-023-interlocking-triage-readback-and-balanced-books.md) replaces
+the parsing with a tool whose schema **is** the order, and deletes the machinery
+this record needed: `parseMandateOrder`, `readFlattenedOrder`,
+`MANDATE_TEMPLATE` and the repair messages around them.
+
+Everything else here stands. The mandate itself — the user request verbatim, the
+known context, the scope — is unchanged and is now enforced by the provider
+instead of by us. The shared budget, the partial handoff, the question channel and
+the distinction between a failure and an attempt are all still in force.
