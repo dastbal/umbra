@@ -13,13 +13,13 @@ describe('buildDecisionChoices', () => {
   it('offers exactly the decisions the gate allows', () => {
     const choices = buildDecisionChoices(['approve', 'reject']);
 
-    expect(choices.map((c) => c.value)).toEqual(['approve', 'reject']);
+    expect(choices.map((c) => c.value)).toEqual(['reject', 'approve']);
   });
 
-  it('puts approve first and reject last regardless of input order', () => {
+  it('puts reject first regardless of input order so Enter fails closed', () => {
     const choices = buildDecisionChoices(['reject', 'edit', 'approve']);
 
-    expect(choices.map((c) => c.value)).toEqual(['approve', 'edit', 'reject']);
+    expect(choices.map((c) => c.value)).toEqual(['reject', 'edit', 'approve']);
   });
 
   it('surfaces a decision type it does not recognise instead of dropping it', () => {

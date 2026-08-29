@@ -803,3 +803,69 @@ payload. This is a validation boundary, not a failed agent response.
   prompt line without moving into prior output`.
 - `src/presentation/cli/interactive-select.ts` — `runPrompt` (the contrasting
   cursor-below-block renderer whose movement rule must not be copied here).
+
+---
+
+## Amendment — 2026-08-28 (sixth): a carried Enter must never approve
+
+An operator observed an approval request rendering and then resolving as
+approved without a deliberate menu selection. The file tool's LangGraph
+interrupt was present; the failure was at the CLI input hand-off. The chat
+editor had completed a line immediately before `ChatSession#askDecision` opened
+the selector, and a pending newline could be decoded by the new selector as
+Enter. At that time `buildDecisionChoices` placed `approve` under the default
+cursor, turning stale input into authorization.
+
+`interactive-select.ts#runPrompt` now drains only data already buffered on the
+input stream before it subscribes to `keypress` events. This prevents the
+remaining LF of a CRLF-style submitted line from becoming the first key of the
+next prompt. `chat-session.ts#buildDecisionChoices` also orders `reject` first.
+That is the security boundary: even if a terminal delivers an unexpected Enter
+after the drain, it resolves to rejection rather than approving the suspended
+tool call.
+
+The selector still accepts an explicit operator approval: the operator moves to
+`Approve` and presses Enter. Escape, Ctrl+C, cancellation, unavailable input,
+and stale Enter all remain non-approval paths.
+
+### Consequences
+
+**Positive.** Approval now fails closed at both layers: stale buffered input is
+discarded, and the default action is reject.
+
+**Neutral.** `Reject` appears first in the HITL decision menu. Approving a tool
+therefore requires one deliberate navigation step.
+
+**Negative — accepted.** Stream input cannot label a byte with its physical
+keypress source. The fail-closed default is retained as the guarantee even when
+a late byte cannot be drained.
+
+### Verification Evidence — sixth amendment
+
+```
+node node_modules/jest/bin/jest.js src/presentation/cli/interactive-select.spec.ts src/presentation/cli/hitl-decisions.spec.ts src/presentation/cli/chat-session.spec.ts --runInBand
+  -> Test Suites: 3 passed, 3 total
+     Tests:       35 passed, 35 total
+
+node node_modules/typescript/bin/tsc --noEmit
+  -> clean
+
+node node_modules/typescript/bin/tsc -p tsconfig.build.json
+  -> clean
+```
+
+The new selector regression starts with a buffered LF, then sends `q`. It
+resolves as cancelled; before the drain that LF would select the default row.
+The decision-row tests assert that `reject` is the default row regardless of
+the order emitted by the approval gate.
+
+### Related Files — added by the sixth amendment
+
+- `src/presentation/cli/interactive-select.ts` — `runPrompt` drains stale
+  buffered input before accepting keypresses.
+- `src/presentation/cli/interactive-select.spec.ts` — `discards a newline
+  buffered before the prompt starts listening`.
+- `src/presentation/cli/chat-session.ts` — `buildDecisionChoices` orders the
+  destructive-decision gate to fail closed.
+- `src/presentation/cli/hitl-decisions.spec.ts` — `buildDecisionChoices`
+  default-rejection contract.

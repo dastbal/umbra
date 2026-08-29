@@ -164,6 +164,20 @@ describe('select', () => {
     expect(value).toBe('apple');
   });
 
+  it('discards a newline buffered before the prompt starts listening', async () => {
+    const term = makeTerminal();
+    // This models the LF of a CRLF line ending left behind by the chat editor.
+    // It must not select the first row of the next prompt.
+    term.press('\n');
+    pressAll(term, [KEY.cancel]);
+
+    const outcome = await selectOutcome({
+      choices: FRUITS, input: term.input, output: term.output,
+    });
+
+    expect(outcome).toEqual({ status: 'cancelled' });
+  });
+
   it('jumps to the Nth selectable row on a digit key without confirming', async () => {
     const term = makeTerminal();
     pressAll(term, ['3', KEY.enter]);

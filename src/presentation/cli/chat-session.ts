@@ -122,7 +122,7 @@ export function rejectionDecision(): { type: string; message: string } {
  * hiding an option the gate offered would misrepresent the operator's choices.
  *
  * @param allowed - Decision identifiers permitted for this action.
- * @returns Rows for the approval prompt, approve first.
+ * @returns Rows for the approval prompt, reject first so Enter fails closed.
  */
 export function buildDecisionChoices(allowed: string[]): SelectChoice<string>[] {
   const known: Record<string, { label: string; hint?: string }> = {
@@ -131,7 +131,10 @@ export function buildDecisionChoices(allowed: string[]): SelectChoice<string>[] 
     edit:    { label: '✎  Change it',         hint: 'send it back with an instruction' },
   };
 
-  const order = ['approve', 'edit', 'reject'];
+  // A decision prompt may receive the newline that completed the preceding
+  // chat input. Keeping reject under the default cursor makes that stale input
+  // safe: it blocks the operation instead of authorising it.
+  const order = ['reject', 'edit', 'approve'];
   const sorted = [...allowed].sort((a, b) => {
     const ia = order.indexOf(a), ib = order.indexOf(b);
     return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib);
