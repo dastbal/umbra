@@ -22,7 +22,21 @@ const READ_ONLY_PATTERN = /\b(explain|describe|what is|what does|how does|why|an
 const GREETING_PATTERN = /^[¿¡\s]*((hi|hello|hey)( there)?|hola|buenas( tardes| noches| días)?|qué tal|cómo estás|qué hacés)[!?.\s]*$/i;
 const THANKS_PATTERN = /^[¿¡\s]*(thanks( a lot)?|thank you|thx|(muchas |mil )?gracias)[!?.\s]*$/i;
 const FAREWELL_PATTERN = /^[¿¡\s]*(bye|goodbye|see you|chau|chao|adi[oó]s|hasta luego|nos vemos)[!?.\s]*$/i;
-const IMPLEMENTATION_PATTERN = /\b(add|create|implement|build|fix|change|modify|update|refactor|rename|remove|delete|migrate|write|agrega|añade|crea|implementa|construye|corrige|cambia|modifica|actualiza|renombra|elimina|migra|escribe)\b/i;
+const IMPLEMENTATION_PATTERN = /\b(add|create|implement|build|fix|change|modify|update|refactor|rename|remove|delete|migrate|write|generate|agrega|agregar|añade|añadir|crea|crear|implementa|implementar|construye|construir|corrige|corregir|arregla|arreglar|cambia|cambiar|modifica|modificar|actualiza|actualizar|refactoriza|refactorizar|renombra|renombrar|elimina|eliminar|borra|borrar|migra|migrar|escribe|escribir|genera|generar|arma|armar|monta|montar|haz|hacer|hacelo|hazlo)\b/i;
+/**
+ * Affirmations that mean *proceed*, never *nothing to do*.
+ *
+ * ADR-020 excluded these from small talk by not listing them, which worked
+ * while every unmatched message fell through to work. {@link asksForNothing}
+ * inverts that fall-through for very short messages, so the exclusion has to
+ * become explicit or "dale" would be answered with a canned greeting instead of
+ * continuing the work the operator just approved.
+ */
+const AFFIRMATION_PATTERN = /^[¿¡\s]*(ok(ay)?|dale|listo|s[ií]|yes|yep|sure|perfecto|genial|buenísimo|segu[ií]|continu[áa]|adelante|hazlo|hacelo|go( ahead)?)[!?.\s]*$/i;
+
+/** A path, a filename or a code identifier — evidence the message names work. */
+const WORK_REFERENCE_PATTERN = new RegExp('[/\\\\]|\\.(ts|js|json|md|yml|yaml)\\b|_|\\(\\)', 'i');
+
 const LARGE_PATTERN = /\b(module|feature|architecture|major|migration|database|prisma|typeorm|repository|endpoint|controller|ddd|multi[- ]file|refactor|módulo|funcionalidad|arquitectura|migración|base de datos|repositorio|controlador|multiarchivo)\b/i;
 
 /**
@@ -38,7 +52,7 @@ const LARGE_PATTERN = /\b(module|feature|architecture|major|migration|database|p
 export function classifyOrchestrationTask(request: string): OrchestrationRoute {
   const isImplementation = IMPLEMENTATION_PATTERN.test(request);
 
-  if (!isImplementation && (READ_ONLY_PATTERN.test(request) || classifySmallTalk(request) !== null)) {
+  if (!isImplementation && (isQuestion(request) || READ_ONLY_PATTERN.test(request) || classifySmallTalk(request) !== null || asksForNothing(request))) {
     return { complexity: 'small', requiresImplementation: false, subagents: [] };
   }
 
@@ -75,6 +89,69 @@ export function formatOrchestrationRoute(route: OrchestrationRoute, request: str
 Required route: ${subagents}.
 User request (preserve intent exactly):
 ${request}`;
+}
+
+/**
+ * Reports a message that wants an answer rather than a change.
+ *
+ * A question with no implementation verb asked for an explanation, and routing
+ * it to the write path was the same fail-open default described below: the
+ * orchestrator would delegate to a Coder over a question mark.
+ *
+ * @param request - Raw interactive user request.
+ * @returns Whether the message is phrased as a question.
+ */
+/**
+ * Reports a message too small to be asking for anything.
+ *
+ * ## Why the default had to change
+ *
+ * Every message this classifier did not recognize fell through to
+ * `requiresImplementation: true` with the full Researcher → Coder → Verifier
+ * route. The intent was conservative — an ambiguous request keeps the quality
+ * gate — but the fall-through was not conservative at all: it was fail-open.
+ *
+ * Observed on 2026-08-28. The operator typed **"maestro"**. It matched no
+ * implementation verb, no read-only verb and no greeting, so it was routed as a
+ * medium implementation task. The orchestrator delegated to the Researcher and
+ * then to the Coder, spent 27 calls and 677.8k tokens for $0.0729, and wrote
+ * `src/core/agent/orchestrator.e2e-spec.ts` to disk. Nobody had asked for a
+ * file. `umbra deep`, given the same word, answered in one line and called
+ * nothing.
+ *
+ * The two errors are not symmetric. Routing a real request to the read-only path
+ * costs a worse answer, and the operator asks again. Routing a greeting to the
+ * implementation path costs money and changes the repository. So an
+ * unrecognized message that is barely a message stops being treated as work.
+ *
+ * ## Deliberately narrow
+ *
+ * At most three words, no implementation or read-only verb, no question mark,
+ * and no path, filename or identifier that would suggest it names work. "el
+ * login está roto" is four words and stays a task; "maestro" is one and does
+ * not. Affirmations are excluded first, because ADR-020 established that "dale"
+ * means *proceed* — answering it with a canned line would refuse work the
+ * operator just approved.
+ *
+ * @param request - Raw interactive user request.
+ * @returns Whether the message asks for nothing at all.
+ */
+export function isQuestion(request: string): boolean {
+  return request.includes(String.fromCharCode(63)) || request.includes(String.fromCharCode(191));
+}
+
+/**
+ * Reports a message too small to be asking for anything. See the note above.
+ */
+export function asksForNothing(request: string): boolean {
+  const trimmed = request.trim();
+  if (trimmed === '') return true;
+  if (AFFIRMATION_PATTERN.test(trimmed)) return false;
+  if (trimmed.includes('?') || trimmed.includes('¿')) return false;
+  if (WORK_REFERENCE_PATTERN.test(trimmed)) return false;
+  if (IMPLEMENTATION_PATTERN.test(trimmed) || READ_ONLY_PATTERN.test(trimmed)) return false;
+
+  return trimmed.split(/\s+/).length <= 3;
 }
 
 /** Conversational message kinds that are not a request to do work. */

@@ -108,3 +108,56 @@ describe('classifySmallTalk', () => {
     }
   });
 });
+
+describe('a message that asks for nothing is not routed as work', () => {
+  it('does not send a nickname down the implementation route', () => {
+    // Observed 2026-08-28: the operator typed "maestro". It matched no verb and
+    // no greeting, fell through to the implementation default, and the run cost
+    // 27 calls and 677.8k tokens for $0.0729 — and wrote a file to disk that
+    // nobody had asked for. `umbra deep` answered the same word in one line.
+    const route = classifyOrchestrationTask('maestro');
+
+    expect(route.requiresImplementation).toBe(false);
+    expect(route.subagents).toEqual([]);
+  });
+
+  it('still treats an affirmation as permission to proceed', () => {
+    // ADR-020 established this and it must survive the new default: "dale"
+    // means carry on with what was proposed. Answering it as small talk would
+    // refuse work the operator just approved.
+    for (const affirmation of ['dale', 'ok', 'listo', 'sí', 'seguí', 'adelante']) {
+      expect(classifyOrchestrationTask(affirmation).requiresImplementation).toBe(true);
+    }
+  });
+
+  it('answers a question instead of delegating a change to it', () => {
+    for (const question of ['maestro?', '¿cómo funciona esto?', 'y esto?']) {
+      expect(classifyOrchestrationTask(question).requiresImplementation).toBe(false);
+    }
+  });
+
+  it('keeps a real request on the implementation route', () => {
+    for (const request of [
+      'crear un modulo de calculadora',
+      'crea un modulo',
+      'agregar un endpoint',
+      'arreglar el bug del login',
+      'el login esta roto',
+    ]) {
+      expect(classifyOrchestrationTask(request).requiresImplementation).toBe(true);
+    }
+  });
+
+  it('recognises a Spanish infinitive, which the vocabulary never matched', () => {
+    // The pattern listed `crea` but not `crear`, so no infinitive ever matched.
+    // It looked correct only because everything unmatched fell through to the
+    // implementation route; closing that default exposed it.
+    expect(classifyOrchestrationTask('crear').requiresImplementation).toBe(true);
+    expect(classifyOrchestrationTask('implementar').requiresImplementation).toBe(true);
+    expect(classifyOrchestrationTask('refactorizar').requiresImplementation).toBe(true);
+  });
+
+  it('does not mistake a message that names a file for small talk', () => {
+    expect(classifyOrchestrationTask('src/app.ts').requiresImplementation).toBe(true);
+  });
+});
