@@ -179,6 +179,30 @@ export interface DeepAgentFactoryConfig {
  * );
  * ```
  */
+/**
+ * Operational rules that only mean something to an agent holding write tools.
+ *
+ * These lived in the prompt every mode inherited, so the Orchestrator — which
+ * delegates and holds no writer — was told to verify its writes with
+ * `safe_read_file` and to count files it would never create. On 2026-08-28 a
+ * contract check finally aimed at that prompt found four such tools named and
+ * ungranted, which is ADR-013 defect in the place ADR-013 test never looked.
+ *
+ * Appended by the modes that declare the tools it names, and by no other.
+ */
+const WRITER_PROTOCOL = `
+🔍 SESSION STATE VERIFICATION — when the work depends on earlier file changes:
+History is a record of intent — disk is ground truth.
+- If history mentions files you created before → verify with \`safe_read_file\` before assuming.
+- If a file is missing → create it from scratch. Never skip a write because history says it was done.
+
+🚨 FILE CREATION LAW:
+Describing a file ≠ creating it. A file only exists on disk after \`safe_write_file\` is called.
+- After EVERY \`safe_write_file\` → immediately verify with \`safe_read_file\`. Count your writes.
+- Never mark a todo step done until disk confirmation.
+
+`;
+
 export class DeepAgentFactory {
   /**
    * Creates a simple deep agent for quick, single-agent tasks.
@@ -542,7 +566,11 @@ export class DeepAgentFactory {
       kernelApiVersion: KERNEL_API_VERSION,
       workflowRole: 'supervisor',
       rolePrompt: 'Coordinate specialist agents without implementing code yourself.',
-      capabilities: ['search_codebase', 'verify_integrity', 'delegate', 'escalate_route'],
+      // read_adrs is read-only and cheap: the index returns paths, titles and
+      // status, never bodies. Delegating a catalogue lookup to the Researcher
+      // costs a whole model call, and without it the shared prompt ordered a
+      // `list_adrs` the Supervisor could not call — ADR-013 defect, reborn.
+      capabilities: ['search_codebase', 'read_adrs', 'read_code', 'verify_integrity', 'delegate', 'escalate_route'],
     };
   }
 
@@ -944,6 +972,7 @@ export class DeepAgentFactory {
     };
   }
 
+
   /**
    * Builds the system prompt for the given agent type.
    *
@@ -1032,16 +1061,6 @@ When asked to fix a bug or explain something:
 - NEVER say "you should consider X" — say what to do and do it.
 - NEVER give 3 vague alternatives — give THE answer with reasoning.
 
-🔍 SESSION STATE VERIFICATION — when the work depends on earlier file changes:
-History is a record of intent — disk is ground truth.
-- If history mentions files you created before → verify with \`safe_read_file\` before assuming.
-- If a file is missing → create it from scratch. Never skip a write because history says it was done.
-
-🚨 FILE CREATION LAW:
-Describing a file ≠ creating it. A file only exists on disk after \`safe_write_file\` is called.
-- After EVERY \`safe_write_file\` → immediately verify with \`safe_read_file\`. Count your writes.
-- Never mark a todo step done until disk confirmation.
-
 🛑 SAFETY RULES (universal — apply to every task):
 - Deleting a file always raises an operator approval prompt on its own; never
   assume a delete happened until the tool result confirms it.
@@ -1082,7 +1101,7 @@ For deep explanations, load \`skills/mentor-mode.md\` (triggered by keywords: me
 Keep handoffs compact; never copy full subagent transcripts into your working context.`;
 
     if (type === 'simple') {
-      return base + policy + `
+      return base + WRITER_PROTOCOL + policy + `
 
 ⚡ TASK SIZING — classify before acting:
 - **SMALL** (1-2 files, obvious change): No \`write_todos\`. Read → Write → Done. Max 3 tool calls.
@@ -1206,7 +1225,7 @@ reserve is held back so you can always answer. Consequences you must handle:
   implement: report what is known and what is missing.
 - If a delegation is refused for lack of budget, do NOT delegate again. Answer with what
   has been established and state plainly what was not investigated.
-- A delegate may ask a question through \`ask_delegator\`. It is answered from the order you
+- A delegate may ask you a question about its order. It is answered from what you
   wrote, or put to the operator. The better your order, the fewer interruptions.
 
 🤖 AVAILABLE SUBAGENTS:
