@@ -1,0 +1,311 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Umbra agent runtime",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1320,
+      700
+    ],
+    "views": [
+      {
+        "id": "turn-path",
+        "label": "One turn",
+        "focus": [
+          "cli",
+          "factory",
+          "kernel",
+          "llm",
+          "broker",
+          "subagents"
+        ],
+        "note": "Follow a single request from the CLI through the kernel, the model, and delegated roles."
+      },
+      {
+        "id": "guardrails",
+        "label": "Guardrails",
+        "focus": [
+          "governor",
+          "tools",
+          "policy"
+        ],
+        "note": "Every turn is bounded by cost and every tool call is authorized before it runs."
+      },
+      {
+        "id": "durable-state",
+        "label": "Durable state",
+        "focus": [
+          "state",
+          "rag",
+          "kernel"
+        ],
+        "note": "What survives a turn: the conversation checkpoint and the codebase index."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "cli",
+      "type": "external",
+      "label": "Umbra CLI",
+      "sublabel": "src/bin/cli.ts",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "http",
+      "type": "external",
+      "label": "NestJS module",
+      "sublabel": "presentation/http",
+      "pos": [
+        40,
+        390
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "factory",
+      "type": "frontend",
+      "label": "DeepAgentFactory",
+      "sublabel": "assembles the agent",
+      "pos": [
+        260,
+        310
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "governor",
+      "type": "security",
+      "label": "Turn governor",
+      "sublabel": "cost is the bound",
+      "pos": [
+        480,
+        140
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "kernel",
+      "type": "backend",
+      "label": "Agent kernel",
+      "sublabel": "roles and capabilities",
+      "pos": [
+        480,
+        310
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "SQLite checkpoint",
+      "sublabel": "core/state",
+      "pos": [
+        480,
+        500
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "LLM provider",
+      "sublabel": "Vertex + Ollama",
+      "pos": [
+        700,
+        140
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "broker",
+      "type": "messagebus",
+      "label": "Delegation broker",
+      "sublabel": "mandate + budget",
+      "pos": [
+        700,
+        310
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "subagents",
+      "type": "backend",
+      "label": "SubAgents",
+      "sublabel": "core/subagents",
+      "pos": [
+        920,
+        200
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "Tool registry",
+      "sublabel": "core/tools",
+      "pos": [
+        920,
+        400
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "rag",
+      "type": "database",
+      "label": "RAG index",
+      "sublabel": "codebase embeddings",
+      "pos": [
+        920,
+        560
+      ],
+      "size": [
+        138,
+        68
+      ]
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "Security policy",
+      "sublabel": "authorize + containment",
+      "pos": [
+        1140,
+        400
+      ],
+      "size": [
+        138,
+        68
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "cli-to-factory",
+      "from": "cli",
+      "to": "factory",
+      "label": "start turn",
+      "variant": "emphasis"
+    },
+    {
+      "id": "http-to-factory",
+      "from": "http",
+      "to": "factory",
+      "label": "bootstrap",
+      "variant": "dashed"
+    },
+    {
+      "id": "factory-to-kernel",
+      "from": "factory",
+      "to": "kernel",
+      "label": "compose role"
+    },
+    {
+      "id": "kernel-to-governor",
+      "from": "kernel",
+      "to": "governor",
+      "label": "budget check"
+    },
+    {
+      "id": "kernel-to-llm",
+      "from": "kernel",
+      "to": "llm",
+      "label": "prompt and tools",
+      "variant": "emphasis"
+    },
+    {
+      "id": "kernel-to-broker",
+      "from": "kernel",
+      "to": "broker",
+      "label": "delegate",
+      "labelDy": 16
+    },
+    {
+      "id": "broker-to-subagents",
+      "from": "broker",
+      "to": "subagents",
+      "label": "mandate"
+    },
+    {
+      "id": "subagents-to-tools",
+      "from": "subagents",
+      "to": "tools",
+      "label": "invoke",
+      "labelDy": 24
+    },
+    {
+      "id": "kernel-to-state",
+      "from": "kernel",
+      "to": "state",
+      "label": "checkpoint",
+      "labelDy": 24
+    },
+    {
+      "id": "tools-to-policy",
+      "from": "tools",
+      "to": "policy",
+      "label": "authorize",
+      "variant": "security"
+    },
+    {
+      "id": "tools-to-rag",
+      "from": "tools",
+      "to": "rag",
+      "label": "ask_codebase",
+      "labelDy": 24
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The turn is the unit",
+      "items": [
+        "Cost bounds the turn, not the tool-call count",
+        "Every delegation carries a mandate and a shared budget"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Nothing runs unauthorized",
+      "items": [
+        "Tool calls pass the security policy before execution",
+        "Writes stay inside the contained workspace directory"
+      ]
+    }
+  ]
+}

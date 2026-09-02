@@ -13,6 +13,72 @@ self-correct — all following DDD and TDD principles.
 
 ---
 
+## Amendment 2026-09-02 — the roadmap below is behind the code
+
+This document described Phases 1–6 as pending. They are all shipped. It was
+also written before the parts that now carry the runtime existed, so the
+"Target Architecture" diagram further down no longer shows the real system.
+
+Nothing below has been deleted: the phase entries still record *why* each step
+was taken, and that reasoning is still accurate. Only the status is corrected
+here, plus the modules the document never mentioned.
+
+**Roadmap status, verified against `src/`:**
+
+| Phase | Recorded | Actual | Evidence |
+|---|---|---|---|
+| 1 — LLM switch | ⏳ | ✅ | `core/config/model-resolver.ts` |
+| 2 — Researcher | ⏳ | ✅ | `core/subagents/researcher.subagent.ts` |
+| 3 — Coder | ⏳ | ✅ | `core/subagents/coder.subagent.ts` |
+| 4 — Orchestrator | ⏳ | ✅ | `core/agent/deep-agent-factory.ts` + `core/agent/delegation/` |
+| 5 — Compression | ⏳ | ✅ *(diverged)* | `core/agent/context-compressor.ts` |
+| 6 — SSE streaming | ⏳ | ✅ | `presentation/http/agent-http.contracts.ts` |
+| 7 — Skills system | ⏳ | ⏳ | no `src/skills/` — still genuinely pending |
+
+**Phase 5 diverged from its plan and the divergence matters.** The entry below
+specifies `createSummarizationMiddleware` from deepagents. What was built is a
+first-party `ContextCompressor` class with its own summarizer-model fallback
+chain. The recorded intent stands; the mechanism is ours, not the library's.
+
+**A third subagent exists that no phase planned:**
+`core/subagents/verifier.subagent.ts`.
+
+### Modules this document never described
+
+These carry the runtime today and appear in no section below:
+
+| Module | Role |
+|---|---|
+| `core/agent/agent-kernel.ts` | Role profiles, capability registry, kernel instructions (`KERNEL_API_VERSION`) |
+| `core/agent/delegation/` | Delegation broker, mandate, shared budget pool, readback, subagent registry |
+| `core/agent/turn-governor.ts` | Bounds a turn by cost — with `budget-probe`, `iteration-budget.middleware`, `orchestration-guard.middleware` |
+| `core/security/` | `agent-security-policy.ts`, plus `tools/utils/authorize.ts` and path containment |
+| `core/state/` | SQLite checkpointing and the file registry |
+| `core/llm/` | Provider adapters: Vertex, Ollama |
+| `core/observability/` | LangSmith config, metrics, trace flush |
+| `core/application/services/cost-tracker.service.ts` | Per-turn cost accounting |
+| `core/agent/evidence-protocol.ts` | Evidence rules for claims the agent makes |
+
+### The current map
+
+An interactive, validated diagram of the runtime as it actually is lives at
+[`docs/diagrams/umbra-runtime.architecture.json`](diagrams/umbra-runtime.architecture.json).
+It was traced from the source tree and the import graph, not from this document.
+
+Regenerate the viewable HTML with:
+
+```bash
+npx -y skills@latest use tt-a1i/archify@archify
+```
+
+The JSON is the source of truth and is versioned; the ~719 KB HTML is a build
+artifact and deliberately is not. The same JSON always renders the same HTML.
+
+**Prefer that diagram over the ASCII "Target Architecture" block below**, which
+is kept as the record of what was originally intended.
+
+---
+
 ## System Evolution (Build Log)
 
 ### 🏛️ Era 1: Classic ReAct Agent (`factory.ts`)
@@ -146,7 +212,8 @@ The key must be the exact model string passed to `createDeepAgent` (not 'google'
 ### ✅ Phase 0 — Deep Agent Base
 Commit `a62aadc` | `DeepAgentFactory` with `createDeepAgent` working.
 
-### ⏳ Phase 1 — Configurable LLM Switch
+### ✅ Phase 1 — Configurable LLM Switch
+*Shipped. Status corrected 2026-09-02; the rationale below stands.*
 **What:** `AGENT_MODEL` environment variable controls which LLM the agent uses.
 **Why:** Use Gemini lite for quick tasks, Gemini pro for architecture decisions,
 Ollama for offline development without burning API credits.
@@ -159,28 +226,33 @@ AGENT_MODEL=ollama:llama3.2            # local, no internet, free
 AGENT_MODEL=anthropic:claude-opus-4-7  # maximum code quality
 ```
 
-### ⏳ Phase 2 — Researcher SubAgent
+### ✅ Phase 2 — Researcher SubAgent
+*Shipped. Status corrected 2026-09-02; the rationale below stands.*
 **What:** Specialized subagent for reading and analyzing ONLY.
 **Why:** Separation of concerns. The one who analyzes does not write.
 Reduces "premature implementation before understanding the codebase" errors.
 **New file:** `src/core/subagents/researcher.subagent.ts`
 
-### ⏳ Phase 3 — Coder SubAgent
+### ✅ Phase 3 — Coder SubAgent
+*Shipped. Status corrected 2026-09-02; the rationale below stands.*
 **What:** Subagent specialized in TDD — writes the spec BEFORE the implementation.
 **Why:** The one who implements does not get distracted with analysis. Focus = code quality.
 **New file:** `src/core/subagents/coder.subagent.ts`
 
-### ⏳ Phase 4 — Orchestrator
+### ✅ Phase 4 — Orchestrator
+*Shipped. Status corrected 2026-09-02; the rationale below stands.*
 **What:** Main agent that coordinates Researcher + Coder via the `task` tool.
 **Why:** Replaces the old manual `StateGraph` with a smarter, more adaptive flow.
 **Modification:** `DeepAgentFactory.createOrchestrator(config)`
 
-### ⏳ Phase 5 — Context Compression
+### ✅ Phase 5 — Context Compression
+*Shipped, but NOT as specified below. See the 2026-09-02 amendment: a first-party `ContextCompressor` replaced `createSummarizationMiddleware`.*
 **What:** `createSummarizationMiddleware` from deepagents.
 **Why:** For long tasks (e.g., refactoring an entire module), the context can fill up.
 Compression automatically summarizes old messages to free up tokens.
 
-### ⏳ Phase 6 — Event Streaming (SSE)
+### ✅ Phase 6 — Event Streaming (SSE)
+*Shipped. Status corrected 2026-09-02; the rationale below stands.*
 **What:** `POST /agent/stream` in NestJS returning `text/event-stream`.
 **Why:** Allows integrating the agent into a web app or dashboard with real-time progress.
 
@@ -229,6 +301,12 @@ deepagents resolves harness profiles using this lookup order (from `index.cjs` l
 ---
 
 ## Target Folder Structure
+
+> **Amended 2026-09-02.** This is the *originally planned* tree and is kept as
+> that record. The ⏳ markers inside it are stale — only `src/skills/` is still
+> pending. The real tree has 125 source files and whole directories this block
+> never anticipated (`core/agent/delegation/`, `core/security/`, `core/state/`,
+> `core/llm/`, `core/observability/`). See the amendment at the top.
 
 ```
 src/
