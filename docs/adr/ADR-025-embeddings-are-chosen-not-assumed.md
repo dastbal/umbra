@@ -5,7 +5,8 @@
 | **Category** | RAG · Providers · Storage · Portability |
 | **Author** | David Balladares (decision) · Claude (record) |
 | **Date** | 2026-09-02 |
-| **Status** | ✅ **Accepted** — amended 2026-09-02 (same day); coexistence was broken as first implemented, and is now verified end-to-end with both providers |
+| **Status** | ✅ **Accepted** — amended 2× 2026-09-02; §3 **superseded by [ADR-026](./ADR-026-vectors-are-numbers-and-the-database-can-count.md)** |
+| **Superseded in part by** | [ADR-026](./ADR-026-vectors-are-numbers-and-the-database-can-count.md) — §3 only. Everything else in this record stands |
 
 ---
 
@@ -93,6 +94,22 @@ typo that quietly changes which vector space is used is the exact class of
 failure ADR-017 was written about.
 
 ### 3. One column per provider — coexistence instead of migration
+
+> **Superseded 2026-09-02 by [ADR-026](./ADR-026-vectors-are-numbers-and-the-database-can-count.md).**
+> Vectors now live in `chunk_vectors`, keyed by `(chunk_id, provider, model)`
+> and stored as float32 BLOBs. The columns below are no longer written or read;
+> they were migrated into that table and are kept as the rollback.
+>
+> **The decision was not reversed, it was generalised.** The property David
+> chose this design for — no cell where two vector spaces can meet — is
+> preserved by construction, because the provider is part of the primary key. It
+> now also covers the **model**, which the columns could not: moving from
+> `text-embedding-004` to a newer Vertex model would have reused
+> `vector_vertex_json` and mixed two unrelated spaces, the exact failure these
+> columns existed to prevent, arriving from inside one provider.
+>
+> This section is kept in full rather than rewritten, because the reasoning below
+> is what a future reader needs before proposing a shared column again.
 
 `code_chunks` gains `vector_vertex_json` and `vector_ollama_json`. The
 pre-existing `vector_json` is **not touched and not dropped**.
@@ -252,8 +269,17 @@ paged in for nothing.
   `cosineSimilarity` in JS over every stored row. Filtering by provider column
   reduces the rows read but does not change the shape. This remains the
   bottleneck ADR-024 recorded, and it is untouched here.
+  > **Amended 2026-09-02.** Measured and largely closed by
+  > [ADR-026](./ADR-026-vectors-are-numbers-and-the-database-can-count.md).
+  > What this bullet did not say is how large it was: 772 MB read and parsed per
+  > query on a 50,000-chunk repository, and JSON text accounted for 5.3× of the
+  > bytes and a thousand-fold of the decode cost. It is **still** a linear scan;
+  > what changed is that the constant fell and only `k` rows now cross into
+  > JavaScript.
 - **A third provider needs a schema line.** Option C is the answer if that
   happens; the constant that drives the migration is already in one place.
+  > **Closed 2026-09-02.** Option C was taken, in ADR-026. A provider is rows
+  > now, not schema.
 - **Embedding quality is not compared.** No benchmark was run between
   `text-embedding-004` and `nomic-embed-text` on this codebase. The claim in this
   record is that switching is *safe and reversible*, **not** that the two are

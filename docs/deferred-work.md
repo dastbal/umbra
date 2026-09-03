@@ -1054,3 +1054,189 @@ arbitrary.
 2. Have both the agent and the MCP adapter call those functions.
 3. Only then ask whether a second package is worth its release. If step 1 landed,
    the answer may be no — and that is a fine outcome for a heresy.
+
+---
+
+## Indexed vector search — `vec0`, and the measurement that would justify it
+
+> Recorded 2026-09-02, branch `2.1.3`. Scoped and deliberately not built while
+> implementing [ADR-026](./adr/ADR-026-vectors-are-numbers-and-the-database-can-count.md):
+> the cheaper half of the fix removed enough of the cost that this became a
+> decision to make with numbers rather than a task to do now.
+
+### The idea
+
+`sqlite-vec` offers two modes. ADR-026 uses the scalar one —
+`vec_distance_cosine` in ordinary SQL — which moves the arithmetic into C and
+returns only the top *k* rows. It does **not** index anything: the scan is still
+linear, just with a much smaller constant and no marshalling.
+
+The other mode is `vec0` virtual tables, which give real KNN. That is the only
+option here that changes the *order* of the work rather than its constant.
+
+### What is broken today
+
+Nothing is broken, and that is the point of recording rather than doing. Measured
+on this repository, after ADR-026:
+
+```
+SQL  (vec_distance_cosine + ORDER BY + LIMIT 4)   0.35 ms   258 chunks
+extrapolated to 50,000 chunks                       69 ms
+```
+
+69 ms of scan on a 5,000-file project is not a problem worth a virtual table and
+its synchronisation. **The number that would justify this is a real measurement
+on a large repository, not an extrapolation** — every figure in ADR-026 is 258
+chunks plus arithmetic, and page-cache behaviour on a 146 MB table may not be
+linear at all.
+
+### The mechanism to reuse — do not invent one
+
+- `src/core/state/vector-extension.ts` already loads the extension, memoizes the
+  result, and reports a failure once. A `vec0` path needs no new loader.
+- `src/core/rag/retriever.ts` already has two ranking paths behind
+  `AgentDB.vectorSearch.available`, and `provenance.rankedIn` already reports
+  which ran. A third path fits the same seam.
+- `chunk_vectors` already stores `dimensions` per row, which is exactly the
+  value a `vec0` table needs to be created with.
+
+### The hazard that decides whether this ships
+
+`vec0` tables are created with a **fixed dimension count**, so they are one
+table per dimension — and ADR-026 deliberately made a model upgrade a distinct
+identity, which means dimensions can differ *within* one provider. So this is
+not one virtual table; it is a table per `(dimensions)`, kept in sync with
+`chunk_vectors` on every write, plus a rebuild path when it drifts.
+
+A stale KNN index returns confidently wrong neighbours, which is the same class
+of failure ADR-025 was written to prevent. **The synchronisation is the whole
+risk**, not the query.
+
+### The plan
+
+1. Measure retrieval on a repository with tens of thousands of chunks. Until
+   that number exists, this entry is speculation with good arithmetic.
+2. If it justifies the work: create one `vec0` table per dimension count, written
+   inside the same transaction as `chunk_vectors` so the two cannot diverge.
+3. Add a consistency check — row counts per identity, both tables — and treat a
+   mismatch as a reason to fall back to the scalar path, loudly. Never silently.
+4. Keep the scalar path. It is the reference the indexed path must agree with,
+   the same way `rankInJavaScript` is the reference for `rankInSql` today.
+
+---
+
+## Serving MCP over HTTP, and elicitation as the door to writes
+
+> Recorded 2026-09-02, branch `2.1.3`. Both became reachable the moment the
+> official SDK was adopted ([ADR-024](./adr/ADR-024-umbra-as-a-read-only-mcp-server.md)
+> amendment 6) and neither was built, because each is a decision rather than a
+> wiring task.
+
+### The two ideas
+
+**HTTP/streamable transport.** `umbra mcp` speaks stdio, which means one client
+per process, on the same machine. The SDK ships an HTTP transport. One Umbra
+process could then serve four agents, or a team, or a remote client.
+
+**Elicitation.** ADR-024 constraint 2 says writes are *technically* unavailable
+in MCP mode: `requestApproval` suspends by raising a LangGraph `interrupt()`,
+which exists only inside a graph run, so there is no channel to ask a human. The
+record already names the bridge — MCP elicitation — and the SDK implements it.
+That is the prerequisite for anything in this mode that changes a file.
+
+### What is broken today
+
+Nothing. Both are absent capabilities, not defects.
+
+### The hazard, and it is much larger for one than the other
+
+For HTTP: a stdio server is reachable only by the process that spawned it. An
+HTTP server is reachable by whatever can open a socket, and ADR-024's **entire**
+security argument reduces to constraint 3 — the root is pinned at launch and
+never read from a tool argument. That still holds over HTTP, but it stops being
+sufficient: authentication, binding address, and rate limiting become questions
+this project has never had to answer. `src/presentation/http/` already carries an
+`AgentHttpAuthorizer` port for exactly this shape of problem and is the precedent
+to read first.
+
+For elicitation: it turns a read-only server into one that can write, which
+ADR-024 recorded as *"a much larger decision than this record"*. It should not
+be built because it became easy.
+
+### The mechanism to reuse
+
+- `src/presentation/mcp/start-mcp-server.ts` — the startup order, the pinned
+  root and the pinned embedding provider are transport-independent.
+- `src/presentation/mcp/sdk-server.ts` — `buildSdkServer` already returns a
+  server that any SDK transport can be connected to. The transport is one line.
+- `src/presentation/http/agent-http.contracts.ts` — `AgentHttpAuthorizer` and
+  `AgentRunStore`, the ports the HTTP adapter already defines for host-supplied
+  authorization.
+- `docs/deferred-work.md` § *`ask_human` with multiple choice* — the analysis of
+  the interrupt/resume hazards, which apply unchanged.
+
+### The plan
+
+1. **HTTP first, and read-only only.** `umbra mcp --transport http --port N`,
+   bound to loopback by default, with the authorizer port wired before anything
+   is exposed beyond `127.0.0.1`.
+2. Decide authentication explicitly, in an ADR, before a non-loopback bind is
+   possible at all.
+3. **Elicitation separately, and last.** It needs its own record, because it
+   changes what this mode is allowed to do rather than how it is reached.
+
+---
+
+## Dual ESM/CJS publishing
+
+> Recorded 2026-09-02, branch `2.1.3`. Scoped, priced, and dropped by David in
+> the session that fixed `moduleResolution`: it is not needed for anything the
+> project does today, and the comparison below is recorded so nobody has to
+> price it twice.
+
+### The idea
+
+Publish `@dastbal/umbra` for both module systems, so a consumer can `import` it
+as well as `require` it.
+
+### What is broken today
+
+Nothing for this project. The package emits CommonJS, NestJS consumers are
+CommonJS, and the binary is CommonJS. This matters only when someone outside the
+team wants to consume the library from an ESM project.
+
+### What it would cost — the part worth not re-investigating
+
+Emitting ESM with `tsc` under Node resolution requires **explicit file
+extensions on every relative import** (`./foo.js`), and this codebase omits them
+throughout — hundreds of imports.
+
+| Option | Cost |
+|---|---|
+| `module: "esnext"` + `moduleResolution: "bundler"`, plus a post-emit script that appends `.js` to relative specifiers | ~40 lines of build script. **Does not touch source.** `tsc` keeps emitting the decorator metadata NestJS dependency injection needs |
+| `tsup` / esbuild | Simpler config, but **esbuild does not emit `emitDecoratorMetadata`**, which Nest DI relies on. Would additionally need the SWC plugin |
+| Add extensions to every source import | Hundreds of files touched for a packaging reason. The most invasive, and the noisiest in history |
+
+The first is the recommendation if this is ever taken. `bin.umbra` must keep
+pointing at the CommonJS output — it needs a shebang and `require` — and
+`main`/`types` must stay for older resolvers, with an `exports` map added
+alongside.
+
+### What was done instead, and why it was the valuable part
+
+`tsconfig.json` moved from `moduleResolution: "node"` (Node 10 resolution, which
+does not read `exports` maps) to `"Node16"`. One line, no output change, and it
+is what makes TypeScript see packages the way Node does. It immediately caught a
+real portability bug — `uuid@13` being ESM-only with no `require` condition,
+under an `engines: node >= 20` declaration — that had been invisible for as long
+as the old resolution was in place.
+
+### The plan, if it is ever taken
+
+1. Confirm someone actually needs it. A dual build with no ESM consumer is two
+   artifacts to keep in sync for nobody, and ADR-012's six amendments are the
+   standing evidence of what that costs here.
+2. Write the post-emit specifier script, and test it by `import`ing the built
+   ESM output from a scratch project — not by reading the emitted files.
+3. Keep the CommonJS path byte-identical to today's, so Nest consumers cannot be
+   affected by a change made for someone else.

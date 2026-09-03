@@ -5,7 +5,7 @@
 | **Category** | Architecture · Packaging · Integration |
 | **Author** | David Balladares (decision) · Claude (record) |
 | **Date** | 2026-09-02 |
-| **Status** | ✅ **Accepted** — amended 2026-09-02; v1 implemented and verified against a live client handshake |
+| **Status** | ✅ **Accepted** — amended 6× 2026-09-02. Amendment 1 was **wrong** and is corrected in amendment 6 |
 
 ---
 
@@ -381,6 +381,13 @@ assertions. No existing spec was modified.
 
 ### 1 — 2026-09-02 · The official MCP SDK is not used, and the transport is Umbra's own
 
+> **This amendment was wrong. Corrected by amendment 6, the same day.** The
+> premise below — that the SDK cannot be `require()`d from this project — is
+> false, and the SDK is now used. The text is kept because the *dependency
+> weight* half of the argument was sound and is what made the dependency
+> optional rather than plain, and because the mistake itself is the point of
+> amendment 6.
+
 This record assumed an SDK and listed "the MCP SDK is not a dependency of this
 project yet" as a gap to close. It is not a gap; it is a decision.
 
@@ -495,6 +502,72 @@ also grants `refreshIndexTool`, which writes.
 - `package.json` — `files` (ships `skills/*.md`), `bin.umbra` (ADR-010)
 - `docs/improvements-analysis.md` — §1, the MCP-client proposal this record defers
 - `docs/deferred-work.md` — *"Umbra should not require Google to run at all"* (the local-embeddings dependency); *"`ask_human` with multiple choice"* (the elicitation mechanism to reuse)
+
+---
+
+### 6 — 2026-09-02 · The official SDK is adopted, because amendment 1's premise was false
+
+Amendment 1 rejected `@modelcontextprotocol/sdk` as unusable from this CommonJS
+project, on the grounds that it is `"type": "module"`. **That is not what
+`type` means when a package ships a dual `exports` map**, and this one does:
+
+```
+exports['./server'] = { import: './dist/esm/server/index.js',
+                        require: './dist/cjs/server/index.js' }
+
+$ node -e "require('@modelcontextprotocol/sdk/server/mcp.js')"
+McpServer: function     → REQUIRE FROM COMMONJS: WORKS
+```
+
+It is the same layout `@langchain/core` uses, which this project has always
+consumed without trouble — eleven of its nineteen dependencies carry an ESM
+manifest. A probe file compiled under the project's own `tsconfig.json` reported
+only the deliberate type error placed in it, never a resolution failure.
+
+**The root cause was in this repository, not in the SDK.** `tsconfig.json` had
+`moduleResolution: "node"` — Node 10 resolution, which predates the `exports`
+field and does not read it. Under that lens the SDK's `require` path does not
+exist. The conclusion was drawn from reading `type: "module"` at the top of the
+manifest and stopping there, and the tooling agreed because it was looking the
+same wrong way. Fixed: the project now resolves at `Node16`, which immediately
+surfaced a real portability bug in an unrelated dependency
+([ADR-026](./ADR-026-vectors-are-numbers-and-the-database-can-count.md)).
+
+**What survived from amendment 1** is the dependency-weight argument, measured:
+5.7 MB for the SDK plus ~6.9 MB of transitive packages — `hono`, `ajv`, `jose`,
+`express`, `cors`, `eventsource`. That is why the SDK is an **optional peer
+dependency** rather than a plain one, so a consumer who installs
+`@dastbal/umbra` for its NestJS module never downloads a protocol they do not
+speak. `peerDependenciesMeta.optional`, not `optionalDependencies`, because the
+latter installs.
+
+`jsonrpc-stdio.transport.ts` and `umbra-mcp-server.ts` are retired — about 400
+lines of framing, ids, notifications and error codes. The hand-written JSON
+Schema in `tool-catalog.ts` is replaced by zod raw shapes the SDK converts
+itself.
+
+**What stayed ours**, because a protocol library cannot know it: the DTO
+boundary, which tools exist at all, the descriptions rewritten for a foreign
+reader, retrieval provenance, and the startup order with its pinned root and
+pinned embedding provider.
+
+**Three behaviours changed**, found by running the round-1 handshake script
+unmodified and recorded rather than glossed:
+
+| | Hand-written | SDK |
+|---|---|---|
+| A malformed line | answered `-32700`, stayed connected | dropped silently |
+| Response order | strictly in request order | concurrent; ids may return out of order |
+| Unknown tool | named what *is* published | `MCP error -32602: Tool X not found` |
+
+The stdout purity assertion was carried into `sdk-server.spec.ts` verbatim and
+still passes. It is the test that found both real leaks in the original
+implementation, and if the SDK speaks the same protocol the same assertion has
+to hold.
+
+**What this unblocks**, still unbuilt: the HTTP/streamable transport (several
+clients, remote), and **elicitation** — the channel constraint 2 named as the
+prerequisite for anything that writes.
 
 ---
 
