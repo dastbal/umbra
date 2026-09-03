@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "umbra": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PROJECT_DIR}/dist/bin/cli.js",
+        "mcp",
+        "--root",
+        "${CLAUDE_PROJECT_DIR}"
+      ]
+    }
+  }
+}
