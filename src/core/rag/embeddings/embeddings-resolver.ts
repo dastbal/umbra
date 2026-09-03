@@ -9,13 +9,14 @@ import { VertexEmbeddingsAdapter } from './vertex-embeddings.adapter';
  *
  * ## Precedence
  *
- * Explicit argument → `UMBRA_EMBEDDINGS` → `.umbra/agent.config.json` →
- * `vertex`.
+ * Explicit argument → pinned → `UMBRA_EMBEDDINGS` →
+ * `.umbra/agent.config.json` → `ollama`.
  *
  * This is the same ladder ADR-002 fixed for model resolution, reused rather
- * than reinvented. The important end of it is the last rung: **the default is
- * still Vertex**, so an installation that changes nothing behaves exactly as it
- * did before ADR-025.
+ * than reinvented. The last rung changed in 2.2.0: **the default is `ollama`**
+ * (ADR-027), so a fresh install has semantic search that costs nothing and
+ * needs no Google Cloud project. `vertex` is one config line away and nothing
+ * about it was removed.
  *
  * An unrecognised value is reported and ignored rather than silently defaulted,
  * because a typo in a config file that quietly changes which vector space is
@@ -163,8 +164,12 @@ export function resolveEmbeddings(explicit?: string): EmbeddingsSelection {
     };
   }
 
+  // The default rung. `ollama` since 2.2.0 (ADR-027): free, offline, and no
+  // credentials, which is what a first run should get. An operator who wants
+  // Vertex says so in one config line, and an index built by the other provider
+  // is reported as a typed mismatch rather than answered from wrong vectors.
   return {
-    port: new VertexEmbeddingsAdapter(),
+    port: new OllamaEmbeddingsAdapter(),
     source: 'default',
     ignoredValue: invalidValue(explicit, envValue),
   };

@@ -63,20 +63,33 @@ const ragSchema = z
     /**
      * Which embedding provider builds and reads the code index.
      *
-     * `vertex` remains the default so that an existing installation behaves
-     * exactly as it did before embeddings became pluggable (ADR-025). `ollama`
-     * runs locally: no credentials, no per-query cost, works offline.
+     * **Deliberately has no schema default.** The default lives in exactly one
+     * place — the last rung of `resolveEmbeddings` — and it is `ollama` since
+     * 2.2.0 (ADR-027).
      *
-     * Switching does not discard the previous provider's vectors — they live in
-     * separate columns of `code_chunks` — so switching back requires no
-     * reindex.
+     * A default here as well would be a second answer to one question, and it
+     * was: while this field defaulted, the resolver's `config` rung always
+     * matched and its `default` rung was unreachable, so the ladder reported a
+     * provenance that was not true. Caught by a test asserting `source`, which
+     * is the only reason it was visible at all. ADR-018's rule applied to a
+     * default instead of a directory name.
+     *
+     * Absent therefore means *"not chosen"*, which is what lets the resolver
+     * distinguish an operator's decision from nobody's.
+     *
+     * Switching does not discard the previous provider's vectors — each
+     * identity owns its rows in `chunk_vectors` (ADR-026) — so switching back
+     * requires no reindex, and an index built by the other provider is reported
+     * as a typed mismatch naming the fix.
      */
-    embeddings: z.enum(['vertex', 'ollama']).default('vertex'),
+    embeddings: z.enum(['vertex', 'ollama']).optional(),
     /** Optional model override for the selected provider. */
     embeddingsModel: z.string().trim().min(1).optional(),
   })
   .strict()
-  .default({ embeddings: 'vertex' });
+  // The object defaults so `config.rag` always exists; its fields do not, so an
+  // unset provider stays unset.
+  .default({});
 
 const agentConfigSchema = z.object({
   models: roleModelsSchema,

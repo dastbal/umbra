@@ -89,6 +89,18 @@ The same order [ADR-002](./ADR-002-model-routing-and-bounded-analysis.md) fixed
 for model resolution. The load-bearing rung is the last: **the default is still
 Vertex**, so an installation that changes nothing behaves exactly as it did.
 
+> **Amended 2026-09-03 by [ADR-027](./ADR-027-the-default-is-the-one-that-costs-nothing.md).**
+> The last rung is now `ollama`, so a fresh install has semantic search that
+> costs nothing and needs no Google Cloud project. The reasoning above was right
+> for its moment and is kept: protecting existing installs was the correct
+> priority before local embeddings had ever been verified end to end. What
+> changed is that they have been, and that ADR-026 makes querying the wrong
+> identity a loud, recoverable error instead of a silent one.
+>
+> ADR-027 also records a defect this section created: the config schema
+> defaulted this field *as well*, so the `default` rung was unreachable and the
+> ladder reported `source: 'config'` for a choice nobody had made.
+
 An unrecognised value is *reported and ignored*, never silently defaulted. A
 typo that quietly changes which vector space is used is the exact class of
 failure ADR-017 was written about.

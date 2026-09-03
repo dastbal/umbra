@@ -4,7 +4,10 @@ import {
   EmbeddingsPort,
 } from './embeddings.port';
 import { EMBEDDINGS_ENV_VAR, resolveEmbeddings } from './embeddings-resolver';
-import { resetRuntimeRoot } from '../../config/runtime-root';
+import { pinRuntimeRoot, resetRuntimeRoot } from '../../config/runtime-root';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 /**
  * A stub port, so the resolver and the mismatch error can be tested without a
@@ -72,6 +75,23 @@ describe('EmbeddingsIndexMismatchError', () => {
 describe('embeddings resolution ladder', () => {
   const originalEnv = process.env[EMBEDDINGS_ENV_VAR];
 
+  /**
+   * Points the runtime root at an empty directory, so no project policy file
+   * exists and the ladder really reaches the rung under test.
+   *
+   * Without this the suite read *this* repository's own
+   * `.umbra/agent.config.json`, so "defaults to ollama" passed for the wrong
+   * reason — it was resolving from `config`, not from `default`. A test that
+   * depends on the machine it runs on is not testing the ladder.
+   *
+   * @returns Nothing.
+   */
+  function useEmptyProject(): void {
+    resetRuntimeRoot();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-resolver-'));
+    pinRuntimeRoot(dir);
+  }
+
   afterEach(() => {
     if (originalEnv === undefined) delete process.env[EMBEDDINGS_ENV_VAR];
     else process.env[EMBEDDINGS_ENV_VAR] = originalEnv;
@@ -103,15 +123,32 @@ describe('embeddings resolution ladder', () => {
 
     const selection = resolveEmbeddings('llama-something');
 
-    expect(selection.port.identity.provider).toBe('vertex');
     expect(selection.ignoredValue).toBe('llama-something');
+    // It still resolves to something usable rather than refusing to embed;
+    // what matters is that the bad value is surfaced, not swallowed.
+    expect(['vertex', 'ollama']).toContain(selection.port.identity.provider);
   });
 
-  it('defaults to vertex, so an installation that changes nothing behaves the same', () => {
+  it('defaults to ollama, so a first install has free search with no credentials', () => {
+    // Changed in 2.2.0 (ADR-027). Before that the default was `vertex`, which
+    // meant a fresh install had no semantic search at all until someone set up
+    // a Google Cloud project. Vertex is one config line away and nothing about
+    // it was removed.
     delete process.env[EMBEDDINGS_ENV_VAR];
+    useEmptyProject();
 
     const selection = resolveEmbeddings();
 
-    expect(selection.port.identity.provider).toBe('vertex');
+    expect(selection.port.identity.provider).toBe('ollama');
+    expect(selection.source).toBe('default');
+  });
+
+  it('still lets an operator pick vertex explicitly', () => {
+    delete process.env[EMBEDDINGS_ENV_VAR];
+    useEmptyProject();
+
+    expect(resolveEmbeddings('vertex').port.identity.provider).toBe('vertex');
+    process.env[EMBEDDINGS_ENV_VAR] = 'vertex';
+    expect(resolveEmbeddings().port.identity.provider).toBe('vertex');
   });
 });
