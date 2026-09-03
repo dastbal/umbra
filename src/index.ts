@@ -13,7 +13,9 @@ export * from "./core/config/agent-config";
 export * from "./core/llm/provider";
 export * from './core/security';
 export * from './core/observability';
+export * from './core/rag/embeddings';
 export * from './presentation/http';
+export * from './presentation/mcp';
 
 // Exportamos las herramientas por si el usuario quiere crear su propio agente
 export * from "./core/tools";

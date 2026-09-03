@@ -61,9 +61,16 @@ import * as os from 'os';
 
 // Load env vars from the project root on module import.
 // process.cwd() resolves to the target workspace where `umbra` is executed.
+//
+// `quiet: true` is not cosmetic. dotenv v17 prints "injected env (n) from .env"
+// plus a usage tip to **stdout** on every call, and under `umbra mcp` stdout
+// carries JSON-RPC: two library banner lines corrupted the connection before
+// the first response. `src/bin/cli.ts` already passed `quiet` on its own two
+// calls; these two, running at module import, did not. Verified by the stdout
+// purity check (ADR-024, constraint 4).
 const rootDir = process.cwd();
-dotenv.config({ path: path.join(rootDir, '.env') });
-dotenv.config({ path: path.join(rootDir, '.env.development') });
+dotenv.config({ path: path.join(rootDir, '.env'), quiet: true });
+dotenv.config({ path: path.join(rootDir, '.env.development'), quiet: true });
 
 /**
  * Effort levels Anthropic accepts in `output_config.effort`.

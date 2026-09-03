@@ -2,6 +2,9 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import { agentPath } from '../config/agent-directory';
+import { runtimeRoot } from '../config/runtime-root';
+import { writeLine } from '../observability/console-sink';
+import { EMBEDDING_VECTOR_COLUMNS } from '../rag/embeddings/embeddings.port';
 
 /**
  * Singleton Database Manager.
@@ -22,7 +25,11 @@ export class AgentDB {
    */
   public static getInstance(): Database.Database {
     if (!this.instance) {
-      const rootDir = process.cwd();
+      // Read from the pinned runtime root rather than `process.cwd()`. Under
+      // the CLI the two are identical; under `umbra mcp` the working directory
+      // belongs to the client that spawned the process and says nothing about
+      // which repository is being served (ADR-024, constraint 3).
+      const rootDir = runtimeRoot();
       const dbDir = agentPath(rootDir); // Hidden folder in project root
       const dbPath = path.join(dbDir, 'memory.db');
 
@@ -51,7 +58,7 @@ export class AgentDB {
       try {
         this.instance.close();
       } catch (err) {
-        console.error('Error closing AgentDB:', err);
+        writeLine(`Error closing AgentDB: ${err instanceof Error ? err.message : String(err)}`);
       }
       this.instance = undefined as any;
     }
@@ -112,5 +119,48 @@ export class AgentDB {
     db.prepare(
       `CREATE INDEX IF NOT EXISTS idx_chunks_file ON code_chunks(file_path)`,
     ).run();
+
+    this.migrateEmbeddingColumns();
+  }
+
+  /**
+   * Adds one vector column per embedding provider, additively and idempotently.
+   *
+   * ## Why one column per provider instead of one shared column
+   *
+   * Two embedding models produce vectors that are not comparable, and the
+   * failure is silent: `nomic-embed-text` and `text-embedding-004` both return
+   * 768 floats, so a cosine similarity across them does not error — it returns
+   * a credible, meaningless number. Separate columns make the mistake
+   * impossible to make rather than merely discouraged (ADR-025).
+   *
+   * ## Why the legacy `vector_json` column is left in place
+   *
+   * It is not dead weight, it is the reason no reindex is required. Every value
+   * in it was written by Vertex, because Vertex is the only provider that ever
+   * existed, so the retriever reads
+   * `COALESCE(vector_vertex_json, vector_json)` when the active identity is
+   * Vertex. An index built before this change keeps answering afterwards.
+   *
+   * Switching providers therefore never destroys work: the previous provider's
+   * column stays populated and warm, and switching back costs nothing.
+   *
+   * `ALTER TABLE ... ADD COLUMN` is not conditional in SQLite, so the existing
+   * columns are read from `PRAGMA table_info` first. Running this on an
+   * already-migrated database performs no writes.
+   */
+  private static migrateEmbeddingColumns(): void {
+    const db = this.instance;
+
+    const existing = new Set(
+      (db.prepare(`PRAGMA table_info(code_chunks)`).all() as { name: string }[]).map(
+        (column) => column.name,
+      ),
+    );
+
+    for (const column of EMBEDDING_VECTOR_COLUMNS) {
+      if (existing.has(column)) continue;
+      db.prepare(`ALTER TABLE code_chunks ADD COLUMN ${column} TEXT`).run();
+    }
   }
 }

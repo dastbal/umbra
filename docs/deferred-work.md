@@ -879,3 +879,178 @@ Do not "fix" this by making the middleware boundary swallow a non-`Error`. It
 would silence the crash and destroy the only evidence, and the constitution's
 rule stands: a caught exception is handled or rethrown with context, never
 dropped.
+
+---
+
+## The question log as the index
+
+> Recorded 2026-09-02, branch `2.1.3`. Generated during the divergence phase
+> that preceded [ADR-024](./adr/ADR-024-umbra-as-a-read-only-mcp-server.md)'s v1
+> and deliberately not built: the server had to exist first, because it is the
+> only place four agents converge.
+
+### The idea
+
+Umbra now answers four clients — Claude Code, Codex, Antigravity, Gemini CLI —
+through `umbra mcp`. Record **what they ask**, not what they are told, and that
+log is the first dataset this project has ever had about which parts of a
+codebase are actually hard to understand.
+
+This is the shape that produced three of this repository's load-bearing ideas:
+`askrag`, `list_readmes` ([ADR-003](./adr/ADR-003-on-demand-readme-index.md)) and
+`list_adrs` ([ADR-004](./adr/ADR-004-on-demand-adr-index.md)). In each, the
+valuable artifact was not the answer but **the cheap index that made the answer
+findable**. Applied here, the questions themselves are the artifact.
+
+It is also the cheapest idea in this file: no model, no credentials, on the side
+of ADR-024 that is already deterministic.
+
+### What is broken today
+
+Nothing. This is an opportunity, not a defect — and the entry *An index of what
+the Researcher already asked* in this same file says why that matters: **an index
+that is not needed is a stale index waiting to mislead.** Read that entry before
+building this one; it is the same idea one layer out, and it carries the hazard
+analysis.
+
+### The mechanism to reuse — do not invent one
+
+- `src/presentation/mcp/umbra-mcp-server.ts` — `callTool` is the single choke
+  point every tool call passes through. One append there captures everything.
+- `.umbra/telemetry/` already exists as the convention for local JSONL
+  (`interactive-turns.jsonl`, ADR-008 / ADR-019).
+- `src/core/rag/index-stamp.ts` — the provenance pattern to copy: an identity, a
+  timestamp, and a status, written next to the thing it describes.
+
+### The hazard that decides whether this ships
+
+A log of questions is a log of what someone was working on, and `clientInfo` in
+the `initialize` handshake names which agent asked. That is mild on one
+operator's machine and is **not** mild in a shared repository: it would become a
+record of who investigated what, when. Any implementation must decide, before
+writing a line, whether the log is machine-local and gitignored — like the
+telemetry it would sit beside — or versioned. ADR-018's amendment reversed a
+"stealth" rule for *decisions*; questions are not decisions.
+
+### The plan
+
+1. Append `{ tool, arguments, timestamp, clientInfo }` from `callTool` to
+   `.umbra/telemetry/mcp-questions.jsonl`. Gitignored, matching the existing
+   telemetry.
+2. Decide the aggregation unit. Per module path is the obvious one; per verbatim
+   question is too sparse to ever repeat.
+3. Only then decide whether it feeds anything — a `umbra metrics` section, or
+   `Mandate.knownContext`. **Do not build the consumer first**: this file already
+   holds one entry that exists because the injection point was built before the
+   data.
+
+---
+
+## A cost estimate before retrieval runs
+
+> Recorded 2026-09-02, branch `2.1.3`. Generated in the same divergence phase and
+> not built: it optimizes a path whose real problem is a full scan, and fixing
+> the scan may make the estimate pointless.
+
+### The idea
+
+A database query planner reports what a query will cost before running it.
+`ask_codebase` could do the same: answer *"this would compare 277 chunks across
+19 files, and embedding the query costs one Vertex call"* and let the caller
+decide whether to pay.
+
+Under `umbra mcp` the caller is another agent with its own budget
+([ADR-019](./adr/ADR-019-turn-cost-is-the-bound-not-tool-calls.md) made cost the
+bound for Umbra's own turns; this would extend the courtesy outward).
+
+### What is broken today
+
+`RetrieverService#query` reads every row with a vector and computes
+`cosineSimilarity` in JS over each one. Both
+[ADR-024](./adr/ADR-024-umbra-as-a-read-only-mcp-server.md) and
+[ADR-025](./adr/ADR-025-embeddings-are-chosen-not-assumed.md) record this as an
+accepted negative consequence, unfixed. On this repository it is 277 chunks and
+imperceptible; it is the bottleneck the moment a server answers several clients
+over a large repository.
+
+### The mechanism to reuse
+
+- `RetrieverService#populatedProviders` already runs a cheap `LIMIT 1` probe per
+  column — the same shape a count would take.
+- `readIndexStamp` already reports `filesIndexed` and `status` without touching
+  the vectors.
+- `src/core/observability/metrics.ts` for the pricing vocabulary.
+
+### The honest objection to it
+
+An estimate nobody reads is a tool call spent to save a tool call. And the
+underlying complaint is the scan, not the ignorance: an indexed vector search
+would make the cost small enough that estimating it is wasted work. **Fix the
+scan first, and see whether this still wants building.**
+
+### The plan
+
+1. Measure the scan on a large repository, so the problem is a number.
+2. Decide between an approximate index in SQLite and an estimate.
+3. Only if the estimate survives step 2: expose it as part of the provenance
+   header `ask_codebase` already emits, not as a second tool.
+
+---
+
+## Heresy: the read-only layer should not be a LangChain object
+
+> Recorded 2026-09-02, branch `2.1.3`. The mandatory heretical candidate of the
+> divergence phase that preceded ADR-024 v1. It contradicts an accepted record
+> and is written down for exactly that reason.
+
+### The ADR it contradicts
+
+[ADR-010](./adr/ADR-010-umbra-public-package-and-cli.md) — *one published
+package, one `umbra` binary*.
+
+### The idea
+
+`umbra mcp` publishes four read-only tools and instantiates no model. But
+importing `listAdrsTool` pulls in `@langchain/core`, because the tool **is** a
+LangChain `tool()` object — so the MCP server loads a chat framework in order to
+read a markdown index off disk.
+
+The heresy: split the read-only layer into its own package with no LangChain, no
+`deepagents`, no `langsmith`. The four capabilities become **plain functions** —
+`buildAdrIndex` already is one — and LangChain wraps them at the agent's edge
+rather than being the medium they are written in.
+
+### Why it is worth more than an install-size argument
+
+It is also the DDD violation the constitution names first: *the framework stays
+behind the port; never leak a framework type into Domain or Application.* Today
+the application layer does not merely touch LangChain, it is expressed in it.
+Fixing that and fixing the install weight are the same change, which is a strong
+signal the change is real.
+
+`src/presentation/mcp/tool-catalog.ts` already declares its own minimal
+`InvokableTool` interface to avoid depending on the framework's concrete types —
+a workaround that exists because of this defect, and a marker of where the seam
+would go.
+
+### What is broken today
+
+Nothing that fails. `umbra mcp` starts, answers, and was verified. This is a
+design objection, not a bug — which is why it is recorded rather than acted on.
+
+### The cost, which is the reason it was not chosen
+
+Two packages is two releases and two version numbers.
+[ADR-012](./adr/ADR-012-shipped-working-guides-and-consumer-decision-records.md)
+carries six amendments as standing evidence of what one artifact drifting from
+another costs in this project. ADR-010's single-package decision was not
+arbitrary.
+
+### The plan, if it is ever taken
+
+1. Extract the four bodies as pure functions in one commit that changes no
+   behaviour and adds no package. **Most of the value is here**, and it is
+   reversible.
+2. Have both the agent and the MCP adapter call those functions.
+3. Only then ask whether a second package is worth its release. If step 1 landed,
+   the answer may be no — and that is a fine outcome for a heresy.

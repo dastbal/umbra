@@ -6,13 +6,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { log } from "./utils/logger";
 import { AgentSecurityPolicy } from '../security';
+import { runtimeRoot } from '../config/runtime-root';
 
 const execFileAsync = promisify(execFile);
 const securityPolicy = new AgentSecurityPolicy();
 
 export const executeTestsTool = tool(
   async ({ filePath }) => {
-    const rootDir = process.cwd();
+    const rootDir = runtimeRoot();
     const authorization = securityPolicy.evaluate({ kind: 'run_test', rootDir });
     if (authorization.decision !== 'allow') return `❌ APPROVAL_REQUIRED: ${authorization.reason}`;
 
@@ -47,7 +48,7 @@ export const executeTestsTool = tool(
 
 export const integrityCheckTool = tool(
   async () => {
-    const rootDir = process.cwd();
+    const rootDir = runtimeRoot();
     const authorization = securityPolicy.evaluate({ kind: 'run_type_check', rootDir });
     if (authorization.decision !== 'allow') return `❌ APPROVAL_REQUIRED: ${authorization.reason}`;
     log.tool("Running TypeScript integrity check...");

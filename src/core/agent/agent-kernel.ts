@@ -9,6 +9,7 @@ import {
   integrityCheckTool,
   listAdrsTool,
   listFilesTool,
+  queryDependencyGraphTool,
   refreshIndexTool,
   safeReadFileTool,
   safeWriteFileTool,
@@ -22,6 +23,7 @@ export type AgentCapability =
   | 'read_code'
   | 'read_adrs'
   | 'search_codebase'
+  | 'read_dependency_graph'
   | 'write_code'
   | 'delete_files'
   | 'run_tests'
@@ -118,6 +120,24 @@ export const CAPABILITY_REGISTRY: Readonly<Record<AgentCapability, CapabilityDef
     id: 'search_codebase',
     risk: 'read',
     tools: () => [askCodebaseTool, refreshIndexTool],
+  },
+  /**
+   * The AST dependency graph, which had no capability at all.
+   *
+   * `queryDependencyGraphTool` was reachable only by importing it directly, so
+   * this registry — described above as "the single source of truth for built-in
+   * capabilities and their concrete tools" — did not know about a read-only
+   * tool the project ships. Registering it means the MCP adapter and the agent
+   * read the same list rather than two, which is the drift ADR-013 recorded.
+   *
+   * Deliberately its own capability rather than an addition to
+   * `search_codebase`: that one also grants `refreshIndexTool`, which writes,
+   * and the graph query costs nothing and needs no credentials.
+   */
+  read_dependency_graph: {
+    id: 'read_dependency_graph',
+    risk: 'read',
+    tools: () => [queryDependencyGraphTool],
   },
   write_code: {
     id: 'write_code',

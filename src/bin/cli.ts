@@ -40,6 +40,7 @@ import { LLMProvider } from '../core/llm/provider';
 import { GoogleApplicationDefaultAuth } from '../presentation/cli/google-application-default-auth';
 import { configureLangSmith, hasLangSmithConfiguration } from '../core/observability/langsmith-config';
 import { askSecret, askText, confirm } from '../presentation/cli/prompts';
+import { startMcpServer } from '../presentation/mcp';
 
 const program = new Command();
 suppressLangSmithTransportLogs();
@@ -478,6 +479,34 @@ program
   });
 
 program
+  .command("mcp")
+  .description("Serve this repository's read-only knowledge to any MCP client over stdio")
+  .requiredOption("-r, --root <path>", "Repository to serve. Fixed at launch; no tool can change it")
+  .option("-e, --embeddings <provider>", "Embedding provider for semantic search: vertex | ollama")
+  .option("--no-index", "Do not warm the semantic index at launch")
+  .action(async (options: { root: string; embeddings?: string; index?: boolean }) => {
+    // Nothing in this handler may write to stdout: it carries JSON-RPC, and a
+    // single stray byte corrupts the connection before the handshake completes
+    // (ADR-024, constraint 4). `startMcpServer` redirects the log sink to
+    // stderr on its first line; every diagnostic below goes there too.
+    try {
+      await startMcpServer({
+        root: options.root,
+        version: readPackageVersion(),
+        embeddings: options.embeddings,
+        // commander maps `--no-index` to `index: false`.
+        skipIndex: options.index === false,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[umbra mcp] failed to start: ${message}\n`);
+      // A session command, so the hard exit convention of `deep` and
+      // `orchestrate` applies rather than `analyze`'s soft `process.exitCode`.
+      process.exit(1);
+    }
+  });
+
+program
   .command("analyze")
   .description("Evidence-gated, read-only project analysis with cited paths")
   .argument("<instruction>", "Question or audit to answer from the current repository")
@@ -788,5 +817,26 @@ program
       process.exit(1);
     }
   });
+
+
+/**
+ * Reads the published package version for `serverInfo`.
+ *
+ * Resolved from disk rather than written as a literal: `serverInfo.version` is
+ * what an MCP client shows the operator, and a hardcoded value silently goes
+ * stale at the next release. An unreadable manifest yields `0.0.0`, which is
+ * visibly wrong rather than plausibly wrong.
+ *
+ * @returns The package version, or `0.0.0` when it cannot be read.
+ */
+function readPackageVersion(): string {
+  try {
+    const manifestPath = path.join(__dirname, '..', '..', 'package.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as { version?: string };
+    return typeof manifest.version === 'string' ? manifest.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
 
 program.parse(process.argv);

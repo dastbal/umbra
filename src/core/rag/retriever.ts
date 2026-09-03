@@ -1,11 +1,38 @@
 import { AgentDB } from '../state/db';
-import { LLMProvider } from '../llm/provider';
 import { cosineSimilarity } from './math';
 import { ProcessedChunk } from '../types';
+import { writeLine } from '../observability/console-sink';
+import {
+  EMBEDDING_VECTOR_COLUMNS,
+  EmbeddingsIdentity,
+  EmbeddingsIndexMismatchError,
+  EmbeddingsPort,
+  EmbeddingsProvider,
+  LEGACY_VECTOR_COLUMN,
+} from './embeddings';
+import { resolveEmbeddings } from './embeddings/embeddings-resolver';
 import * as path from 'path';
 interface SearchResult {
   chunk: ProcessedChunk;
   score: number;
+}
+
+/**
+ * Where an answer came from, so a caller never has to assume the index is fresh
+ * or complete.
+ *
+ * ADR-017's third failure was an index that reported success while missing
+ * content. Under `umbra mcp` the reader of that lie is another agent, which
+ * cannot inspect the terminal to find out. So provenance travels with the
+ * result.
+ */
+export interface RetrievalProvenance {
+  /** Provider that wrote the vectors being searched. */
+  readonly provider: EmbeddingsProvider;
+  /** Model that wrote them. */
+  readonly model: string;
+  /** How many chunks were actually compared. */
+  readonly chunksSearched: number;
 }
 
 interface FileContext {
@@ -19,22 +46,89 @@ interface FileContext {
 export class RetrieverService {
   private db = AgentDB.getInstance();
 
+  private readonly embeddings: EmbeddingsPort;
+
+  /** Provenance of the most recent {@link query}, if one has run. */
+  private lastProvenance?: RetrievalProvenance;
+
+  /**
+   * @param embeddings - Embedding port to search with. Defaults to the resolved
+   *        provider, so existing callers such as `askCodebaseTool` — which do
+   *        `new RetrieverService()` — keep working unchanged. The parameter is
+   *        the injection seam tests and the MCP adapter use.
+   */
+  constructor(embeddings: EmbeddingsPort = resolveEmbeddings().port) {
+    this.embeddings = embeddings;
+  }
+
+  /** The active embedding identity, for stamping and for diagnostics. */
+  public get identity(): EmbeddingsIdentity {
+    return this.embeddings.identity;
+  }
+
+  /** Provenance of the most recent successful query. */
+  public get provenance(): RetrievalProvenance | undefined {
+    return this.lastProvenance;
+  }
+
   /**
    * Searches the codebase using Vector Embeddings (Cosine Similarity).
+   *
+   * Only vectors written by the **active** provider are read. Comparing across
+   * providers is not merely inaccurate, it is undetectable: `nomic-embed-text`
+   * and `text-embedding-004` are both 768-dimensional, so a mixed cosine
+   * returns a confident, meaningless ranking. When the active column is empty
+   * and another provider's is not, this throws rather than returning nothing —
+   * "no vectors for this provider" and "nothing matched your question" must not
+   * look the same.
+   *
    * @param query - The natural language query.
    * @param limit - Max chunks to retrieve.
+   * @returns Scored chunks, best first.
+   * @throws {EmbeddingsIndexMismatchError} When the active provider has no vectors.
    */
   public async query(
     query: string,
     limit: number = 5,
   ): Promise<SearchResult[]> {
-    console.log(`🔍 [RAG] Embedding Query: "${query}"...`);
+    writeLine(`🔍 [RAG] Embedding Query: "${query}"...`);
 
-    const embeddingModel = LLMProvider.getEmbeddingsModel();
-    const queryVector = await embeddingModel.embedQuery(query);
+    const column = this.embeddings.identity.column;
 
-    const stmt = this.db.prepare('SELECT * FROM code_chunks');
+    // The Vertex column coalesces over the pre-ADR-025 column: every value ever
+    // written to `vector_json` came from Vertex, because Vertex was the only
+    // provider. This is what lets an index built before this change keep
+    // answering without a reindex.
+    const vectorExpression =
+      this.embeddings.identity.provider === 'vertex'
+        ? `COALESCE(${column}, ${LEGACY_VECTOR_COLUMN})`
+        : column;
+
+    // Columns are named rather than selected with `*`, and the vector comes
+    // last: a 768-float JSON string is ~15 KB and lives in SQLite overflow
+    // pages, so column order decides whether the other provider's vectors are
+    // read off disk for nothing.
+    const stmt = this.db.prepare(
+      `SELECT id, file_path, chunk_type, content, metadata, ${vectorExpression} AS vector_json
+       FROM code_chunks
+       WHERE ${vectorExpression} IS NOT NULL`,
+    );
     const rows = stmt.all() as any[];
+
+    if (rows.length === 0) {
+      throw new EmbeddingsIndexMismatchError(
+        this.embeddings.identity,
+        this.populatedProviders(),
+      );
+    }
+
+    const queryVector = await this.embeddings.embedQuery(query);
+
+    this.lastProvenance = {
+      provider: this.embeddings.identity.provider,
+      model: this.embeddings.identity.model,
+      chunksSearched: rows.length,
+    };
 
     const scoredChunks: SearchResult[] = rows.map((row) => {
       const vector = JSON.parse(row.vector_json);
@@ -58,6 +152,48 @@ export class RetrieverService {
   }
 
   /**
+   * Reports which providers actually have vectors stored.
+   *
+   * Used only to build a useful error: knowing the index was written by Vertex
+   * is the difference between "re-index" and "switch back", and guessing costs
+   * the operator a full reindex they may not have needed.
+   *
+   * @returns Providers with at least one stored vector.
+   */
+  private populatedProviders(): EmbeddingsProvider[] {
+    const populated: EmbeddingsProvider[] = [];
+
+    for (const column of EMBEDDING_VECTOR_COLUMNS) {
+      const expression =
+        column === 'vector_vertex_json'
+          ? `COALESCE(${column}, ${LEGACY_VECTOR_COLUMN})`
+          : column;
+
+      try {
+        const row = this.db
+          .prepare(
+            `SELECT 1 AS present FROM code_chunks WHERE ${expression} IS NOT NULL LIMIT 1`,
+          )
+          .get() as { present?: number } | undefined;
+
+        if (row?.present === 1) {
+          populated.push(column === 'vector_vertex_json' ? 'vertex' : 'ollama');
+        }
+      } catch (error) {
+        // A missing column means the migration has not run for this provider,
+        // which is itself the answer: it holds nothing. Recorded rather than
+        // silently ignored, because a broken index table would otherwise look
+        // identical to an empty one.
+        writeLine(
+          `⚙️  [RAG] Could not inspect ${column}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    return populated;
+  }
+
+  /**
    * Retrieves the 'Skeleton' (Signatures) for a file from the registry.
    */
   private getFileSkeleton(sourcePath: string): string | undefined {
@@ -69,7 +205,9 @@ export class RetrieverService {
       const result = stmt.get(normalizedPath, sourcePath) as any;
       return result?.skeleton_signature;
     } catch (error) {
-      console.error(`Error fetching skeleton for ${sourcePath}:`, error);
+      writeLine(
+        `❌ [RAG] Error fetching skeleton for ${sourcePath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return undefined;
     }
   }
@@ -99,7 +237,9 @@ export class RetrieverService {
       // 3. Devolver solo los strings de los targets
       return results.map((row) => row.target);
     } catch (error) {
-      console.error(`Error fetching dependencies for ${sourcePath}:`, error);
+      writeLine(
+        `❌ [RAG] Error fetching dependencies for ${sourcePath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return [];
     }
   }

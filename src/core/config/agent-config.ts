@@ -58,10 +58,31 @@ const permissionsSchema = z
     requireApprovalForExternalActions: true,
   });
 
+const ragSchema = z
+  .object({
+    /**
+     * Which embedding provider builds and reads the code index.
+     *
+     * `vertex` remains the default so that an existing installation behaves
+     * exactly as it did before embeddings became pluggable (ADR-025). `ollama`
+     * runs locally: no credentials, no per-query cost, works offline.
+     *
+     * Switching does not discard the previous provider's vectors — they live in
+     * separate columns of `code_chunks` — so switching back requires no
+     * reindex.
+     */
+    embeddings: z.enum(['vertex', 'ollama']).default('vertex'),
+    /** Optional model override for the selected provider. */
+    embeddingsModel: z.string().trim().min(1).optional(),
+  })
+  .strict()
+  .default({ embeddings: 'vertex' });
+
 const agentConfigSchema = z.object({
   models: roleModelsSchema,
   limits: limitsSchema,
   permissions: permissionsSchema,
+  rag: ragSchema,
 }).strict();
 
 /** Runtime configuration for adaptive multi-agent execution. */
