@@ -217,12 +217,29 @@ needs explicit authorization for its exact count.
 
 ---
 
+## Amendment — 2026-09-03 · Provider selection is reachable from the CLI
+
+`/model → Embeddings` now records the operator's provider choice in the local
+agent policy without changing the chat model. The menu reports availability but
+does not index automatically: selecting Vertex makes a billable provider
+explicit, it does not silently send repository code.
+
+`umbra index --embeddings ollama|vertex` is the corresponding one-off command.
+Its flag is passed directly to `IndexerService`, so the provider visible in the
+command is the provider that writes the vectors. Existing provider/model rows
+remain untouched by the other choice.
+
+---
+
 ## Related Files
 
 - `src/core/rag/embeddings/embeddings-resolver.ts` — the ladder and its last rung
 - `src/core/config/agent-config.ts` — `ragSchema`, now without a default
 - `src/core/rag/embeddings/embeddings.spec.ts` — `useEmptyProject`, and the `source` assertions
 - `src/core/rag/embeddings/ollama-embeddings.adapter.ts` — `nomic-embed-text`
+- `src/core/config/agent-config-writer.ts` — `setConfiguredEmbeddingsProvider`
+- `src/presentation/cli/model-menu.ts` — `showEmbeddingsMenu`
+- `src/bin/cli.ts` — `index` command
 - `docs/adr/ADR-025-embeddings-are-chosen-not-assumed.md` — the record this amends
 - `docs/adr/ADR-026-vectors-are-numbers-and-the-database-can-count.md` — what makes the change recoverable
 - `docs/benchmarks/embedding-retrieval-corpus.json` — the comparison that has not run

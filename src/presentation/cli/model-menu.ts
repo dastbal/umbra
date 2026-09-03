@@ -35,6 +35,9 @@
  */
 
 import { ModelSwitcher } from '../../core/config/model-switcher';
+import { setConfiguredEmbeddingsProvider } from '../../core/config/agent-config-writer';
+import { resolveEmbeddings, pinEmbeddingsProvider } from '../../core/rag/embeddings/embeddings-resolver';
+import { probeEmbeddings } from '../../core/rag/embeddings/embeddings-availability';
 import {
   isVertexAnthropicModel,
   isGoogleCloudProjectId,
@@ -141,7 +144,7 @@ export async function showModelMenu(
   // ── Step 1: Provider Selection ─────────────────────────────────────────────
   const isCurrentOllama = currentModel.startsWith('ollama:');
   const isCurrentClaude = isVertexAnthropicModel(currentModel);
-  const providers: SelectChoice<'vertex-gemini' | 'vertex-anthropic' | 'ollama' | 'setup'>[] = [
+  const providers: SelectChoice<'vertex-gemini' | 'vertex-anthropic' | 'ollama' | 'embeddings' | 'setup'>[] = [
     {
       // The distinguishing word leads each row. Both cloud providers share the
       // same Vertex AI transport, so starting both labels with it made them
@@ -159,6 +162,10 @@ export async function showModelMenu(
       label: '🦙  Ollama  (Local — free, no API key needed)',
       value: 'ollama',
       active: isCurrentOllama,
+    },
+    {
+      label: '🔎  Embeddings  (provider used to index and search code)',
+      value: 'embeddings',
     },
     { label: '── configuration ──', separator: true },
     {
@@ -178,6 +185,10 @@ export async function showModelMenu(
     return showSetupMenu(envFilePath);
   }
 
+  if (selectedProvider === 'embeddings') {
+    return showEmbeddingsMenu();
+  }
+
   if (selectedProvider === 'vertex-gemini') {
     return showVertexModelMenu(currentModel, envFilePath);
   } else if (selectedProvider === 'vertex-anthropic') {
@@ -185,6 +196,53 @@ export async function showModelMenu(
   } else {
     return showOllamaModelMenu(currentModel, envFilePath);
   }
+}
+
+/**
+ * Chooses and persists the provider that writes and reads semantic code
+ * vectors. This changes no chat model and never starts a paid index silently.
+ *
+ * @returns Always null because the current chat agent is unchanged.
+ */
+async function showEmbeddingsMenu(): Promise<null> {
+  const active = resolveEmbeddings().port.identity.provider;
+  const selected = await chooseFromList<'ollama' | 'vertex'>('Embeddings provider', [
+    {
+      label: '🦙  Ollama',
+      value: 'ollama',
+      hint: 'nomic-embed-text · local, free, offline',
+      active: active === 'ollama',
+    },
+    {
+      label: '☁️   Vertex',
+      value: 'vertex',
+      hint: 'text-embedding-004 · billable, needs Google credentials',
+      active: active === 'vertex',
+    },
+  ]);
+  if (selected === null) {
+    console.log(colors.muted('  Cancelled.\n'));
+    return null;
+  }
+
+  const saved = setConfiguredEmbeddingsProvider(process.cwd(), selected);
+  if (!saved.saved) {
+    console.log(colors.danger(`  ✗ Embeddings provider was not saved: ${saved.reason ?? 'unknown error'}\n`));
+    return null;
+  }
+
+  // The resolver is process-wide; pinning makes this selection observable by
+  // no-argument retrievers created later in this same CLI process.
+  pinEmbeddingsProvider(selected);
+  const selection = resolveEmbeddings();
+  const availability = await probeEmbeddings(selection.port);
+  console.log(colors.accent(`  ✓ Embeddings provider saved: ${selection.port.identity.provider}/${selection.port.identity.model}`));
+  if (!availability.available) {
+    console.log(colors.warning(`  ⚠️  Semantic indexing is unavailable: ${availability.reason ?? 'unknown reason'}`));
+  }
+  console.log(colors.muted(`  Run: umbra index --embeddings ${selected}  to build this provider's vectors.`));
+  console.log(colors.muted('  Existing vectors from the other provider are kept.\n'));
+  return null;
 }
 
 /**

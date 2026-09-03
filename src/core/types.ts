@@ -38,6 +38,10 @@ export interface ChunkMetadata {
   methodName?: string;
   /** TSDoc attached to the indexed symbol, when the AST exposed one. */
   documentation?: string;
+  /** One-based position when a source unit is split for safe embedding. */
+  fragmentIndex?: number;
+  /** Number of stored fragments produced from the original source unit. */
+  fragmentCount?: number;
 }
 
 /**

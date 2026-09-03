@@ -797,6 +797,23 @@ in `.umbra/agent.config.json`, which is gitignored — so each person on a team
 chooses without changing what the repository shares. `UMBRA_EMBEDDINGS=vertex`
 and `--embeddings vertex` do the same thing for one run.
 
+### Choose the provider before indexing
+
+Inside an interactive CLI session, use `/model` and select **Embeddings**. The
+choice is stored only in `.umbra/agent.config.json`; it does not change your
+chat model and it does not start a billable rebuild by itself.
+
+For a one-off or scripted rebuild, choose the provider explicitly:
+
+```bash
+umbra index --embeddings ollama
+umbra index --embeddings vertex
+```
+
+The command checks the selected provider before writing vectors. It never
+substitutes Vertex for Ollama or vice versa, so a missing local model or Google
+credential is reported before any index is changed.
+
 Switching is reversible and never destroys the other index: each provider's
 vectors are stored under their own identity, so switching back requires no
 re-indexing, and querying an index built by the *other* provider raises an

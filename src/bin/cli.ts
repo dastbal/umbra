@@ -42,6 +42,9 @@ import { GoogleApplicationDefaultAuth } from '../presentation/cli/google-applica
 import { configureLangSmith, hasLangSmithConfiguration } from '../core/observability/langsmith-config';
 import { askSecret, askText, confirm } from '../presentation/cli/prompts';
 import { startMcpServer } from '../presentation/mcp';
+import { IndexerService } from '../core/rag/indexer';
+import { resolveEmbeddings } from '../core/rag/embeddings/embeddings-resolver';
+import { probeEmbeddings } from '../core/rag/embeddings/embeddings-availability';
 
 const program = new Command();
 suppressLangSmithTransportLogs();
@@ -524,6 +527,29 @@ program
       // `orchestrate` applies rather than `analyze`'s soft `process.exitCode`.
       process.exit(1);
     }
+  });
+
+program
+  .command('index')
+  .description('Build semantic code vectors with the selected embedding provider')
+  .option('-e, --embeddings <provider>', 'Embedding provider: vertex | ollama')
+  .action(async (options: { embeddings?: string }) => {
+    if (options.embeddings !== undefined && options.embeddings !== 'vertex' && options.embeddings !== 'ollama') {
+      log.error('Unknown embeddings provider. Choose: ollama or vertex.');
+      process.exitCode = 2;
+      return;
+    }
+
+    const selection = resolveEmbeddings(options.embeddings);
+    const availability = await probeEmbeddings(selection.port);
+    if (!availability.available) {
+      log.error(`Cannot index with ${selection.port.identity.provider}/${selection.port.identity.model}: ${availability.reason ?? 'unavailable'}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    log.sys(`Indexing with ${selection.port.identity.provider}/${selection.port.identity.model} (${selection.source}).`);
+    await new IndexerService(selection.port).indexProject();
   });
 
 program

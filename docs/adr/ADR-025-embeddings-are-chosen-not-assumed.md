@@ -506,6 +506,21 @@ or by adding more of the same kind of test.
 
 ---
 
+## Amendment — 2026-09-03: embedding inputs are bounded before persistence
+
+An Ollama rebuild exposed two rejected batches whose input exceeded the
+`nomic-embed-text` context limit. Retrying the same payload would only create a
+partial index. `splitChunksForEmbedding` now divides oversized AST chunks before
+they are stored, preserving every source character and recording fragment
+metadata. The ceiling is deliberately conservative for the smallest supported
+local model; it is not a score threshold and does not compare providers.
+
+Provider backfill refuses an old oversized stored chunk rather than truncating
+it. The operator receives a rebuild instruction, so a provider change never
+silently creates a vector for only part of the source. A longer-context Ollama
+model remains an explicit future experiment: its real vector dimensions must be
+probed and recorded as a model identity before it may enter an index.
+
 ## Related Files
 
 - `src/core/rag/embeddings/embeddings.port.ts` — `EmbeddingsPort`, `EmbeddingsIdentity`, `EMBEDDING_VECTOR_COLUMNS`, `LEGACY_VECTOR_COLUMN`, `EmbeddingsIndexMismatchError`
@@ -516,6 +531,7 @@ or by adding more of the same kind of test.
 - `src/core/rag/index-stamp.ts` — `writeIndexStamp`, `readIndexStamp`, `INDEX_STAMP_FILE`
 - `src/core/rag/retriever.ts` — `RetrieverService#query`, `populatedProviders`, `RetrievalProvenance`
 - `src/core/rag/indexer.ts` — `indexProject` (provider-change detection), `embedAndSaveBatches` (the upsert)
+- `src/core/rag/embedding-input.ts` — `splitChunksForEmbedding`, `assertStoredInputsAreSafe`
 - `src/core/state/db.ts` — `initSchema`, `migrateEmbeddingColumns`
 - `src/core/config/agent-config.ts` — the `rag` key
 - `src/core/llm/provider.ts` — `getEmbeddingsModel` (unmodified), the `dotenv` `quiet` fix

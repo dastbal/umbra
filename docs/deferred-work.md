@@ -13,6 +13,44 @@ record the decision as an ADR.
 
 ---
 
+## Long-context Ollama embedding profiles
+
+> Deferred 2026-09-03 after an oversized `nomic-embed-text` input exposed its
+> 2K context limit. The safe chunk-fragment guard shipped first.
+
+### The idea
+
+Evaluate `qwen3-embedding:0.6b` as an explicit optional Ollama model for code
+retrieval. Its published 32K context can reduce fragmentation without changing
+the portable hybrid-retrieval policy.
+
+### What is actually missing
+
+Umbra accepts an Ollama model override but its adapter currently declares the
+default model's dimensions. Changing the model name alone could stamp an
+incorrect identity even though `chunk_vectors` correctly separates rows by
+provider and model.
+
+### The mechanism to reuse
+
+`EmbeddingsIdentity`, `chunk_vectors.dimensions`, provider backfill and the
+fixed-corpus audit already make a model experiment isolated and reversible.
+`splitChunksForEmbedding` guarantees that a model change is not required merely
+to avoid an oversized input.
+
+### Plan
+
+1. Pull the candidate only with operator approval and probe one local vector to
+   record its actual dimensions and context behaviour.
+2. Add a named model profile; never infer dimensions from a model string.
+3. Build its rows beside `nomic-embed-text`, then benchmark against the fixed
+   corpus. Do not promote it for context length, disk use or latency alone.
+4. Keep the remaining ideation candidates — pressure-map telemetry, AST symbol
+   cards, FTS-only fallback and a semantic-opt-in default — deferred until a
+   measured retrieval problem justifies them.
+
+---
+
 ## Markdown documentation chunks for retrieval
 
 > Deferred 2026-09-03 while implementing ADR-029. David chose TSDoc-only

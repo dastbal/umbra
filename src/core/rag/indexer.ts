@@ -7,6 +7,11 @@ import { EmbeddingsPort } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
 import { readIndexStamp, writeIndexStamp } from './index-stamp';
 import { encodeVector } from './vector-codec';
+import {
+  assertStoredInputsAreSafe,
+  embeddingInputFor,
+  splitChunksForEmbedding,
+} from './embedding-input';
 import * as path from 'path';
 import * as fs from 'fs';
 import { GraphEdge, ProcessedChunk } from '../types';
@@ -142,9 +147,19 @@ export class IndexerService {
     }
 
       // 3. TERCERA PASADA: Guardar Vectores
+      // Every stored source unit is made safe for the smallest supported
+      // embedding context before any provider receives it. This is lossless:
+      // a large method becomes several persisted chunks rather than a silently
+      // truncated embedding prompt.
+      const embeddableChunks = splitChunksForEmbedding(pendingChunks);
+      if (embeddableChunks.length > pendingChunks.length) {
+        IndexerService.log(
+          `✂️  Split ${embeddableChunks.length - pendingChunks.length} oversized source fragment(s) for safe embeddings.`,
+        );
+      }
       let embedOutcome = { embeddedBatches: 0, failedBatches: 0 };
-      if (pendingChunks.length > 0) {
-        embedOutcome = await this.embedAndSaveBatches(pendingChunks);
+      if (embeddableChunks.length > 0) {
+        embedOutcome = await this.embedAndSaveBatches(embeddableChunks);
       }
 
       // Reporting completion after failed batches is worse than the failure
@@ -229,6 +244,14 @@ export class IndexerService {
 
     if (pending.length === 0) return 0;
 
+    assertStoredInputsAreSafe(
+      pending.map((row) => ({
+        ...row,
+        type: 'file',
+        metadata: { startLine: 1, endLine: 1 },
+      })),
+    );
+
     IndexerService.log(
       `Embedding ${pending.length} existing chunks for ${identity.provider}/${identity.model}...`,
     );
@@ -266,7 +289,13 @@ export class IndexerService {
       const batch = pending.slice(i, i + this.BATCH_SIZE);
 
       try {
-        const vectors = await this.embeddings.embedDocuments(batch.map((row) => row.content));
+        const vectors = await this.embeddings.embedDocuments(
+          batch.map((row) => embeddingInputFor({
+            ...row,
+            type: 'file',
+            metadata: { startLine: 1, endLine: 1 },
+          })),
+        );
         insertMany(batch, vectors);
         embedded += batch.length;
         writeFragment('.');
@@ -344,15 +373,7 @@ export class IndexerService {
       const batch = allChunks.slice(i, i + this.BATCH_SIZE);
 
       // 1. Prepare Text for Embedding
-      const textsToEmbed = batch.map((c) => {
-        const metaStr = c.metadata.methodName
-          ? `Method: ${c.metadata.methodName}`
-          : `Class: ${c.metadata.className}`;
-        const documentation = c.metadata.documentation === undefined
-          ? ''
-          : `TSDoc:\n${c.metadata.documentation}\n`;
-        return `${metaStr}\n${documentation}${c.content}`;
-      });
+      const textsToEmbed = batch.map(embeddingInputFor);
 
       let retries = 3;
       let delay = 2000;

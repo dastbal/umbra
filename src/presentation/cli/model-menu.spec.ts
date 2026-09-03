@@ -1,5 +1,7 @@
 const mockSelectOutcome = jest.fn();
 const mockAskText = jest.fn();
+const mockSetConfiguredEmbeddingsProvider = jest.fn();
+const mockPinEmbeddingsProvider = jest.fn();
 
 jest.mock('./interactive-select', () => ({
   isInteractive: () => true,
@@ -9,6 +11,21 @@ jest.mock('./interactive-select', () => ({
 jest.mock('./prompts', () => ({
   askNumber: jest.fn(),
   askText: mockAskText,
+}));
+
+jest.mock('../../core/config/agent-config-writer', () => ({
+  setConfiguredEmbeddingsProvider: mockSetConfiguredEmbeddingsProvider,
+}));
+
+jest.mock('../../core/rag/embeddings/embeddings-resolver', () => ({
+  resolveEmbeddings: () => ({
+    port: { identity: { provider: 'ollama', model: 'nomic-embed-text' } },
+  }),
+  pinEmbeddingsProvider: mockPinEmbeddingsProvider,
+}));
+
+jest.mock('../../core/rag/embeddings/embeddings-availability', () => ({
+  probeEmbeddings: jest.fn().mockResolvedValue({ available: true }),
 }));
 
 import { ModelSwitcher } from '../../core/config/model-switcher';
@@ -50,6 +67,9 @@ describe('showModelMenu Claude on Vertex', () => {
   beforeEach(() => {
     mockSelectOutcome.mockReset();
     mockAskText.mockReset();
+    mockSetConfiguredEmbeddingsProvider.mockReset();
+    mockSetConfiguredEmbeddingsProvider.mockReturnValue({ path: '.umbra/agent.config.json', saved: true });
+    mockPinEmbeddingsProvider.mockReset();
     delete process.env.GOOGLE_CLOUD_PROJECT;
     delete process.env.AGENT_REASONING;
     delete process.env.AGENT_REASONING_DISPLAY;
@@ -83,6 +103,7 @@ describe('showModelMenu Claude on Vertex', () => {
       'vertex-gemini',
       'vertex-anthropic',
       'ollama',
+      'embeddings',
       undefined, // the "configuration" separator carries no value
       'setup',
     ]);
@@ -125,6 +146,30 @@ describe('showModelMenu Claude on Vertex', () => {
     await showModelMenu('gemini-3.5-flash');
 
     expect(levelsAt(2)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  });
+});
+
+describe('showModelMenu embeddings provider', () => {
+  beforeEach(() => {
+    mockSelectOutcome.mockReset();
+    mockSetConfiguredEmbeddingsProvider.mockReset();
+    mockSetConfiguredEmbeddingsProvider.mockReturnValue({ path: '.umbra/agent.config.json', saved: true });
+    mockPinEmbeddingsProvider.mockReset();
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('persists and pins a provider without hot-swapping the chat model', async () => {
+    mockSelectOutcome
+      .mockResolvedValueOnce({ status: 'selected', value: 'embeddings' })
+      .mockResolvedValueOnce({ status: 'selected', value: 'vertex' });
+
+    await expect(showModelMenu('gemini-3.5-flash')).resolves.toBeNull();
+
+    expect(choicesAt(1).map((choice) => choice.value)).toEqual(['ollama', 'vertex']);
+    expect(mockSetConfiguredEmbeddingsProvider).toHaveBeenCalledWith(process.cwd(), 'vertex');
+    expect(mockPinEmbeddingsProvider).toHaveBeenCalledWith('vertex');
   });
 });
 
