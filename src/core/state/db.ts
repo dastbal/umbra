@@ -10,6 +10,10 @@ import {
   LEGACY_VECTOR_COLUMN,
 } from '../rag/embeddings/embeddings.port';
 import { encodeLegacyJsonVector, vectorDimensions } from '../rag/vector-codec';
+import {
+  loadVectorExtension,
+  VectorExtensionStatus,
+} from './vector-extension';
 
 /**
  * Singleton Database Manager.
@@ -17,6 +21,21 @@ import { encodeLegacyJsonVector, vectorDimensions } from '../rag/vector-codec';
  */
 export class AgentDB {
   private static instance: Database.Database;
+
+  /** Whether SQL-side vector distance is available on this connection. */
+  private static vectorExtension: VectorExtensionStatus = { available: false };
+
+  /**
+   * Reports whether `vec_distance_cosine` can be used in SQL.
+   *
+   * Read by `RetrieverService` to choose between ranking in SQL and ranking in
+   * JavaScript. Exposed rather than re-probed so both answer from one fact.
+   *
+   * @returns The extension status for this process.
+   */
+  public static get vectorSearch(): VectorExtensionStatus {
+    return AgentDB.vectorExtension;
+  }
 
   /**
    * Private constructor to enforce Singleton pattern.
@@ -49,6 +68,11 @@ export class AgentDB {
 
       // OPTIMIZATION: Write-Ahead Logging makes writing faster and safer
       this.instance.pragma('journal_mode = WAL');
+
+      // Vector distance in SQL rather than in JavaScript (ADR-026). Allowed to
+      // fail: retrieval falls back to scoring in JS over the same BLOBs, and
+      // the reason is reported once rather than hidden.
+      this.vectorExtension = loadVectorExtension(this.instance);
 
       this.initSchema();
     }

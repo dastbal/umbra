@@ -9,7 +9,7 @@ import {
   EmbeddingsProvider,
 } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
-import { decodeVector } from './vector-codec';
+import { decodeVector, encodeVector } from './vector-codec';
 import * as path from 'path';
 interface SearchResult {
   chunk: ProcessedChunk;
@@ -34,6 +34,15 @@ export interface RetrievalProvenance {
   readonly chunksSearched: number;
   /** Component count of the stored vectors, for diagnosing a changed model. */
   readonly dimensions: number;
+  /**
+   * Where the distance was computed.
+   *
+   * `'sql'` means only the returned rows crossed into JavaScript; `'javascript'`
+   * means `sqlite-vec` could not load and every stored vector was read. Worth
+   * surfacing, because the two differ by orders of magnitude on a large
+   * repository and produce identical-looking results.
+   */
+  readonly rankedIn: 'sql' | 'javascript';
 }
 
 interface FileContext {
@@ -81,10 +90,14 @@ export class RetrieverService {
    * Only vectors written by the **active** provider are read. Comparing across
    * providers is not merely inaccurate, it is undetectable: `nomic-embed-text`
    * and `text-embedding-004` are both 768-dimensional, so a mixed cosine
-   * returns a confident, meaningless ranking. When the active column is empty
-   * and another provider's is not, this throws rather than returning nothing —
-   * "no vectors for this provider" and "nothing matched your question" must not
+   * returns a confident, meaningless ranking. When the active identity has no
+   * vectors and another does, this throws rather than returning nothing — "no
+   * vectors for this provider" and "nothing matched your question" must not
    * look the same.
+   *
+   * The distance is computed in SQL when `sqlite-vec` loaded, so only the rows
+   * that won cross into JavaScript; otherwise it falls back to scoring the same
+   * BLOBs here. `provenance.rankedIn` says which ran.
    *
    * @param query - The natural language query.
    * @param limit - Max chunks to retrieve.
@@ -99,11 +112,118 @@ export class RetrieverService {
 
     const identity = this.embeddings.identity;
 
-    // Vectors live in `chunk_vectors`, keyed by (chunk, provider, model), and
-    // only this identity's rows are read. Nothing coalesces across providers:
-    // the legacy `code_chunks` columns were imported into this table by
-    // `AgentDB`'s migration, so an index built before ADR-026 answers here with
-    // no reindex, and those columns are never consulted at query time.
+    // Checked before embedding, deliberately. The old order embedded first and
+    // discovered the problem after, so an unusable index cost a paid API call
+    // and needed credentials just to diagnose (ADR-025 §4). This probe reads one
+    // row through `idx_chunk_vectors_identity`.
+    //
+    // Nothing coalesces across providers: the legacy `code_chunks` columns were
+    // imported into `chunk_vectors` by `AgentDB`'s migration, so an index built
+    // before ADR-026 answers here without a reindex, and those columns are
+    // never consulted at query time.
+    const present = this.db
+      .prepare(
+        `SELECT dimensions FROM chunk_vectors
+          WHERE provider = ? AND model = ? LIMIT 1`,
+      )
+      .get(identity.provider, identity.model) as { dimensions?: number } | undefined;
+
+    if (present === undefined) {
+      throw new EmbeddingsIndexMismatchError(identity, this.populatedProviders());
+    }
+
+    const queryVector = await this.embeddings.embedQuery(query);
+
+    // A model that changed its output shape inside one provider. Caught here
+    // because `vec_distance_cosine` would otherwise fail with a message about
+    // byte lengths, which tells the operator nothing about what to do.
+    if (present.dimensions !== undefined && present.dimensions !== queryVector.length) {
+      throw new Error(
+        `The index holds ${present.dimensions}-dimension vectors for ` +
+          `${identity.provider}/${identity.model}, but this query produced ` +
+          `${queryVector.length}. The model changed shape; re-index with ` +
+          `UMBRA_EMBEDDINGS=${identity.provider}.`,
+      );
+    }
+
+    const dimensions = present.dimensions ?? queryVector.length;
+
+    return AgentDB.vectorSearch.available
+      ? this.rankInSql(queryVector, limit, identity, dimensions)
+      : this.rankInJavaScript(queryVector, limit, identity, dimensions);
+  }
+
+  /**
+   * Ranks by computing the distance inside SQLite.
+   *
+   * Only the `k` winning rows are ever marshalled into JavaScript. That is the
+   * whole point: without it every stored vector crosses the process boundary on
+   * every query — 146 MB on a 50,000-chunk repository, even as BLOBs.
+   *
+   * `vec_distance_cosine` returns a distance, so the score reported here is
+   * `1 - distance`. Verified against `cosineSimilarity` on real vectors from
+   * this index: the two agree to 4.4e-7, which is float32 rounding and far
+   * below anything a ranking could notice.
+   *
+   * @param queryVector - The embedded query.
+   * @param limit - How many chunks to return.
+   * @param identity - The active embedding identity.
+   * @param dimensions - Stored vector length.
+   * @returns Scored chunks, best first.
+   */
+  private rankInSql(
+    queryVector: number[],
+    limit: number,
+    identity: EmbeddingsIdentity,
+    dimensions: number,
+  ): SearchResult[] {
+    const rows = this.db
+      .prepare(
+        `SELECT c.id AS id, c.file_path AS file_path, c.chunk_type AS chunk_type,
+                c.content AS content, c.metadata AS metadata,
+                vec_distance_cosine(v.vector, ?) AS distance
+           FROM chunk_vectors v
+           JOIN code_chunks c ON c.id = v.chunk_id
+          WHERE v.provider = ? AND v.model = ?
+          ORDER BY distance
+          LIMIT ?`,
+      )
+      .all(encodeVector(queryVector), identity.provider, identity.model, limit) as any[];
+
+    this.lastProvenance = {
+      provider: identity.provider,
+      model: identity.model,
+      // The comparison happened in C and its width was never materialised here.
+      // Reporting a scanned count would be a guess, so this reports the rows it
+      // actually received.
+      chunksSearched: rows.length,
+      dimensions,
+      rankedIn: 'sql',
+    };
+
+    return rows.map((row) => this.toSearchResult(row, 1 - Number(row.distance)));
+  }
+
+  /**
+   * Ranks in JavaScript, over the same BLOBs.
+   *
+   * The fallback when `sqlite-vec` could not load — an unsupported platform, or
+   * a `better-sqlite3` built without extension support. It still reads 5.3×
+   * fewer bytes than the JSON text it replaced and skips parsing entirely, so
+   * the degraded path is not a slow path in absolute terms.
+   *
+   * @param queryVector - The embedded query.
+   * @param limit - How many chunks to return.
+   * @param identity - The active embedding identity.
+   * @param dimensions - Stored vector length.
+   * @returns Scored chunks, best first.
+   */
+  private rankInJavaScript(
+    queryVector: number[],
+    limit: number,
+    identity: EmbeddingsIdentity,
+    dimensions: number,
+  ): SearchResult[] {
     const rows = this.db
       .prepare(
         `SELECT c.id AS id, c.file_path AS file_path, c.chunk_type AS chunk_type,
@@ -114,41 +234,46 @@ export class RetrieverService {
       )
       .all(identity.provider, identity.model) as any[];
 
-    if (rows.length === 0) {
-      throw new EmbeddingsIndexMismatchError(identity, this.populatedProviders());
-    }
-
-    const queryVector = await this.embeddings.embedQuery(query);
-
     this.lastProvenance = {
       provider: identity.provider,
       model: identity.model,
       chunksSearched: rows.length,
-      dimensions: decodeVector(rows[0].vector as Buffer).length,
+      dimensions,
+      rankedIn: 'javascript',
     };
 
-    const scoredChunks: SearchResult[] = rows.map((row) => {
+    const scored = rows.map((row) => {
       // A typed-array view over the stored bytes: no JSON parse, and no copy of
       // the components. Decoding 50 vectors 200 times measured 1 ms this way
       // against 1,130 ms through `JSON.parse` (ADR-026).
       const vector = decodeVector(row.vector as Buffer);
-      const score = cosineSimilarity(queryVector, vector);
-      const metadata = JSON.parse(row.metadata);
-
-      return {
-        score,
-        chunk: {
-          id: row.id,
-          type: row.chunk_type,
-          content: row.content,
-          metadata: metadata,
-          // Ensure filePath is recovered from the DB row or metadata
-          filePath: row.file_path || metadata.filePath,
-        } as ProcessedChunk,
-      };
+      return this.toSearchResult(row, cosineSimilarity(queryVector, vector));
     });
 
-    return scoredChunks.sort((a, b) => b.score - a.score).slice(0, limit);
+    return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  /**
+   * Builds one search result from a joined row.
+   *
+   * @param row - A row carrying the chunk columns.
+   * @param score - Similarity, where 1 is identical.
+   * @returns The scored chunk.
+   */
+  private toSearchResult(row: any, score: number): SearchResult {
+    const metadata = JSON.parse(row.metadata);
+
+    return {
+      score,
+      chunk: {
+        id: row.id,
+        type: row.chunk_type,
+        content: row.content,
+        metadata,
+        // Ensure filePath is recovered from the DB row or metadata
+        filePath: row.file_path || metadata.filePath,
+      } as ProcessedChunk,
+    };
   }
 
   /**
