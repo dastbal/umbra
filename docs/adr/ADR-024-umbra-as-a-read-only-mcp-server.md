@@ -5,7 +5,7 @@
 | **Category** | Architecture · Packaging · Integration |
 | **Author** | David Balladares (decision) · Claude (record) |
 | **Date** | 2026-09-02 |
-| **Status** | ✅ **Accepted** — amended 6× 2026-09-02. Amendment 1 was **wrong** and is corrected in amendment 6 |
+| **Status** | ✅ **Accepted** — amended 7× 2026-09-03. Amendment 1 was **wrong** and is corrected in amendment 6 |
 
 ---
 
@@ -568,6 +568,51 @@ to hold.
 **What this unblocks**, still unbuilt: the HTTP/streamable transport (several
 clients, remote), and **elicitation** — the channel constraint 2 named as the
 prerequisite for anything that writes.
+
+---
+
+### 7 — 2026-09-03 · MCP onboarding is explicit, additive, and never an install hook
+
+The first public MCP instructions required a developer to copy a JSON block into
+`.mcp.json`. That is a small step, but it is easy to mistype and discourages
+adoption of the read-only server this record introduced. The alternative proposed
+was a package `postinstall` hook which would create or modify the file whenever
+`npm install` runs.
+
+**The hook is rejected.** A dependency installation must not silently change a
+consumer repository's tool configuration or register a command a client might
+later launch. This is not a distinction of convenience: the root pinning rule in
+this decision means the generated entry grants access to a specific repository.
+The operator must see and choose that change.
+
+`umbra init` now asks, defaulting to **No**, whether to enable the project as a
+read-only MCP server. On approval,
+`ensureUmbraMcpConfiguration` in `src/core/config/mcp-config.ts` creates or
+updates only `mcpServers.umbra`. It preserves other server entries, rejects
+malformed JSON or a non-object `mcpServers` without writing, and pins `--root`
+to the resolved current project directory. Re-running it is idempotent.
+
+The generated absolute path is intentionally local. A team that wants a
+portable, committed Claude Code entry continues to author it deliberately with
+`${CLAUDE_PROJECT_DIR}`; an installer cannot know which client or substitution
+syntax a team has chosen.
+
+### Verification evidence
+
+- `mcp-config.spec.ts` — 5 tests passed: creation, preserving another server,
+  updating a stale Umbra entry, idempotence, and no overwrite of invalid JSON.
+- `node node_modules/typescript/bin/tsc --noEmit --pretty false` — passed.
+- `node node_modules/typescript/bin/tsc -p tsconfig.build.json` — passed;
+  `npm run build` could not start on this Windows machine because the global npm
+  installation is missing `npm-cli.js`.
+
+### Related files added by this amendment
+
+- `src/core/config/mcp-config.ts` — `ensureUmbraMcpConfiguration`.
+- `src/core/config/mcp-config.spec.ts` — MCP configuration preservation and
+  failure-boundary tests.
+- `src/bin/cli.ts` — `init`'s explicit MCP opt-in.
+- `README.md` — generated local configuration and portable team configuration.
 
 ---
 

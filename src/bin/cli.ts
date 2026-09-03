@@ -29,6 +29,7 @@ import {
   migrateLegacyAgentDirectory,
 } from "../core/config/agent-directory";
 import { ensureWorkspaceSkills } from "../core/config/workspace-scaffold";
+import { ensureUmbraMcpConfiguration } from '../core/config/mcp-config';
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
 import {
   loadTurnAudits,
@@ -475,6 +476,25 @@ program
 
     if (!hasLangSmithConfiguration(process.cwd())) {
       await setupLangSmith();
+    }
+
+    const enableMcp = await confirm({
+      question: 'Enable Umbra as this project\'s read-only MCP server? This updates only its "umbra" entry in .mcp.json.',
+      defaultValue: false,
+      yesLabel: 'Enable MCP server',
+      noLabel: 'Not now',
+    });
+    if (enableMcp === true) {
+      try {
+        const mcp = ensureUmbraMcpConfiguration(process.cwd());
+        const state = mcp.status === 'unchanged' ? 'already current' : mcp.status;
+        log.sys(`MCP configuration ${state}: ${mcp.path}`);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`MCP configuration was not changed: ${message}`);
+      }
+    } else {
+      log.sys('MCP server was not enabled. Run `umbra init` again whenever you want to configure it.');
     }
   });
 

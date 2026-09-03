@@ -714,7 +714,20 @@ stop.
 ### Use it on your own repository
 
 Nothing to clone and nothing to install globally. In the repository you want
-served, create `.mcp.json`:
+served, run:
+
+```bash
+npx -y @dastbal/umbra init
+```
+
+Choose **Enable MCP server** when prompted. Umbra adds or refreshes only its
+`umbra` entry in `.mcp.json`, preserving every other configured MCP server. It
+does this only after your explicit answer; `npm install` and package postinstall
+hooks never modify consumer configuration.
+
+The generated entry pins the current repository by its absolute path. If your
+team wants a portable, committed Claude Code configuration instead, create
+`.mcp.json` yourself with `${CLAUDE_PROJECT_DIR}`:
 
 ```json
 {
@@ -748,7 +761,7 @@ all.
 | Flag | Meaning |
 |---|---|
 | `--root <path>` | **Required.** The repository to serve. Fixed at launch; no tool argument can change it |
-| `--embeddings <vertex\|ollama>` | Provider for semantic search. Defaults to `.umbra/agent.config.json`, else `vertex` |
+| `--embeddings <vertex\|ollama>` | Provider for semantic search. Defaults to `.umbra/agent.config.json`, else `ollama` |
 | `--no-index` | Do not warm the semantic index at launch |
 
 Prefer putting the provider in `.umbra/agent.config.json` rather than in
