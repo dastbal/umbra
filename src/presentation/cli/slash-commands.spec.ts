@@ -38,6 +38,8 @@ function makeHost(mentorActive = false): HostSpy {
     openCommandPicker: async () => { spy.calls.push('openCommandPicker'); },
     printHelp:         () => { spy.calls.push('printHelp'); },
     exitSession:       () => { spy.calls.push('exitSession'); },
+    learnSearch:       () => { spy.calls.push('learnSearch'); },
+    hasPendingSearchLearning: () => false,
     isMentorActive:    () => spy.mentorActive,
   };
   return spy;
@@ -108,9 +110,10 @@ describe('findSlashCommand', () => {
     await findSlashCommand(commands, '/mentor')!.run();
     await findSlashCommand(commands, '/help')!.run();
     await findSlashCommand(commands, '/exit')!.run();
+    await findSlashCommand(commands, '/learn-search')!.run();
 
     expect(spy.calls).toEqual([
-      'switchModel', 'toggleMentor', 'openCommandPicker', 'exitSession',
+      'switchModel', 'toggleMentor', 'openCommandPicker', 'exitSession', 'learnSearch',
     ]);
   });
 

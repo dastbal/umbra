@@ -13,6 +13,39 @@ record the decision as an ADR.
 
 ---
 
+## Markdown documentation chunks for retrieval
+
+> Deferred 2026-09-03 while implementing ADR-029. David chose TSDoc-only
+> enrichment for the current retrieval iteration.
+
+### The idea
+
+Index curated project documentation (`README.md` and selected `docs/**/*.md`)
+as document chunks with heading metadata, separate from code chunks. A returned
+document would be labelled as documentation rather than presented as source
+code.
+
+### What is actually missing
+
+`IndexerService#getAllFiles` currently indexes only non-test TypeScript under
+`src/`. TSDoc now describes a class or method, but it cannot answer a project
+workflow documented only in Markdown.
+
+### The mechanism to reuse
+
+`code_chunks`, FTS5 and `RetrieverService` already support typed chunks and
+rank fusion. A document chunker would need its own path allowlist and heading
+parser; it must not append every README body to every TypeScript chunk.
+
+### Plan
+
+Define the documentation allowlist and result labelling first. Then add a
+separate document chunk type, test that generated notes and dependency READMEs
+stay excluded, and benchmark it against source-only retrieval before changing
+the default corpus.
+
+---
+
 ## `ask_human` with multiple choice
 
 > Recorded 2026-08-26, branch `2.0.0`. Deferred by David in the session that

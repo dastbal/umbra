@@ -111,6 +111,7 @@ export class NestChunker {
    * Stores the whole file as one chunk. Essential for DTOs/Entities context.
    */
   private processAtomicFile(sourceFile: SourceFile): ProcessedChunk[] {
+    const classDeclaration = sourceFile.getClasses()[0];
     return [
       {
         id: uuidv4(),
@@ -120,6 +121,9 @@ export class NestChunker {
           startLine: 1,
           endLine: sourceFile.getEndLineNumber(),
           className: this.getClassName(sourceFile),
+          documentation: classDeclaration === undefined
+            ? undefined
+            : this.documentationOf(classDeclaration),
         },
       },
     ];
@@ -148,6 +152,7 @@ export class NestChunker {
           endLine: cls.getEndLineNumber(),
           className: cls.getName(),
           decorators: cls.getDecorators().map((d) => d.getName()),
+          documentation: this.documentationOf(cls),
         },
       });
 
@@ -165,6 +170,7 @@ export class NestChunker {
             className: cls.getName(),
             methodName: method.getName(),
             decorators: method.getDecorators().map((d) => d.getName()),
+            documentation: this.documentationOf(method),
           },
         });
       }
@@ -188,6 +194,8 @@ export class NestChunker {
       .getDecorators()
       .map((d) => d.getText())
       .join('\n');
+    const documentation = this.documentationOf(cls);
+    if (documentation !== undefined) text = `${documentation}\n${text}`;
     text += `\nexport class ${cls.getName()} {\n`;
 
     // Add properties (e.g., private readonly userService: UserService;)
@@ -211,6 +219,23 @@ export class NestChunker {
       .map((i) => i.getText())
       .join('\n');
     return `${imports}\n\n${text}`;
+  }
+
+  /**
+   * Reads the documentation attached to one declaration without guessing from
+   * nearby comments. Keeping it structured lets lexical retrieval weight the
+   * explanation independently from implementation text.
+   *
+   * @param declaration - A class or method declaration from the source AST.
+   * @returns The joined TSDoc blocks, or undefined when none exist.
+   */
+  private documentationOf(declaration: ClassDeclaration | MethodDeclaration): string | undefined {
+    const documentation = declaration
+      .getJsDocs()
+      .map((doc) => doc.getText().trim())
+      .filter((doc) => doc.length > 0)
+      .join('\n');
+    return documentation.length === 0 ? undefined : documentation;
   }
 
   /**

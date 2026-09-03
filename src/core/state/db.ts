@@ -15,6 +15,8 @@ import {
   VectorExtensionStatus,
 } from './vector-extension';
 import { ensureLexicalIndex } from '../rag/lexical-index';
+import { ensureRetrievalMemory } from '../rag/retrieval-memory';
+import { enrichExistingTSDoc } from '../rag/tsdoc-enrichment';
 
 /**
  * Singleton Database Manager.
@@ -150,10 +152,19 @@ export class AgentDB {
       `CREATE INDEX IF NOT EXISTS idx_chunks_file ON code_chunks(file_path)`,
     ).run();
 
+    // Existing embeddings remain valid: this writes only documentation metadata
+    // for chunks that can be matched unambiguously to the current source AST.
+    // The following FTS setup observes those updates through its normal trigger.
+    enrichExistingTSDoc(db, runtimeRoot());
+
     // FTS5 is a local, deterministic retrieval signal. Its triggers follow
     // `code_chunks`, including foreign-key cascade deletes, so no stale text
     // can survive a real file-content change beside the vector rows.
     ensureLexicalIndex(db);
+
+    // User wording is a local retrieval aid, not code evidence. Its table is
+    // deliberately separate from `code_chunks` and has no vector rows.
+    ensureRetrievalMemory(db);
 
     // 4. Chunk Vectors (ADR-026)
     //

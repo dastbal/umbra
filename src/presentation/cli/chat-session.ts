@@ -34,6 +34,10 @@ import { readPendingInterrupts, type PendingInterrupt } from './pending-interrup
 import { describeErrorOrigin } from './error-origin';
 import { readVisibleText } from '../../core/llm/visible-text';
 import { diagnoseOffline } from './offline-diagnosis';
+import {
+  approvePendingRetrievalAlias,
+  hasPendingRetrievalAlias,
+} from '../../core/rag/retrieval-memory';
 
 import { recordBudgetProbe } from '../../core/agent/budget-probe';
 import {
@@ -270,6 +274,8 @@ export class ChatSession {
       openCommandPicker: () => this.handleHelp(),
       printHelp:         () => this.showHelp(),
       exitSession:       () => this.shutdown(),
+      learnSearch:       () => this.handleSearchLearning(),
+      hasPendingSearchLearning: () => hasPendingRetrievalAlias(),
       isMentorActive:    () => this.mentorModeActive,
     });
     this.graphConfig = {
@@ -329,6 +335,7 @@ export class ChatSession {
    * @param input - The user's message text.
    */
   private async sendMessage(input: string, retryCount = 0): Promise<void> {
+    const hadPendingSearchLearning = hasPendingRetrievalAlias();
     this.renderer.showThinking();
     const audit = new TurnAudit({
       rootDir: this.config.auditRootDir,
@@ -515,6 +522,11 @@ export class ChatSession {
     }
 
     audit.record('completed');
+    if (!hadPendingSearchLearning && hasPendingRetrievalAlias()) {
+      process.stdout.write(
+        colors.muted('\n  💡 Context clarified this search. Run /learn-search to remember that wording locally.\n'),
+      );
+    }
     this.renderer.finalizeTurn();
     this.renderer.showTurnSeparator();
   }
@@ -1223,6 +1235,24 @@ export class ChatSession {
     if (outcome.status !== 'selected') return;
 
     await outcome.value.run();
+  }
+
+  /**
+   * Persists the latest contextual retrieval alias only after the operator
+   * explicitly requests it. MCP never calls this CLI-only action.
+   */
+  private handleSearchLearning(): void {
+    if (!hasPendingRetrievalAlias()) {
+      process.stdout.write(colors.muted('\n  ℹ️  No successful contextual search is waiting to learn.\n\n'));
+      return;
+    }
+
+    if (!approvePendingRetrievalAlias()) {
+      process.stdout.write(colors.warning('\n  ⚠️  That search has no safe code-backed terms to remember.\n\n'));
+      return;
+    }
+
+    process.stdout.write(colors.accent('\n  ✅ Search wording saved locally for this project.\n\n'));
   }
 
   /**

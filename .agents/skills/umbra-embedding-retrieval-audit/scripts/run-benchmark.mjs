@@ -5,7 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 function usage() {
-  console.log('Usage: node scripts/run-benchmark.mjs --root <repository> --corpus <file> --providers vertex,ollama --no-index');
+  console.log('Usage: node scripts/run-benchmark.mjs --root <repository> --corpus <file> --providers vertex,ollama --no-index [--output <file>]');
 }
 
 function valueAfter(args, flag) {
@@ -21,6 +21,7 @@ if (args.includes('--help')) {
 const rootArg = valueAfter(args, '--root');
 const corpusArg = valueAfter(args, '--corpus');
 const providersArg = valueAfter(args, '--providers');
+const outputArg = valueAfter(args, '--output');
 if (!rootArg || !corpusArg || !providersArg || !args.includes('--no-index')) {
   usage();
   process.exit(2);
@@ -58,6 +59,12 @@ function provesActiveProvider(text, provider) {
 function startServer(provider) {
   const child = childProcess.spawn(process.execPath, ['dist/bin/cli.js', 'mcp', '--root', root, '--embeddings', provider, '--no-index'], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map();
+  let startupError;
+  child.once('error', (error) => {
+    startupError = error;
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
+  });
   let buffer = '';
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -67,16 +74,16 @@ function startServer(provider) {
     for (const line of lines) {
       if (!line.trim()) continue;
       const message = JSON.parse(line);
-      const resolve = pending.get(message.id);
-      if (resolve) { pending.delete(message.id); resolve(message); }
+      const request = pending.get(message.id);
+      if (request) { pending.delete(message.id); request.resolve(message); }
     }
   });
   let nextId = 1;
   const call = (method, params) => new Promise((resolve, reject) => {
+    if (startupError) { reject(startupError); return; }
     const id = nextId++;
-    pending.set(id, resolve);
+    pending.set(id, { resolve, reject });
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-    child.once('error', reject);
   });
   return { child, call };
 }
@@ -98,8 +105,17 @@ async function runProvider(provider) {
       const text = result?.content?.map((content) => content.text).join('\n') ?? '';
       if (result?.isError === true) throw new Error(`${provider}: ask_codebase returned an error for corpus id ${item.id}.`);
       if (!provesActiveProvider(text, provider)) throw new Error(`${provider}: response does not prove the selected active provider for corpus id ${item.id}.`);
-      const metrics = score(extractPaths(text), item.expectedPaths);
-      runs.push({ id: item.id, ...metrics, elapsedMs });
+      const paths = extractPaths(text);
+      const metrics = score(paths, item.expectedPaths);
+      runs.push({
+        id: item.id,
+        split: item.split,
+        expectation: item.expectedPaths.length === 0 ? 'abstain' : 'path',
+        abstained: paths.length === 0,
+        returnedPathCount: paths.length,
+        ...metrics,
+        elapsedMs,
+      });
     }
     const ordered = runs.map((run) => run.elapsedMs).sort((a, b) => a - b);
     return {
@@ -109,6 +125,7 @@ async function runProvider(provider) {
       mrr: runs.reduce((sum, run) => sum + run.reciprocalRank, 0) / runs.length,
       medianLatencyMs: ordered[Math.floor((ordered.length - 1) / 2)],
       p95LatencyMs: ordered[Math.ceil(ordered.length * 0.95) - 1],
+      cases: runs,
     };
   } finally {
     server.child.stdin.end();
@@ -116,6 +133,11 @@ async function runProvider(provider) {
   }
 }
 
-const report = { corpusVersion: corpus.version, root, providers: [] };
+const report = { corpusVersion: corpus.version, providers: [] };
 for (const provider of providers) report.providers.push(await runProvider(provider));
-console.log(JSON.stringify(report, null, 2));
+const outputPath = outputArg
+  ? path.resolve(outputArg)
+  : path.join(root, '.umbra', 'audits', `embedding-benchmark-${Date.now()}.json`);
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+fs.writeFileSync(outputPath, JSON.stringify(report, null, 2));
+console.log(JSON.stringify({ ...report, outputPath }, null, 2));

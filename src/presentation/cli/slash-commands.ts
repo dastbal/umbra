@@ -53,6 +53,10 @@ export interface SlashCommandHost {
   printHelp(): void;
   /** Ends the session. */
   exitSession(): void;
+  /** Explicitly approves the latest contextual retrieval alias, if any. */
+  learnSearch(): void;
+  /** Whether a contextual retrieval result is eligible for approval. */
+  hasPendingSearchLearning(): boolean;
   /** Whether deep mentor mode is currently on. Used for a live hint. */
   isMentorActive(): boolean;
 }
@@ -114,6 +118,15 @@ export function buildSlashCommands(host: SlashCommandHost): SlashCommand[] {
           : 'deep mentor mode is OFF — turn it on',
       badge: () => (host.isMentorActive() ? ' [ON]' : ' [OFF]'),
       run: () => host.toggleMentor(),
+    },
+    {
+      name: '/learn-search',
+      description: 'Remember the latest successful search clarification for this project',
+      inPicker: true,
+      hint: () => host.hasPendingSearchLearning()
+        ? 'approve the latest contextual search alias'
+        : 'no contextual search result is waiting for approval',
+      run: () => host.learnSearch(),
     },
     {
       name: '/exit',

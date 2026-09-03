@@ -187,14 +187,20 @@ function publishAskCodebase(decorate: (text: string) => string): PublishedTool {
         .string()
         .min(1)
         .describe('A question about logic or functionality, in natural language.'),
+      context: z
+        .string()
+        .max(2000)
+        .optional()
+        .describe('Optional clarification to retry once after the original query lacks evidence.'),
     },
     invoke: async (args) => {
       const query = typeof args.query === 'string' ? args.query : undefined;
+      const context = typeof args.context === 'string' ? args.context : undefined;
       if (query === undefined || query.trim().length === 0) {
         return toErrorResult('query is required and must be a non-empty string.');
       }
 
-      const raw = await runTool(askCodebaseTool, { query });
+      const raw = await runTool(askCodebaseTool, { query, context });
       const mapped = toToolResult(raw);
 
       if (mapped.isError === true) return mapped;

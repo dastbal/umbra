@@ -348,7 +348,10 @@ export class IndexerService {
         const metaStr = c.metadata.methodName
           ? `Method: ${c.metadata.methodName}`
           : `Class: ${c.metadata.className}`;
-        return `${metaStr}\n${c.content}`;
+        const documentation = c.metadata.documentation === undefined
+          ? ''
+          : `TSDoc:\n${c.metadata.documentation}\n`;
+        return `${metaStr}\n${documentation}${c.content}`;
       });
 
       let retries = 3;

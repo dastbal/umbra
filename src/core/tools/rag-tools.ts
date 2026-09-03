@@ -1,17 +1,21 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { RetrieverService } from "../rag/retriever";
+import { clearPendingRetrievalAlias, stageRetrievalAlias } from "../rag/retrieval-memory";
 import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
 
 export const askCodebaseTool = tool(
-  async ({ query }) => {
+  async ({ query, context }) => {
+    clearPendingRetrievalAlias();
     log.debug(`ask_codebase called with query: "${query}"`);
     try {
       log.tool(`Querying codebase: "${query}"`);
       const retriever = new RetrieverService();
-      const context = await retriever.getContextForLLM(query);
-      return context;
+      const report = await retriever.getContextForLLM(query, context);
+      const candidate = retriever.learningCandidate;
+      if (candidate !== undefined) stageRetrievalAlias(candidate);
+      return report;
     } catch (error: any) {
       log.error(`Error during codebase query "${query}": ${error.message}`);
       return `❌ Error querying codebase: ${error.message}`;
@@ -19,8 +23,13 @@ export const askCodebaseTool = tool(
   },
   {
     name: "ask_codebase",
-    description: "Semantic search AND dependency graph lookup. Returns code snippets and dependency maps.",
-    schema: z.object({ query: z.string().describe("Query describing logic or functionality.") }),
+    description: "Hybrid code search with dependency context. After an earlier abstention, send the original query plus context once; only repository evidence is returned.",
+    schema: z.object({
+      query: z.string().describe("Query describing logic or functionality."),
+      context: z.string().max(2000).optional().describe(
+        "Optional clarification from the operator after an earlier search lacked evidence.",
+      ),
+    }),
   },
 );
 

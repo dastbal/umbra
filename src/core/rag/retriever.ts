@@ -19,6 +19,11 @@ import {
   hasGroundedEvidence,
   RetrievalEvidence,
 } from './hybrid-ranking';
+import {
+  PendingRetrievalAlias,
+  RetrievalMemoryService,
+  normalizeRetrievalTerms,
+} from './retrieval-memory';
 import * as path from 'path';
 export interface SearchResult {
   chunk: ProcessedChunk;
@@ -99,6 +104,8 @@ export function noGroundedEvidenceReport(query: string): string {
 export class RetrieverService {
   private db = AgentDB.getInstance();
 
+  private readonly retrievalMemory = new RetrievalMemoryService(this.db);
+
   private readonly embeddings: EmbeddingsPort;
 
   /** Provenance of the most recent {@link query}, if one has run. */
@@ -106,6 +113,9 @@ export class RetrieverService {
 
   /** `provider/model` identities seen the last time the index was inspected. */
   private lastPopulatedIdentities: readonly string[] = [];
+
+  /** A contextual success eligible for explicit CLI approval. */
+  private lastLearningCandidate?: PendingRetrievalAlias;
 
   /**
    * @param embeddings - Embedding port to search with. Defaults to the resolved
@@ -125,6 +135,11 @@ export class RetrieverService {
   /** Provenance of the most recent successful query. */
   public get provenance(): RetrievalProvenance | undefined {
     return this.lastProvenance;
+  }
+
+  /** Contextual success that may become an alias only after CLI approval. */
+  public get learningCandidate(): PendingRetrievalAlias | undefined {
+    return this.lastLearningCandidate;
   }
 
   /**
@@ -151,6 +166,7 @@ export class RetrieverService {
     query: string,
     limit: number = 5,
   ): Promise<SearchResult[]> {
+    const retrievalQuery = this.retrievalMemory.expand(query);
     writeLine(`🔍 [RAG] Embedding Query: "${query}"...`);
 
     const identity = this.embeddings.identity;
@@ -175,7 +191,7 @@ export class RetrieverService {
       throw new EmbeddingsIndexMismatchError(identity, this.populatedProviders());
     }
 
-    const queryVector = await this.embeddings.embedQuery(query);
+    const queryVector = await this.embeddings.embedQuery(retrievalQuery);
 
     // A model that changed its output shape inside one provider. Caught here
     // because `vec_distance_cosine` would otherwise fail with a message about
@@ -196,7 +212,7 @@ export class RetrieverService {
       ? this.rankInSql(queryVector, candidateLimit, identity, dimensions)
       : this.rankInJavaScript(queryVector, candidateLimit, identity, dimensions);
 
-    const lexical = findLexicalCandidates(this.db, query, candidateLimit);
+    const lexical = findLexicalCandidates(this.db, retrievalQuery, candidateLimit);
     const lexicalRows = this.loadChunks(lexical.map((candidate) => candidate.chunkId));
     const byId = new Map<string, SearchResult>();
 
@@ -212,7 +228,7 @@ export class RetrieverService {
           lexicalExact:
             result !== undefined &&
             hasExactLexicalEvidence(
-              query,
+              retrievalQuery,
               result.chunk.filePath ?? '',
               JSON.stringify(result.chunk.metadata),
             ),
@@ -489,11 +505,31 @@ export class RetrieverService {
    * 2. The file's dependencies (Graph Search).
    * 3. Explicit File Paths to encourage using 'read_file'.
    */
-  public async getContextForLLM(query: string): Promise<string> {
-    const results = await this.query(query, 4);
+  public async getContextForLLM(query: string, context?: string): Promise<string> {
+    this.lastLearningCandidate = undefined;
+    let results = await this.query(query, 4);
+    const clarified = context?.trim();
+    let recoveredWithContext = false;
+
+    // A clarification earns exactly one additional hybrid lookup. It is never
+    // indexed as code and cannot spin into an embedding-cost loop.
+    if (!hasGroundedEvidence(results) && clarified !== undefined && clarified.length > 0) {
+      results = await this.query(`${query}\n${clarified}`, 4);
+      recoveredWithContext = hasGroundedEvidence(results);
+    }
 
     if (!hasGroundedEvidence(results)) {
       return noGroundedEvidenceReport(query);
+    }
+
+    if (recoveredWithContext && clarified !== undefined) {
+      this.lastLearningCandidate = {
+        triggerTerms: normalizeRetrievalTerms(query),
+        contextTerms: normalizeRetrievalTerms(clarified),
+        verifiedPaths: [...new Set(results.map((result) => result.chunk.filePath).filter(
+          (filePath): filePath is string => filePath !== undefined,
+        ))].slice(0, 4),
+      };
     }
 
     // Group chunks by File to provide a structured view

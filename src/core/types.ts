@@ -36,6 +36,8 @@ export interface ChunkMetadata {
   decorators?: string[];
   className?: string;
   methodName?: string;
+  /** TSDoc attached to the indexed symbol, when the AST exposed one. */
+  documentation?: string;
 }
 
 /**

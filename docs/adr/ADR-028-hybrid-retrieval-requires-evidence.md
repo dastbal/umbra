@@ -82,3 +82,19 @@ with no path, snippet, or agent-only hint.
 - `src/core/rag/retriever.ts` — `RetrieverService#query`, `getContextForLLM`.
 - `docs/benchmarks/embedding-retrieval-corpus.json` — independent quality corpus.
 - `docs/adr/ADR-027-the-default-is-the-one-that-costs-nothing.md` — audit amendment.
+
+## Amendment — 2026-09-03 · A clarification gets one bounded retry before final abstention
+
+An abstention can mean that the repository has no evidence, or that the
+operator named the concern too broadly. `ask_codebase` may therefore accept an
+optional clarification and run **one** additional hybrid retrieval pass only
+after the first pass lacks grounded evidence. A successful second pass remains
+grounded by repository chunks; the clarification is retrieval input, not source
+material.
+
+The retry never loops, never writes the clarification into `code_chunks`, and
+never reveals a semantic-only neighbour. If the second pass still lacks hybrid
+or direct lexical evidence, the existing abstention contract applies unchanged.
+
+See ADR-029 for the separate, operator-approved local vocabulary that can help
+later queries without becoming code evidence.
