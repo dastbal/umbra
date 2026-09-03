@@ -46,17 +46,25 @@ try {
 const database = new Database(databasePath, { readonly: true, fileMustExist: true });
 let coverage;
 try {
+  // Reads `chunk_vectors`, which ADR-026 made the source of truth. The legacy
+  // per-provider columns of `code_chunks` are still on disk but nothing writes
+  // them any more, so querying those returned a snapshot frozen at migration
+  // time: it reported vertex=237 while the live table held 262, and the audit
+  // would have compared coverage that no longer existed.
   coverage = database.prepare(`
     SELECT
-      COUNT(*) AS total,
-      SUM(CASE WHEN COALESCE(vector_vertex_json, vector_json) IS NOT NULL THEN 1 ELSE 0 END) AS vertex,
-      SUM(CASE WHEN vector_ollama_json IS NOT NULL THEN 1 ELSE 0 END) AS ollama,
-      SUM(CASE WHEN COALESCE(vector_vertex_json, vector_json) IS NOT NULL AND vector_ollama_json IS NOT NULL THEN 1 ELSE 0 END) AS both
-    FROM code_chunks
+      (SELECT COUNT(*) FROM code_chunks) AS total,
+      (SELECT COUNT(DISTINCT chunk_id) FROM chunk_vectors WHERE provider = 'vertex') AS vertex,
+      (SELECT COUNT(DISTINCT chunk_id) FROM chunk_vectors WHERE provider = 'ollama') AS ollama,
+      (SELECT COUNT(*) FROM (
+         SELECT chunk_id FROM chunk_vectors
+          GROUP BY chunk_id
+         HAVING COUNT(DISTINCT provider) = 2
+       )) AS both
   `).get();
 } catch (error) {
   database.close();
-  console.error(`Preflight blocked: cannot inspect provider vector columns: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`Preflight blocked: cannot inspect chunk_vectors: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(2);
 }
 database.close();
