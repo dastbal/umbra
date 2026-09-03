@@ -10,10 +10,21 @@ import {
 } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
 import { decodeVector, encodeVector } from './vector-codec';
+import {
+  findLexicalCandidates,
+  hasExactLexicalEvidence,
+} from './lexical-index';
+import {
+  fuseRankings,
+  hasGroundedEvidence,
+  RetrievalEvidence,
+} from './hybrid-ranking';
 import * as path from 'path';
-interface SearchResult {
+export interface SearchResult {
   chunk: ProcessedChunk;
   score: number;
+  evidence: RetrievalEvidence;
+  lexicalExact: boolean;
 }
 
 /**
@@ -47,10 +58,42 @@ export interface RetrievalProvenance {
 
 interface FileContext {
   filePath: string;
-  relevance: number;
+  evidence: RetrievalEvidence;
   chunks: ProcessedChunk[];
   imports: string[];
   skeleton?: string; // <--- ADDED
+}
+
+/**
+ * Chooses the strongest evidence label for a file that owns several chunks.
+ *
+ * @param current - Evidence already associated with the file.
+ * @param next - Evidence of a newly added chunk.
+ * @returns The strongest available evidence label.
+ */
+function strongerEvidence(current: RetrievalEvidence, next: RetrievalEvidence): RetrievalEvidence {
+  const priority: Record<RetrievalEvidence, number> = {
+    semantic: 1,
+    lexical: 2,
+    hybrid: 3,
+  };
+  return priority[next] > priority[current] ? next : current;
+}
+
+/**
+ * Formats an explicit abstention without leaking an ungrounded file path or
+ * agent-only next-step hint.
+ *
+ * @param query - The request that lacked grounded support.
+ * @returns A client-safe retrieval report.
+ */
+export function noGroundedEvidenceReport(query: string): string {
+  return [
+    '🔎 **RAG ANALYSIS REPORT**',
+    `Query: "${query}"`,
+    '',
+    '⚠️ **NO GROUNDED EVIDENCE:** Semantic neighbours alone did not have independent lexical support. Refine the query with a symbol, path, or domain term.',
+  ].join('\n');
 }
 
 export class RetrieverService {
@@ -101,7 +144,7 @@ export class RetrieverService {
    *
    * @param query - The natural language query.
    * @param limit - Max chunks to retrieve.
-   * @returns Scored chunks, best first.
+   * @returns Fused chunks, best first.
    * @throws {EmbeddingsIndexMismatchError} When the active provider has no vectors.
    */
   public async query(
@@ -148,9 +191,47 @@ export class RetrieverService {
 
     const dimensions = present.dimensions ?? queryVector.length;
 
-    return AgentDB.vectorSearch.available
-      ? this.rankInSql(queryVector, limit, identity, dimensions)
-      : this.rankInJavaScript(queryVector, limit, identity, dimensions);
+    const candidateLimit = Math.max(limit, 12);
+    const semantic = AgentDB.vectorSearch.available
+      ? this.rankInSql(queryVector, candidateLimit, identity, dimensions)
+      : this.rankInJavaScript(queryVector, candidateLimit, identity, dimensions);
+
+    const lexical = findLexicalCandidates(this.db, query, candidateLimit);
+    const lexicalRows = this.loadChunks(lexical.map((candidate) => candidate.chunkId));
+    const byId = new Map<string, SearchResult>();
+
+    semantic.forEach((result) => byId.set(result.chunk.id, result));
+    lexicalRows.forEach((result) => byId.set(result.chunk.id, result));
+
+    return fuseRankings(
+      semantic.map((result) => ({ id: result.chunk.id, lexicalExact: false })),
+      lexical.map((candidate) => {
+        const result = byId.get(candidate.chunkId);
+        return {
+          id: candidate.chunkId,
+          lexicalExact:
+            result !== undefined &&
+            hasExactLexicalEvidence(
+              query,
+              result.chunk.filePath ?? '',
+              JSON.stringify(result.chunk.metadata),
+            ),
+        };
+      }),
+      limit,
+    ).flatMap((candidate) => {
+      const result = byId.get(candidate.id);
+      return result === undefined
+        ? []
+        : [
+            {
+              ...result,
+              score: candidate.score,
+              evidence: candidate.evidence,
+              lexicalExact: candidate.lexicalExact,
+            },
+          ];
+    });
   }
 
   /**
@@ -265,6 +346,8 @@ export class RetrieverService {
 
     return {
       score,
+      evidence: 'semantic',
+      lexicalExact: false,
       chunk: {
         id: row.id,
         type: row.chunk_type,
@@ -274,6 +357,28 @@ export class RetrieverService {
         filePath: row.file_path || metadata.filePath,
       } as ProcessedChunk,
     };
+  }
+
+  /**
+   * Loads chunks selected by FTS5 while preserving no database-specific type
+   * outside this infrastructure boundary.
+   *
+   * @param ids - Chunk ids selected by lexical ranking.
+   * @returns Loaded chunks, in no particular order.
+   */
+  private loadChunks(ids: readonly string[]): SearchResult[] {
+    if (ids.length === 0) return [];
+
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT id, file_path, chunk_type, content, metadata
+           FROM code_chunks
+          WHERE id IN (${placeholders})`,
+      )
+      .all(...ids) as any[];
+
+    return rows.map((row) => this.toSearchResult(row, 0));
   }
 
   /**
@@ -387,6 +492,10 @@ export class RetrieverService {
   public async getContextForLLM(query: string): Promise<string> {
     const results = await this.query(query, 4);
 
+    if (!hasGroundedEvidence(results)) {
+      return noGroundedEvidenceReport(query);
+    }
+
     // Group chunks by File to provide a structured view
     const filesMap = new Map<string, FileContext>();
 
@@ -398,11 +507,15 @@ export class RetrieverService {
       if (!filesMap.has(path)) {
         filesMap.set(path, {
           filePath: path,
-          relevance: res.score,
+          evidence: res.evidence,
           chunks: [],
           imports: this.getDependencies(path), // <--- GRAPH MAGIC 🕸️
           skeleton: this.getFileSkeleton(path), // <--- STRUCTURAL MAGIC 🏗️
         });
+      }
+      const current = filesMap.get(path);
+      if (current !== undefined) {
+        current.evidence = strongerEvidence(current.evidence, res.evidence);
       }
       filesMap.get(path)?.chunks.push(res.chunk);
     }
@@ -413,11 +526,9 @@ export class RetrieverService {
     output += `Found ${filesMap.size} relevant files.\n\n`;
 
     filesMap.forEach((fileCtx) => {
-      const relevancePct = (fileCtx.relevance * 100).toFixed(1);
-
       output += `=================================================================\n`;
       output += `📂 **FILE:** ${fileCtx.filePath}\n`;
-      output += `📊 **RELEVANCE:** ${relevancePct}%\n`;
+      output += `🔎 **MATCH:** ${fileCtx.evidence}\n`;
 
       if (fileCtx.imports.length > 0) {
         output += `🔗 **DEPENDENCIES (Imports):**\n`;

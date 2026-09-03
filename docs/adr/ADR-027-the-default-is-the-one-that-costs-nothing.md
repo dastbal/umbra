@@ -5,7 +5,7 @@
 | **Category** | RAG · Providers · Packaging · Adoption |
 | **Author** | David Balladares (decision) · Claude (record) |
 | **Date** | 2026-09-03 |
-| **Status** | ✅ **Accepted** — implemented; ships in 2.2.0 |
+| **Status** | ✅ **Accepted** — implemented; amended 2026-09-03; ships in 2.2.0 |
 | **Amends** | [ADR-025](./ADR-025-embeddings-are-chosen-not-assumed.md) §2, the last rung of the resolution ladder |
 
 ---
@@ -194,6 +194,26 @@ rather than predicted.
 - No measurement of how many existing installations rely on the implicit Vertex
   default. The package has one known operator, so the migration cost is
   believed small rather than known small.
+
+---
+
+## Amendment — 2026-09-03 · The initial paired audit did not establish a quality winner
+
+The first independent comparison now exists. With equal, non-zero provider
+coverage on this repository and no reindex, twenty approved queries were sent
+once to each provider through fresh MCP processes. Both Vertex
+`text-embedding-004` and Ollama `nomic-embed-text` reached **30% Hit@4**.
+
+This closes the statement that no comparison had run. It does **not** establish
+that the providers are equal: the corpus is small, their MRR differed, and a
+retrieval result can be poor for chunking or ranking reasons rather than for
+the embedding model. Most importantly, it does not retroactively make Ollama
+the quality default. ADR-027 chose it for a credential-free first run; ADR-028
+adds hybrid retrieval and an abstention policy before any quality promotion.
+
+The next comparison is deliberately not run by this amendment. Its expanded
+60-query corpus includes repository-derived query text, so a new Vertex run
+needs explicit authorization for its exact count.
 
 ---
 

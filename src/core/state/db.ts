@@ -14,6 +14,7 @@ import {
   loadVectorExtension,
   VectorExtensionStatus,
 } from './vector-extension';
+import { ensureLexicalIndex } from '../rag/lexical-index';
 
 /**
  * Singleton Database Manager.
@@ -148,6 +149,11 @@ export class AgentDB {
     db.prepare(
       `CREATE INDEX IF NOT EXISTS idx_chunks_file ON code_chunks(file_path)`,
     ).run();
+
+    // FTS5 is a local, deterministic retrieval signal. Its triggers follow
+    // `code_chunks`, including foreign-key cascade deletes, so no stale text
+    // can survive a real file-content change beside the vector rows.
+    ensureLexicalIndex(db);
 
     // 4. Chunk Vectors (ADR-026)
     //
