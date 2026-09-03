@@ -1,0 +1,6 @@
+interface:
+  display_name: "Umbra Embedding Retrieval Audit"
+  short_description: "Compara búsquedas RAG de Ollama y Vertex de forma reproducible"
+  default_prompt: "Usa $umbra-embedding-retrieval-audit para comparar la recuperación semántica de Umbra."
+policy:
+  allow_implicit_invocation: true

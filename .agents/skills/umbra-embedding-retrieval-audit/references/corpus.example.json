@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "queries": [
+    {
+      "id": "embedding-provider-resolution",
+      "query": "Where does Umbra select the active embedding provider?",
+      "expectedPaths": ["src/core/rag/embeddings/embeddings-resolver.ts"]
+    },
+    {
+      "id": "provider-specific-vector-columns",
+      "query": "Where are provider-specific embedding vectors stored?",
+      "expectedPaths": ["src/core/state/db.ts", "src/core/rag/embeddings/embeddings.port.ts"]
+    },
+    {
+      "id": "negative-no-match",
+      "query": "Where is the nonexistent Saturn payroll connector configured?",
+      "expectedPaths": []
+    }
+  ]
+}
