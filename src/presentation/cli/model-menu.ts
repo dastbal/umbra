@@ -36,6 +36,7 @@
 
 import { ModelSwitcher } from '../../core/config/model-switcher';
 import { setConfiguredEmbeddingsProvider } from '../../core/config/agent-config-writer';
+import { IndexerService } from '../../core/rag/indexer';
 import { resolveEmbeddings, pinEmbeddingsProvider } from '../../core/rag/embeddings/embeddings-resolver';
 import { probeEmbeddings } from '../../core/rag/embeddings/embeddings-availability';
 import {
@@ -55,7 +56,7 @@ import {
 } from '../../core/config/reasoning-profile';
 import { colors, box } from './theme';
 import { isInteractive, selectOutcome, SelectChoice } from './interactive-select';
-import { askNumber as askNumberPrompt, askText } from './prompts';
+import { askNumber as askNumberPrompt, askText, confirm } from './prompts';
 import chalk from 'chalk';
 
 /**
@@ -200,7 +201,8 @@ export async function showModelMenu(
 
 /**
  * Chooses and persists the provider that writes and reads semantic code
- * vectors. This changes no chat model and never starts a paid index silently.
+ * vectors. This changes no chat model and offers an explicit, fail-closed
+ * confirmation before starting an index.
  *
  * @returns Always null because the current chat agent is unchanged.
  */
@@ -239,8 +241,33 @@ async function showEmbeddingsMenu(): Promise<null> {
   console.log(colors.accent(`  ✓ Embeddings provider saved: ${selection.port.identity.provider}/${selection.port.identity.model}`));
   if (!availability.available) {
     console.log(colors.warning(`  ⚠️  Semantic indexing is unavailable: ${availability.reason ?? 'unknown reason'}`));
+    console.log(colors.muted(`  Run: umbra index --embeddings ${selected} once the provider is available.`));
+    console.log(colors.muted('  Existing vectors from the other provider are kept.\n'));
+    return null;
   }
-  console.log(colors.muted(`  Run: umbra index --embeddings ${selected}  to build this provider's vectors.`));
+
+  const destination = selected === 'vertex'
+    ? 'This sends repository code to Vertex AI and may incur charges. Build its index now?'
+    : 'Build the local Ollama index now?';
+  const shouldIndex = await confirm({
+    question: destination,
+    yesLabel: 'Build index now',
+    noLabel: 'Keep provider only',
+    defaultValue: false,
+  });
+  if (shouldIndex === true) {
+    try {
+      await new IndexerService(selection.port).indexProject();
+      console.log(colors.accent(`  ✓ ${selection.port.identity.provider} index is ready.\n`));
+      return null;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(colors.danger(`  ✗ Indexing failed: ${message}\n`));
+      return null;
+    }
+  }
+
+  console.log(colors.muted(`  Run: umbra index --embeddings ${selected} to build this provider's vectors.`));
   console.log(colors.muted('  Existing vectors from the other provider are kept.\n'));
   return null;
 }

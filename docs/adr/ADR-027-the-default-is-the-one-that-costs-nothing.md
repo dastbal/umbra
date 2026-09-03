@@ -229,6 +229,19 @@ Its flag is passed directly to `IndexerService`, so the provider visible in the
 command is the provider that writes the vectors. Existing provider/model rows
 remain untouched by the other choice.
 
+## Amendment — 2026-09-03 · Selecting a provider can start its index only with confirmation
+
+The explicit command was safe but easy to miss after choosing a provider in
+`/model`. The menu now asks whether to build the selected provider's index in
+the same session. The default answer is **no**. For Vertex the confirmation
+states that repository code is sent to Vertex AI and may incur charges; declining
+keeps the provider selection and prints the one-off command. An unavailable
+provider cannot be indexed from the menu.
+
+This refines, rather than reverses, the earlier decision: provider selection
+still never starts a paid index silently. The operator must make a visible
+second choice before `IndexerService#indexProject` is called.
+
 ---
 
 ## Related Files
@@ -239,6 +252,7 @@ remain untouched by the other choice.
 - `src/core/rag/embeddings/ollama-embeddings.adapter.ts` — `nomic-embed-text`
 - `src/core/config/agent-config-writer.ts` — `setConfiguredEmbeddingsProvider`
 - `src/presentation/cli/model-menu.ts` — `showEmbeddingsMenu`
+- `src/presentation/cli/model-menu.spec.ts` — embedding-provider confirmation coverage
 - `src/bin/cli.ts` — `index` command
 - `docs/adr/ADR-025-embeddings-are-chosen-not-assumed.md` — the record this amends
 - `docs/adr/ADR-026-vectors-are-numbers-and-the-database-can-count.md` — what makes the change recoverable

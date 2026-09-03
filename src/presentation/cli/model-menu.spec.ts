@@ -1,7 +1,9 @@
 const mockSelectOutcome = jest.fn();
 const mockAskText = jest.fn();
+const mockConfirm = jest.fn();
 const mockSetConfiguredEmbeddingsProvider = jest.fn();
 const mockPinEmbeddingsProvider = jest.fn();
+const mockIndexProject = jest.fn();
 
 jest.mock('./interactive-select', () => ({
   isInteractive: () => true,
@@ -11,6 +13,11 @@ jest.mock('./interactive-select', () => ({
 jest.mock('./prompts', () => ({
   askNumber: jest.fn(),
   askText: mockAskText,
+  confirm: mockConfirm,
+}));
+
+jest.mock('../../core/rag/indexer', () => ({
+  IndexerService: jest.fn().mockImplementation(() => ({ indexProject: mockIndexProject })),
 }));
 
 jest.mock('../../core/config/agent-config-writer', () => ({
@@ -67,6 +74,9 @@ describe('showModelMenu Claude on Vertex', () => {
   beforeEach(() => {
     mockSelectOutcome.mockReset();
     mockAskText.mockReset();
+    mockConfirm.mockReset();
+    mockConfirm.mockResolvedValue(false);
+    mockIndexProject.mockReset();
     mockSetConfiguredEmbeddingsProvider.mockReset();
     mockSetConfiguredEmbeddingsProvider.mockReturnValue({ path: '.umbra/agent.config.json', saved: true });
     mockPinEmbeddingsProvider.mockReset();
@@ -152,6 +162,9 @@ describe('showModelMenu Claude on Vertex', () => {
 describe('showModelMenu embeddings provider', () => {
   beforeEach(() => {
     mockSelectOutcome.mockReset();
+    mockConfirm.mockReset();
+    mockConfirm.mockResolvedValue(false);
+    mockIndexProject.mockReset();
     mockSetConfiguredEmbeddingsProvider.mockReset();
     mockSetConfiguredEmbeddingsProvider.mockReturnValue({ path: '.umbra/agent.config.json', saved: true });
     mockPinEmbeddingsProvider.mockReset();
@@ -170,6 +183,23 @@ describe('showModelMenu embeddings provider', () => {
     expect(choicesAt(1).map((choice) => choice.value)).toEqual(['ollama', 'vertex']);
     expect(mockSetConfiguredEmbeddingsProvider).toHaveBeenCalledWith(process.cwd(), 'vertex');
     expect(mockPinEmbeddingsProvider).toHaveBeenCalledWith('vertex');
+    expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
+      question: expect.stringContaining('sends repository code to Vertex AI'),
+      defaultValue: false,
+    }));
+    expect(mockIndexProject).not.toHaveBeenCalled();
+  });
+
+  it('builds the selected provider only after explicit confirmation', async () => {
+    mockSelectOutcome
+      .mockResolvedValueOnce({ status: 'selected', value: 'embeddings' })
+      .mockResolvedValueOnce({ status: 'selected', value: 'vertex' });
+    mockConfirm.mockResolvedValue(true);
+    mockIndexProject.mockResolvedValue(undefined);
+
+    await expect(showModelMenu('gemini-3.5-flash')).resolves.toBeNull();
+
+    expect(mockIndexProject).toHaveBeenCalledTimes(1);
   });
 });
 
