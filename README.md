@@ -713,32 +713,37 @@ stop.
 
 ### Use it on your own repository
 
-> **Needs a release newer than 2.1.4.** The version currently on npm predates
-> this subcommand: `umbra mcp` does not exist in it. Until a newer version is
-> published, serve your own repository by cloning this one and pointing `--root`
-> at the repository you want served — the root is a launch argument, so one
-> checkout can serve any project on the machine.
-
-```bash
-npm i -g @dastbal/umbra @modelcontextprotocol/sdk
-```
-
-Then, in the repository you want served, create `.mcp.json`:
+Nothing to clone and nothing to install globally. In the repository you want
+served, create `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "umbra": {
       "type": "stdio",
-      "command": "umbra",
-      "args": ["mcp", "--root", "${CLAUDE_PROJECT_DIR}"]
+      "command": "npx",
+      "args": ["-y", "@dastbal/umbra", "mcp", "--root", "${CLAUDE_PROJECT_DIR}"]
     }
   }
 }
 ```
 
-`${CLAUDE_PROJECT_DIR}` is expanded by Claude Code to the project root, so this
+That is the whole setup. `npx -y` fetches and runs the package without
+installing it — the same shape every other MCP server is distributed in — and
+`${CLAUDE_PROJECT_DIR}` is expanded by Claude Code to the project root, so the
 file is portable and safe to commit for a team.
+
+The optional peer dependency has to be reachable too, so either add it to that
+project (`npm i @modelcontextprotocol/sdk`) or install both globally:
+
+```bash
+npm i -g @dastbal/umbra @modelcontextprotocol/sdk
+```
+
+with `"command": "umbra"` instead of `npx`.
+
+**Needs 2.2.0 or later.** Earlier published versions have no `mcp` subcommand at
+all.
 
 | Flag | Meaning |
 |---|---|
@@ -756,26 +761,42 @@ without changing what the team shares:
 
 ### Semantic search without a Google account
 
-`ask_codebase` needs an embedding provider. Two are supported, and switching is
-reversible: each provider's vectors are stored under their own identity, so
-switching back costs nothing and never destroys the other index
-([ADR-025](docs/adr/ADR-025-embeddings-are-chosen-not-assumed.md),
-[ADR-026](docs/adr/ADR-026-vectors-are-numbers-and-the-database-can-count.md)).
-
-**Local, free, offline** — no credentials at all:
+`ask_codebase` needs an embedding provider, and **the default is local, free and
+offline** ([ADR-027](docs/adr/ADR-027-the-default-is-the-one-that-costs-nothing.md)).
+One command and semantic search works with no cloud account:
 
 ```bash
 ollama pull nomic-embed-text
 ```
 
-**Google Vertex** — costs cents per query and needs Application Default
-Credentials:
+**Google Vertex** is fully supported and one line away. It costs cents per query
+and needs Application Default Credentials:
 
 ```bash
 umbra auth login
 ```
 
-If neither is available, the other three tools are unaffected.
+```json
+{ "rag": { "embeddings": "vertex" } }
+```
+
+in `.umbra/agent.config.json`, which is gitignored — so each person on a team
+chooses without changing what the repository shares. `UMBRA_EMBEDDINGS=vertex`
+and `--embeddings vertex` do the same thing for one run.
+
+Switching is reversible and never destroys the other index: each provider's
+vectors are stored under their own identity, so switching back requires no
+re-indexing, and querying an index built by the *other* provider raises an
+explicit error naming the fix rather than answering from the wrong vectors
+([ADR-025](docs/adr/ADR-025-embeddings-are-chosen-not-assumed.md),
+[ADR-026](docs/adr/ADR-026-vectors-are-numbers-and-the-database-can-count.md)).
+
+If no provider is available, `ask_codebase` is withheld and the other three
+tools are unaffected.
+
+> Upgrading from 2.1.x with a Vertex-built index and no `rag.embeddings` in your
+> config? The first query reports the mismatch and names both fixes: set
+> `vertex` in the config, or let it re-embed locally.
 
 ### Why the SDK is a separate install
 
