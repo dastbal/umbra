@@ -63,8 +63,9 @@ connection**, before the handshake completes, silently from the client's side.
 
 `start-mcp-server.ts` redirects the diagnostic sink to `stderr` on its first
 line, so `log.*` in `src/core/tools/utils/logger.ts` and the RAG subsystem's
-output are safe. `jsonrpc-stdio.transport.ts` is the only component permitted to
-write to `stdout`.
+output are safe. The SDK's `StdioServerTransport` is the only component
+permitted to write to `stdout`, and it is handed the stream only after every
+startup diagnostic has already gone to `stderr`.
 
 Two real leaks were found by the purity check rather than by reading code:
 
@@ -73,8 +74,10 @@ Two real leaks were found by the purity check rather than by reading code:
   module import; dotenv v17 prints a banner and a usage tip to `stdout`.
 
 Neither was visible to a `console.log` grep. If you add anything to this path,
-run the purity spec in `jsonrpc-stdio.transport.spec.ts` — it asserts that every
-line on `stdout` parses as JSON-RPC 2.0.
+run the purity spec in `sdk-server.spec.ts` — it asserts that every line on
+`stdout` parses as JSON-RPC 2.0. It is carried over unchanged from the
+hand-written transport: if the SDK speaks the same protocol, the same assertion
+has to hold.
 
 **Still latent:** `src/core/interaction/infrastructure/chalk-logger.adapter.ts`
 writes all five levels to `stdout` and does not go through the sink. It is not
@@ -110,22 +113,59 @@ server does not publish.
 basis — the same posture as `toSafeEvent` in `ai-agent-http.module.ts`, where an
 unrecognised event is dropped rather than forwarded and hoped for.
 
-## Why there is no MCP SDK dependency
+## The MCP SDK is used, and it is optional
 
-`@modelcontextprotocol/sdk@1.30.0` is `"type": "module"` and this project
-compiles to CommonJS, which is also why `chalk` is pinned to `^4`. It also pulls
-in `express`, `hono`, `jose`, `cors`, `ajv` and `eventsource`. The wire format is
-newline-delimited JSON-RPC 2.0; owning ~200 lines of it is cheaper than owning
-the packaging problem, and it is what gives absolute control over `stdout`.
+> **Corrected.** This section used to explain why there was *no* SDK
+> dependency, on the premise that `@modelcontextprotocol/sdk` was ESM-only and
+> unusable from this CommonJS project. That premise was false: its `exports` map
+> carries a `require` condition and a full CJS build, the same dual layout
+> `@langchain/core` already uses here. The conclusion was reached by reading
+> `type: "module"` at the top of the manifest and stopping there. The root cause
+> was `moduleResolution: "node"` in `tsconfig.json` — Node 10 resolution, which
+> does not read `exports` maps at all.
+
+The SDK owns the protocol: JSON-RPC framing, ids, notifications, error codes,
+capability advertisement, the handshake, and the JSON Schema it derives from the
+zod shapes in `tool-catalog.ts`. About 400 lines of hand-written protocol are
+gone.
+
+It is declared as an **optional peer dependency**, because it is 5.7 MB plus
+~6.9 MB of transitive packages — `hono`, `ajv`, `jose`, `express`, `cors`,
+`eventsource` — and a consumer who installs `@dastbal/umbra` for its NestJS
+module should not pay 12 MB for a protocol they never speak.
+
+`peerDependencies` + `peerDependenciesMeta.optional`, not
+`optionalDependencies`: the latter installs, and the point is that the consumer
+chooses. `sdk-loader.ts` requires it lazily and, when absent, prints the install
+command and exits rather than showing a module-resolution stack trace.
+
+```bash
+npm i @modelcontextprotocol/sdk               # local
+npm i -g @dastbal/umbra @modelcontextprotocol/sdk   # global CLI install
+```
+
+### Three behaviours that changed with the swap
+
+Verified by running the round-1 handshake script unmodified. Recorded because
+"transparent replacement" was the goal and these are the places it is not:
+
+| | Hand-written | SDK |
+|---|---|---|
+| A malformed line | answered with JSON-RPC `-32700` and stayed connected | silently dropped, no response |
+| Response order | strictly in request order | concurrent; ids may return out of order (legal, and faster) |
+| Unknown tool | *"Unknown tool X. This server publishes: …"* | `MCP error -32602: Tool X not found` |
+
+None is a defect. The first is a small loss of diagnosability, the second is an
+improvement, the third trades a helpful message for a standard one.
 
 ## Files
 
 | File | Role |
 |---|---|
 | `mcp.contracts.ts` | DTOs and closed unions. Imports nothing from `src/core/` |
-| `jsonrpc-stdio.transport.ts` | The wire. The only writer to `stdout` |
-| `umbra-mcp-server.ts` | Dispatch for the nine supported methods |
-| `tool-catalog.ts` | The four tools as MCP descriptors, schemas written by hand |
+| `sdk-loader.ts` | Lazy, optional `require` of the SDK, plus the install hint |
+| `sdk-server.ts` | Registers the catalogs on the SDK's `McpServer` |
+| `tool-catalog.ts` | The four tools, with zod shapes the SDK turns into JSON Schema |
 | `resource-catalog.ts` | `umbra://adr-index`, `umbra://index-status` |
 | `prompt-catalog.ts` | `skills/*.md` as prompts |
 | `dto-mapper.ts` | The boundary: refusals translated, hints stripped, provenance added |

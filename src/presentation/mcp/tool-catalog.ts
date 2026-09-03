@@ -4,6 +4,7 @@ import {
   listAdrsTool,
   queryDependencyGraphTool,
 } from '../../core/tools';
+import { z } from 'zod';
 import { McpToolDescriptor, McpToolResult } from './mcp.contracts';
 import { toErrorResult, toToolResult } from './dto-mapper';
 
@@ -20,23 +21,40 @@ import { toErrorResult, toToolResult } from './dto-mapper';
  * human approval channel — so nothing that writes may be exposed (ADR-024,
  * constraint 2).
  *
- * ## Why the schemas are written by hand
+ * ## Why the published schema is zod, and separate from the tool's own
  *
- * Four schemas: one string, one string plus a two-value enum, an empty object,
- * one optional boolean. Generating those from zod would mean adding
- * `zod-to-json-schema` and trusting its output to match what the tool actually
- * validates. Written here, the descriptor and the tool sit in the same review.
+ * The SDK takes a zod raw shape and derives the JSON Schema itself, so the
+ * hand-written `inputSchema` objects this file used to carry are gone —
+ * hand-maintained JSON Schema beside a zod validator is two descriptions of
+ * one contract, and they drift.
  *
- * The descriptions are **rewritten for a foreign reader**, not copied. The
- * originals were written for Umbra's own prompt and reference tools this server
- * does not publish — `list_adrs` tells the model to "read the selected ADR with
- * safe_read_file", which is not available here.
+ * The shapes are declared here rather than taken from each Umbra tool's own
+ * `schema`, and that is deliberate, not duplication for its own sake. The
+ * internal schemas carry `.describe()` text written for **Umbra's own prompt**:
+ * `list_adrs` tells the model to "read the selected ADR with safe_read_file",
+ * a tool this server does not publish. Reusing them would leak internal
+ * vocabulary into a foreign model's context, which is precisely what
+ * `dto-mapper.ts` exists to prevent on the way out.
+ *
+ * So: one published schema per tool, in one place, in the same language the
+ * SDK speaks — and the Umbra tool still validates its own input underneath,
+ * which is defence in depth rather than redundancy.
  */
 
 /** A published tool: how it is advertised, and how it is invoked. */
 export interface PublishedTool {
-  /** What `tools/list` advertises. */
-  readonly descriptor: McpToolDescriptor;
+  /** Tool name, as the client calls it. */
+  readonly name: string;
+  /** Description written for a foreign reader, not for Umbra's own prompt. */
+  readonly description: string;
+  /**
+   * Argument shape as a zod raw shape, which is what `registerTool` takes.
+   *
+   * An empty object means the tool takes no arguments — load-bearing for
+   * `run_integrity_check`, whose root must come from the pinned launch value
+   * and never from a caller (ADR-024, constraint 3).
+   */
+  readonly inputSchema: z.ZodRawShape;
   /** Runs the tool and maps its output across the DTO boundary. */
   readonly invoke: (args: Record<string, unknown>) => Promise<McpToolResult>;
 }
@@ -72,23 +90,16 @@ async function runTool(tool: unknown, args: Record<string, unknown>): Promise<st
  */
 function publishListAdrs(): PublishedTool {
   return {
-    descriptor: {
-      name: 'list_adrs',
-      description:
-        'Lists this repository\'s Architectural Decision Records — path, title, status and a compact ' +
-        'summary — without returning their bodies. Use it to find out *why* the code is shaped the way ' +
-        'it is before reading source. Read the full record yourself from the path it returns.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          refresh: {
-            type: 'boolean',
-            description: 'Rebuild the cached catalog instead of reading it.',
-            default: false,
-          },
-        },
-        additionalProperties: false,
-      },
+    name: 'list_adrs',
+    description:
+      'Lists this repository\'s Architectural Decision Records — path, title, status and a compact ' +
+      'summary — without returning their bodies. Use it to find out *why* the code is shaped the way ' +
+      'it is before reading source. Read the full record yourself from the path it returns.',
+    inputSchema: {
+      refresh: z
+        .boolean()
+        .optional()
+        .describe('Rebuild the cached catalog instead of reading it.'),
     },
     invoke: async (args) => {
       const refresh = args.refresh === true;
@@ -104,28 +115,19 @@ function publishListAdrs(): PublishedTool {
  */
 function publishDependencyGraph(): PublishedTool {
   return {
-    descriptor: {
-      name: 'query_dependency_graph',
-      description:
-        'Queries the AST-level dependency graph for one TypeScript file: which files it imports ' +
-        '(outbound), or which files import it (inbound). Answers "what breaks if I change this?" ' +
-        'without reading the whole tree.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          filePath: {
-            type: 'string',
-            description: 'Repository-relative path to a .ts file, e.g. src/core/rag/retriever.ts',
-          },
-          direction: {
-            type: 'string',
-            enum: ['inbound', 'outbound'],
-            description: 'inbound = files that import this one; outbound = files this one imports.',
-          },
-        },
-        required: ['filePath', 'direction'],
-        additionalProperties: false,
-      },
+    name: 'query_dependency_graph',
+    description:
+      'Queries the AST-level dependency graph for one TypeScript file: which files it imports ' +
+      '(outbound), or which files import it (inbound). Answers "what breaks if I change this?" ' +
+      'without reading the whole tree.',
+    inputSchema: {
+      filePath: z
+        .string()
+        .min(1)
+        .describe('Repository-relative path to a .ts file, e.g. src/core/rag/retriever.ts'),
+      direction: z
+        .enum(['inbound', 'outbound'])
+        .describe('inbound = files that import this one; outbound = files this one imports.'),
     },
     invoke: async (args) => {
       const filePath = typeof args.filePath === 'string' ? args.filePath : undefined;
@@ -155,14 +157,12 @@ function publishDependencyGraph(): PublishedTool {
  */
 function publishIntegrityCheck(): PublishedTool {
   return {
-    descriptor: {
-      name: 'run_integrity_check',
-      description:
-        'Runs the TypeScript compiler in no-emit mode over the repository this server was launched ' +
-        'against, and reports type errors. Takes no arguments: the directory is fixed at launch and ' +
-        'cannot be chosen by the caller.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    },
+    name: 'run_integrity_check',
+    description:
+      'Runs the TypeScript compiler in no-emit mode over the repository this server was launched ' +
+      'against, and reports type errors. Takes no arguments: the directory is fixed at launch and ' +
+      'cannot be chosen by the caller.',
+    inputSchema: {},
     invoke: async () => toToolResult(await runTool(integrityCheckTool, {})),
   };
 }
@@ -177,23 +177,16 @@ function publishIntegrityCheck(): PublishedTool {
  */
 function publishAskCodebase(decorate: (text: string) => string): PublishedTool {
   return {
-    descriptor: {
-      name: 'ask_codebase',
-      description:
-        'Semantic search over this repository, returning the most relevant code with each file\'s ' +
-        'imports and structural skeleton. Ask in natural language ("where is the webhook signature ' +
-        'verified?") rather than by keyword. Every answer states which embedding index produced it.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'A question about logic or functionality, in natural language.',
-          },
-        },
-        required: ['query'],
-        additionalProperties: false,
-      },
+    name: 'ask_codebase',
+    description:
+      'Semantic search over this repository, returning the most relevant code with each file\'s ' +
+      'imports and structural skeleton. Ask in natural language ("where is the webhook signature ' +
+      'verified?") rather than by keyword. Every answer states which embedding index produced it.',
+    inputSchema: {
+      query: z
+        .string()
+        .min(1)
+        .describe('A question about logic or functionality, in natural language.'),
     },
     invoke: async (args) => {
       const query = typeof args.query === 'string' ? args.query : undefined;

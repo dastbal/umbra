@@ -8,11 +8,11 @@ import {
 import { readIndexStamp } from '../../core/rag/index-stamp';
 import { IndexerService } from '../../core/rag/indexer';
 import { withProvenance } from './dto-mapper';
-import { JsonRpcStdioTransport } from './jsonrpc-stdio.transport';
 import { buildPromptCatalog } from './prompt-catalog';
 import { buildResourceCatalog } from './resource-catalog';
 import { buildToolCatalog } from './tool-catalog';
-import { UmbraMcpServer } from './umbra-mcp-server';
+import { loadMcpSdk } from './sdk-loader';
+import { buildSdkServer } from './sdk-server';
 
 /**
  * Boots the read-only MCP server over stdio.
@@ -23,14 +23,17 @@ import { UmbraMcpServer } from './umbra-mcp-server';
  *    print. `stdout` carries JSON-RPC, and one stray byte corrupts the
  *    connection before the handshake completes — silently, from the client's
  *    side (ADR-024, constraint 4).
- * 2. **Pin the root.** Before any subsystem touches the database, because
+ * 2. **Load the SDK.** An optional peer dependency, so its absence is reported
+ *    with the install command before any work is done for a server that cannot
+ *    start.
+ * 3. **Pin the root.** Before any subsystem touches the database, because
  *    `AgentDB` caches its connection on first use and fixes the workspace for
  *    the life of the process.
- * 3. **Resolve and probe embeddings.** The tool list is fixed at launch, so
+ * 4. **Resolve and probe embeddings.** The tool list is fixed at launch, so
  *    whether `ask_codebase` can answer has to be known now.
- * 4. **Warm the index.** With no index, semantic search returns nothing and
+ * 5. **Warm the index.** With no index, semantic search returns nothing and
  *    says nothing (constraint 5).
- * 5. **Serve.**
+ * 6. **Serve.**
  *
  * @example
  * ```ts
@@ -60,12 +63,25 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
   // 1. stdout belongs to the protocol from this line onward.
   setLogSink((line) => process.stderr.write(`${line}\n`));
 
-  // 2. The root is fixed here and nowhere else.
+  // 2. The SDK is an optional peer dependency, so its absence is a normal
+  //    outcome that has to be explained with the command that fixes it — not a
+  //    module-resolution stack trace. Checked before any work is done, because
+  //    warming an index for a server that cannot start wastes the operator's
+  //    time and, on Vertex, their money.
+  const load = loadMcpSdk();
+  if (!load.available) {
+    report(`cannot start: ${load.reason}`);
+    process.stderr.write(`\n${load.instruction}\n`);
+    throw new Error('The MCP server requires @modelcontextprotocol/sdk.');
+  }
+  const sdk = load.sdk;
+
+  // 3. The root is fixed here and nowhere else.
   pinRuntimeRoot(options.root);
   const rootDir = runtimeRoot();
   report(`umbra mcp — serving ${rootDir}`);
 
-  // 3. Can semantic search actually answer?
+  // 4. Can semantic search actually answer?
   //
   // The provider is pinned before anything can construct a retriever, because
   // `askCodebaseTool` builds its own with no argument. Without the pin, the
@@ -97,7 +113,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
     report('The other three tools need no credentials and are unaffected.');
   }
 
-  // 4. A cold index answers nothing and says nothing.
+  // 5. A cold index answers nothing and says nothing.
   if (availability.available && options.skipIndex !== true) {
     await warmIndex(selection.port);
   } else if (options.skipIndex === true) {
@@ -112,7 +128,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
     );
   }
 
-  // 5. Serve.
+  // 6. Serve.
   const tools = buildToolCatalog({
     semanticSearchAvailable: availability.available,
     // Provenance is read at call time from the stamp on disk, and the stamp is
@@ -139,8 +155,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
     },
   });
 
-  const server = new UmbraMcpServer({
-    name: 'umbra',
+  const server = buildSdkServer(sdk, {
     version: options.version,
     instructions:
       'Umbra publishes read-only knowledge about one repository: its ADR catalog, its AST dependency ' +
@@ -152,9 +167,23 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
     prompts: buildPromptCatalog(),
   });
 
-  report(`publishing ${tools.length} tools: ${tools.map((t) => t.descriptor.name).join(', ')}`);
+  report(`publishing ${tools.length} tools: ${tools.map((t) => t.name).join(', ')}`);
 
-  await new JsonRpcStdioTransport().listen((request) => server.handle(request));
+  // From here the SDK owns stdout. Everything above wrote to stderr, which is
+  // why the sink was redirected on the first line of this function rather than
+  // just before this call.
+  await server.connect(new sdk.StdioServerTransport());
+
+  // `connect` resolves once the transport is wired, not when the client leaves,
+  // so the process is held open by stdin. Waiting on its close is what makes
+  // "client disconnected" mean what it says.
+  await new Promise<void>((resolve) => {
+    process.stdin.once('end', () => resolve());
+    process.stdin.once('close', () => resolve());
+    process.stdin.once('error', () => resolve());
+  });
+
+  await server.close();
   report('client disconnected');
 }
 

@@ -4,5 +4,6 @@
  * Import from here, not from individual files.
  */
 export * from './mcp.contracts';
-export * from './umbra-mcp-server';
+export * from './sdk-loader';
+export * from './sdk-server';
 export * from './start-mcp-server';
