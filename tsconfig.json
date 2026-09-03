@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "module": "CommonJS",
+    "module": "Node16",
     "target": "ES2021",
     "lib": ["ES2021"],
     "declaration": true,            /* Genera los .d.ts para que otros vean tus tipos */
@@ -13,7 +13,7 @@
     "emitDecoratorMetadata": true,  /* Necesario para NestJS */
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node",
+    "moduleResolution": "Node16",
     "types": ["node", "jest"]
   },
   "include": ["src/**/*" ,".agent/**/*"],

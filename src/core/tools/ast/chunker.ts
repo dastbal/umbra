@@ -5,7 +5,17 @@ import {
   MethodDeclaration,
   ClassDeclaration,
 } from 'ts-morph';
-import { v4 as uuidv4 } from 'uuid';
+// Node's own UUID generator rather than the `uuid` package.
+//
+// `uuid@13` is ESM-only: its exports map has no `require` condition, so
+// `require('uuid')` from this CommonJS build works only on Node 22+, which
+// permits requiring an ES module. This package declares `engines: node >= 20`,
+// where the same call throws. The bug was invisible until `moduleResolution`
+// moved off Node 10 resolution, which does not read exports maps at all.
+//
+// `randomUUID` has been in `node:crypto` since Node 14.17, is faster, and
+// removes a dependency instead of pinning one.
+import { randomUUID as uuidv4 } from 'node:crypto';
 import {
   ProcessedChunk,
   ChunkMetadata,
