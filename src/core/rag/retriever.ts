@@ -3,14 +3,13 @@ import { cosineSimilarity } from './math';
 import { ProcessedChunk } from '../types';
 import { writeLine } from '../observability/console-sink';
 import {
-  EMBEDDING_VECTOR_COLUMNS,
   EmbeddingsIdentity,
   EmbeddingsIndexMismatchError,
   EmbeddingsPort,
   EmbeddingsProvider,
-  LEGACY_VECTOR_COLUMN,
 } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
+import { decodeVector } from './vector-codec';
 import * as path from 'path';
 interface SearchResult {
   chunk: ProcessedChunk;
@@ -33,6 +32,8 @@ export interface RetrievalProvenance {
   readonly model: string;
   /** How many chunks were actually compared. */
   readonly chunksSearched: number;
+  /** Component count of the stored vectors, for diagnosing a changed model. */
+  readonly dimensions: number;
 }
 
 interface FileContext {
@@ -50,6 +51,9 @@ export class RetrieverService {
 
   /** Provenance of the most recent {@link query}, if one has run. */
   private lastProvenance?: RetrievalProvenance;
+
+  /** `provider/model` identities seen the last time the index was inspected. */
+  private lastPopulatedIdentities: readonly string[] = [];
 
   /**
    * @param embeddings - Embedding port to search with. Defaults to the resolved
@@ -93,45 +97,41 @@ export class RetrieverService {
   ): Promise<SearchResult[]> {
     writeLine(`🔍 [RAG] Embedding Query: "${query}"...`);
 
-    const column = this.embeddings.identity.column;
+    const identity = this.embeddings.identity;
 
-    // The Vertex column coalesces over the pre-ADR-025 column: every value ever
-    // written to `vector_json` came from Vertex, because Vertex was the only
-    // provider. This is what lets an index built before this change keep
-    // answering without a reindex.
-    const vectorExpression =
-      this.embeddings.identity.provider === 'vertex'
-        ? `COALESCE(${column}, ${LEGACY_VECTOR_COLUMN})`
-        : column;
-
-    // Columns are named rather than selected with `*`, and the vector comes
-    // last: a 768-float JSON string is ~15 KB and lives in SQLite overflow
-    // pages, so column order decides whether the other provider's vectors are
-    // read off disk for nothing.
-    const stmt = this.db.prepare(
-      `SELECT id, file_path, chunk_type, content, metadata, ${vectorExpression} AS vector_json
-       FROM code_chunks
-       WHERE ${vectorExpression} IS NOT NULL`,
-    );
-    const rows = stmt.all() as any[];
+    // Vectors live in `chunk_vectors`, keyed by (chunk, provider, model), and
+    // only this identity's rows are read. Nothing coalesces across providers:
+    // the legacy `code_chunks` columns were imported into this table by
+    // `AgentDB`'s migration, so an index built before ADR-026 answers here with
+    // no reindex, and those columns are never consulted at query time.
+    const rows = this.db
+      .prepare(
+        `SELECT c.id AS id, c.file_path AS file_path, c.chunk_type AS chunk_type,
+                c.content AS content, c.metadata AS metadata, v.vector AS vector
+           FROM chunk_vectors v
+           JOIN code_chunks c ON c.id = v.chunk_id
+          WHERE v.provider = ? AND v.model = ?`,
+      )
+      .all(identity.provider, identity.model) as any[];
 
     if (rows.length === 0) {
-      throw new EmbeddingsIndexMismatchError(
-        this.embeddings.identity,
-        this.populatedProviders(),
-      );
+      throw new EmbeddingsIndexMismatchError(identity, this.populatedProviders());
     }
 
     const queryVector = await this.embeddings.embedQuery(query);
 
     this.lastProvenance = {
-      provider: this.embeddings.identity.provider,
-      model: this.embeddings.identity.model,
+      provider: identity.provider,
+      model: identity.model,
       chunksSearched: rows.length,
+      dimensions: decodeVector(rows[0].vector as Buffer).length,
     };
 
     const scoredChunks: SearchResult[] = rows.map((row) => {
-      const vector = JSON.parse(row.vector_json);
+      // A typed-array view over the stored bytes: no JSON parse, and no copy of
+      // the components. Decoding 50 vectors 200 times measured 1 ms this way
+      // against 1,130 ms through `JSON.parse` (ADR-026).
+      const vector = decodeVector(row.vector as Buffer);
       const score = cosineSimilarity(queryVector, vector);
       const metadata = JSON.parse(row.metadata);
 
@@ -161,36 +161,44 @@ export class RetrieverService {
    * @returns Providers with at least one stored vector.
    */
   private populatedProviders(): EmbeddingsProvider[] {
-    const populated: EmbeddingsProvider[] = [];
+    try {
+      // One grouped read replaces the per-column probes the previous design
+      // needed, and for the first time it can report the *model* too — which
+      // matters, because a model upgrade inside one provider is now a distinct
+      // identity that can be present or absent on its own.
+      const rows = this.db
+        .prepare(`SELECT DISTINCT provider, model FROM chunk_vectors`)
+        .all() as { provider: string; model: string }[];
 
-    for (const column of EMBEDDING_VECTOR_COLUMNS) {
-      const expression =
-        column === 'vector_vertex_json'
-          ? `COALESCE(${column}, ${LEGACY_VECTOR_COLUMN})`
-          : column;
+      this.lastPopulatedIdentities = rows.map((row) => `${row.provider}/${row.model}`);
 
-      try {
-        const row = this.db
-          .prepare(
-            `SELECT 1 AS present FROM code_chunks WHERE ${expression} IS NOT NULL LIMIT 1`,
-          )
-          .get() as { present?: number } | undefined;
-
-        if (row?.present === 1) {
-          populated.push(column === 'vector_vertex_json' ? 'vertex' : 'ollama');
+      const providers = new Set<EmbeddingsProvider>();
+      for (const row of rows) {
+        if (row.provider === 'vertex' || row.provider === 'ollama') {
+          providers.add(row.provider);
         }
-      } catch (error) {
-        // A missing column means the migration has not run for this provider,
-        // which is itself the answer: it holds nothing. Recorded rather than
-        // silently ignored, because a broken index table would otherwise look
-        // identical to an empty one.
-        writeLine(
-          `⚙️  [RAG] Could not inspect ${column}: ${error instanceof Error ? error.message : String(error)}`,
-        );
       }
-    }
 
-    return populated;
+      return [...providers];
+    } catch (error) {
+      // Reported rather than silently ignored: a broken vector table would
+      // otherwise look identical to an empty one, and the operator would be
+      // told to re-index when the real problem is the schema.
+      writeLine(
+        `⚙️  [RAG] Could not inspect chunk_vectors: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * `provider/model` identities found the last time the index was inspected.
+   *
+   * Populated as a side effect of building a mismatch error, which is the only
+   * moment the question is asked.
+   */
+  public get populatedIdentities(): readonly string[] {
+    return this.lastPopulatedIdentities;
   }
 
   /**

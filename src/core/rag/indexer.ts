@@ -6,6 +6,7 @@ import { writeFragment, writeLine } from '../observability/console-sink';
 import { EmbeddingsPort } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
 import { readIndexStamp, writeIndexStamp } from './index-stamp';
+import { encodeVector } from './vector-codec';
 import * as path from 'path';
 import * as fs from 'fs';
 import { GraphEdge, ProcessedChunk } from '../types';
@@ -36,7 +37,7 @@ export class IndexerService {
   // Optimization: Send chunks to Vertex AI in groups to respect rate limits and improve speed.
   private BATCH_SIZE = 10;
 
-  /** The embedding provider whose column this run writes. */
+  /** The embedding provider whose `chunk_vectors` rows this run writes. */
   private readonly embeddings: EmbeddingsPort;
 
   /**
@@ -209,24 +210,52 @@ export class IndexerService {
    * @returns How many chunks were embedded.
    */
   private async backfillMissingVectors(): Promise<number> {
-    const column = this.embeddings.identity.column;
+    const identity = this.embeddings.identity;
 
+    // Chunks with text but no vector row for this exact identity. Under
+    // ADR-026 that includes a model upgrade inside one provider, which the
+    // column design could not represent at all.
     const pending = this.db
       .prepare(
-        `SELECT id, content FROM code_chunks WHERE ${column} IS NULL AND content IS NOT NULL`,
+        `SELECT c.id AS id, c.content AS content
+           FROM code_chunks c
+           WHERE c.content IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM chunk_vectors v
+                WHERE v.chunk_id = c.id AND v.provider = ? AND v.model = ?
+             )`,
       )
-      .all() as { id: string; content: string }[];
+      .all(identity.provider, identity.model) as { id: string; content: string }[];
 
     if (pending.length === 0) return 0;
 
     IndexerService.log(
-      `\u{1F501} Embedding ${pending.length} existing chunks for ${this.embeddings.identity.provider}...`,
+      `Embedding ${pending.length} existing chunks for ${identity.provider}/${identity.model}...`,
     );
 
-    const update = this.db.prepare(`UPDATE code_chunks SET ${column} = ? WHERE id = ?`);
-    const updateMany = this.db.transaction(
+    // An INSERT, not an UPDATE: this identity may have no row yet. Nothing
+    // belonging to another provider or model is addressed by this statement.
+    const insertVector = this.db.prepare(
+      `INSERT INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(chunk_id, provider, model) DO UPDATE SET
+         dimensions = excluded.dimensions,
+         vector = excluded.vector`,
+    );
+
+    const insertMany = this.db.transaction(
       (rows: { id: string }[], vectors: number[][]) => {
-        rows.forEach((row, idx) => update.run(JSON.stringify(vectors[idx]), row.id));
+        rows.forEach((row, idx) => {
+          const vector = vectors[idx];
+          if (vector === undefined || vector.length === 0) return;
+          insertVector.run(
+            row.id,
+            identity.provider,
+            identity.model,
+            vector.length,
+            encodeVector(vector),
+          );
+        });
       },
     );
 
@@ -238,7 +267,7 @@ export class IndexerService {
 
       try {
         const vectors = await this.embeddings.embedDocuments(batch.map((row) => row.content));
-        updateMany(batch, vectors);
+        insertMany(batch, vectors);
         embedded += batch.length;
         writeFragment('.');
       } catch (err: unknown) {
@@ -333,27 +362,37 @@ export class IndexerService {
 
           // 3. Save to DB (Transaction for performance)
           //
-          // The vector goes in this provider's own column. One shared column
-          // would make the index silently unusable after a switch, because
-          // vectors from two models are not comparable and a mixed cosine
-          // similarity does not error -- it returns a confident, meaningless
-          // ranking (ADR-025).
+          // Two writes per chunk, and the split is the design (ADR-026):
+          // the chunk's text goes in `code_chunks`, its vector goes in
+          // `chunk_vectors` keyed by (chunk, provider, model).
           //
-          // `INSERT OR REPLACE` deletes and reinserts the row, which would
-          // blank the *other* provider's vector for this chunk -- exactly the
-          // forced migration this design exists to avoid. The upsert below
-          // touches only this provider's column.
-          const vectorColumn = this.embeddings.identity.column;
+          // The chunk row is upserted rather than `INSERT OR REPLACE`d:
+          // REPLACE deletes and reinserts, and `chunk_vectors` cascades from
+          // `code_chunks(id)`, so a replace here would silently delete every
+          // provider's vector for this chunk. That is the defect ADR-025
+          // amendment 1 measured, one table further down.
           const insertChunk = this.db.prepare(`
-            INSERT INTO code_chunks (id, file_path, chunk_type, content, ${vectorColumn}, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO code_chunks (id, file_path, chunk_type, content, metadata)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               file_path = excluded.file_path,
               chunk_type = excluded.chunk_type,
               content = excluded.content,
-              metadata = excluded.metadata,
-              ${vectorColumn} = excluded.${vectorColumn}
+              metadata = excluded.metadata
           `);
+
+          // Only this identity's row is touched. Another provider's row for
+          // the same chunk has a different primary key and is untouched --
+          // which is what makes switching providers non-destructive.
+          const insertVector = this.db.prepare(`
+            INSERT INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chunk_id, provider, model) DO UPDATE SET
+              dimensions = excluded.dimensions,
+              vector = excluded.vector
+          `);
+
+          const identity = this.embeddings.identity;
 
           // Explicitly typed transaction callback to fix TS7006
           const insertMany = this.db.transaction(
@@ -364,8 +403,18 @@ export class IndexerService {
                   (chunk as any).filePath, // filePath added in processSingleFile
                   chunk.type,
                   chunk.content,
-                  JSON.stringify(vectors[idx]), // Serialize vector to string for storage
                   JSON.stringify(chunk.metadata),
+                );
+
+                const vector = vectors[idx];
+                if (vector === undefined || vector.length === 0) return;
+
+                insertVector.run(
+                  chunk.id,
+                  identity.provider,
+                  identity.model,
+                  vector.length,
+                  encodeVector(vector),
                 );
               });
             },

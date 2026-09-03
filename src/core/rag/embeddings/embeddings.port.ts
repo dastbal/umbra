@@ -42,28 +42,58 @@ export interface EmbeddingsIdentity {
 }
 
 /**
- * The vector columns of `code_chunks`, in the order the schema declares them.
+ * The per-provider vector columns of `code_chunks`.
  *
- * Declared here rather than in `db.ts` so that the provider list and the column
- * list cannot drift apart — the migration in `AgentDB` reads this constant.
- * ADR-018's rule applied to a set rather than a single value.
+ * > **Superseded as the storage design (ADR-026).** Vectors now live in
+ * > `chunk_vectors`, keyed by `(chunk_id, provider, model)` and stored as
+ * > float32 BLOBs. These columns are **no longer written or read** by indexing
+ * > or retrieval.
+ * >
+ * > This constant survives for exactly one purpose: it is the list the one-time
+ * > migration reads to know where to import legacy vectors *from*. The columns
+ * > themselves are deliberately not dropped — they are the rollback.
+ *
+ * Do not add a new provider here. Under ADR-026 a provider is rows, not a
+ * column, and adding one here would write to storage nothing reads.
  */
 export const EMBEDDING_VECTOR_COLUMNS = [
   'vector_vertex_json',
   'vector_ollama_json',
 ] as const;
 
-/** One of the provider-specific vector columns. */
+/** One of the legacy provider-specific vector columns. */
 export type EmbeddingVectorColumn = (typeof EMBEDDING_VECTOR_COLUMNS)[number];
 
 /**
- * The legacy column, written before embeddings became pluggable.
+ * The oldest column, written before embeddings became pluggable at all.
  *
  * Every value in it came from Vertex, because Vertex was the only provider.
- * The Vertex read path coalesces over it so that an index built before ADR-025
- * keeps working without a reindex.
  */
 export const LEGACY_VECTOR_COLUMN = 'vector_json';
+
+/**
+ * What identity each legacy column's contents actually had.
+ *
+ * The column design recorded the *provider* by which column a vector sat in,
+ * and recorded the **model not at all**. So this mapping is the best available
+ * answer for the migration, and it is an assumption rather than a fact: it
+ * asserts that each column was written by that provider's default model, which
+ * is true of every index this project has produced, because no model override
+ * was ever configurable.
+ *
+ * That gap is itself part of the argument for ADR-026: `chunk_vectors` stores
+ * the model in the key, so no future migration has to guess.
+ *
+ * Declared here, with no imports, so both the adapters and `AgentDB`'s
+ * migration read one list instead of two.
+ */
+export const LEGACY_COLUMN_IDENTITIES: Readonly<
+  Record<string, { provider: EmbeddingsProvider; model: string; dimensions: number }>
+> = {
+  vector_json: { provider: 'vertex', model: 'text-embedding-004', dimensions: 768 },
+  vector_vertex_json: { provider: 'vertex', model: 'text-embedding-004', dimensions: 768 },
+  vector_ollama_json: { provider: 'ollama', model: 'nomic-embed-text', dimensions: 768 },
+};
 
 /**
  * What Umbra requires of an embedding model.

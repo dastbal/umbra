@@ -4,7 +4,12 @@ import * as fs from 'fs';
 import { agentPath } from '../config/agent-directory';
 import { runtimeRoot } from '../config/runtime-root';
 import { writeLine } from '../observability/console-sink';
-import { EMBEDDING_VECTOR_COLUMNS } from '../rag/embeddings/embeddings.port';
+import {
+  EMBEDDING_VECTOR_COLUMNS,
+  LEGACY_COLUMN_IDENTITIES,
+  LEGACY_VECTOR_COLUMN,
+} from '../rag/embeddings/embeddings.port';
+import { encodeLegacyJsonVector, vectorDimensions } from '../rag/vector-codec';
 
 /**
  * Singleton Database Manager.
@@ -120,7 +125,50 @@ export class AgentDB {
       `CREATE INDEX IF NOT EXISTS idx_chunks_file ON code_chunks(file_path)`,
     ).run();
 
+    // 4. Chunk Vectors (ADR-026)
+    //
+    // One row per (chunk, provider, model), holding a float32 BLOB. This
+    // replaces the per-provider columns of `code_chunks` as the storage design,
+    // for three reasons that the column layout could not deliver:
+    //
+    //   - **A provider is rows, not schema.** Adding one needs no `ALTER TABLE`.
+    //   - **The model is part of the key.** Under the column design, upgrading
+    //     `text-embedding-004` to a newer Vertex model would reuse the same
+    //     column and mix two unrelated vector spaces again — the exact failure
+    //     the columns existed to prevent, arriving from inside one provider.
+    //   - **BLOB instead of JSON text.** 3,072 bytes instead of 16,208, and no
+    //     parse: measured 1 ms against 1,130 ms to decode 50 vectors 200 times.
+    //     It is also the shape `sqlite-vec` needs, which is what lets the
+    //     distance computation move out of JavaScript.
+    //
+    // The cascade is now two levels deep — `chunk_vectors` → `code_chunks` →
+    // `file_registry` — and that is intentional. A file whose content changed
+    // has stale chunks for *every* provider, so removing them is correct. What
+    // must never happen again is treating a provider *switch* as a content
+    // change; see `IndexerService#backfillMissingVectors`.
+    db.prepare(
+      `
+      CREATE TABLE IF NOT EXISTS chunk_vectors (
+        chunk_id   TEXT    NOT NULL,     -- code_chunks.id
+        provider   TEXT    NOT NULL,     -- 'vertex' | 'ollama'
+        model      TEXT    NOT NULL,     -- the concrete embedding model
+        dimensions INTEGER NOT NULL,     -- component count, for diagnosis
+        vector     BLOB    NOT NULL,     -- little-endian float32 components
+        PRIMARY KEY (chunk_id, provider, model),
+        FOREIGN KEY(chunk_id) REFERENCES code_chunks(id) ON DELETE CASCADE
+      )
+    `,
+    ).run();
+
+    // Retrieval always filters by the active identity before ranking, so this
+    // is the index that keeps that filter from scanning the whole table.
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_chunk_vectors_identity
+         ON chunk_vectors(provider, model)`,
+    ).run();
+
     this.migrateEmbeddingColumns();
+    this.migrateVectorsToBlobRows();
   }
 
   /**
@@ -161,6 +209,107 @@ export class AgentDB {
     for (const column of EMBEDDING_VECTOR_COLUMNS) {
       if (existing.has(column)) continue;
       db.prepare(`ALTER TABLE code_chunks ADD COLUMN ${column} TEXT`).run();
+    }
+  }
+
+  /**
+   * Imports legacy JSON-text vectors into `chunk_vectors` as float32 BLOBs.
+   *
+   * ## Why this runs automatically, and why it is safe to
+   *
+   * An operator who upgrades should not have to re-embed a repository — that
+   * cost is exactly what stops people from adopting a change. Every vector
+   * already on disk is usable; only its container is wrong.
+   *
+   * The migration is:
+   *
+   * - **Idempotent.** `INSERT OR IGNORE` against the `(chunk_id, provider,
+   *   model)` primary key, so a chunk already migrated is left alone and a
+   *   second run performs no writes.
+   * - **Non-destructive.** The three legacy columns are **not** cleared and
+   *   **not** dropped. They are the rollback, and the surgeon's rule applies to
+   *   storage as much as to code.
+   * - **Honest about corruption.** A column value that is not a usable numeric
+   *   array is skipped and counted, never coerced into a row that would read as
+   *   valid. Silence there would reproduce ADR-017's third failure.
+   *
+   * `vector_json` is read last so that, for a chunk holding both it and
+   * `vector_vertex_json`, the explicit column wins on the primary key and the
+   * legacy one is ignored. They carry the same identity, so either is correct;
+   * ordering it makes the outcome deterministic rather than incidental.
+   *
+   * @returns Nothing. Counts are reported through the log sink, because a
+   *          migration that moves data and says nothing is unauditable.
+   */
+  private static migrateVectorsToBlobRows(): void {
+    const db = this.instance;
+
+    // Nothing to import into a database that has no legacy columns at all —
+    // a fresh install, which is the common case after this ships.
+    const columns = new Set(
+      (db.prepare(`PRAGMA table_info(code_chunks)`).all() as { name: string }[]).map(
+        (column) => column.name,
+      ),
+    );
+
+    const sources = [...EMBEDDING_VECTOR_COLUMNS, LEGACY_VECTOR_COLUMN].filter((column) =>
+      columns.has(column),
+    );
+    if (sources.length === 0) return;
+
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+
+    let imported = 0;
+    let skipped = 0;
+
+    for (const column of sources) {
+      const identity = LEGACY_COLUMN_IDENTITIES[column];
+      if (identity === undefined) continue;
+
+      const rows = db
+        .prepare(
+          `SELECT c.id AS id, c.${column} AS json
+             FROM code_chunks c
+             WHERE c.${column} IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM chunk_vectors v
+                  WHERE v.chunk_id = c.id AND v.provider = ? AND v.model = ?
+               )`,
+        )
+        .all(identity.provider, identity.model) as { id: string; json: string }[];
+
+      if (rows.length === 0) continue;
+
+      const importMany = db.transaction((batch: { id: string; json: string }[]) => {
+        for (const row of batch) {
+          const blob = encodeLegacyJsonVector(row.json);
+          if (blob === undefined) {
+            skipped += 1;
+            continue;
+          }
+          insert.run(
+            row.id,
+            identity.provider,
+            identity.model,
+            vectorDimensions(blob),
+            blob,
+          );
+          imported += 1;
+        }
+      });
+
+      importMany(rows);
+    }
+
+    if (imported > 0 || skipped > 0) {
+      writeLine(
+        `⚙️  [DB] Migrated ${imported} vectors into chunk_vectors` +
+          (skipped > 0 ? `; skipped ${skipped} unreadable legacy values` : '') +
+          '. The legacy columns were left untouched.',
+      );
     }
   }
 }

@@ -148,6 +148,112 @@ describe('vector column coexistence', () => {
     });
   });
 
+  describe('chunk_vectors — the storage design that replaced the columns (ADR-026)', () => {
+    beforeEach(() => {
+      db.exec(`
+        CREATE TABLE chunk_vectors (
+          chunk_id   TEXT    NOT NULL,
+          provider   TEXT    NOT NULL,
+          model      TEXT    NOT NULL,
+          dimensions INTEGER NOT NULL,
+          vector     BLOB    NOT NULL,
+          PRIMARY KEY (chunk_id, provider, model),
+          FOREIGN KEY(chunk_id) REFERENCES code_chunks(id) ON DELETE CASCADE
+        );
+      `);
+    });
+
+    /** @returns Rows in `chunk_vectors`, optionally filtered by provider. */
+    function vectorRows(provider?: string): number {
+      const sql = provider
+        ? `SELECT COUNT(*) n FROM chunk_vectors WHERE provider = '${provider}'`
+        : 'SELECT COUNT(*) n FROM chunk_vectors';
+      return (db.prepare(sql).get() as { n: number }).n;
+    }
+
+    /** Inserts one vector row for an identity. */
+    function insertVector(provider: string, model: string, bytes = 12): void {
+      db.prepare(
+        `INSERT INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(chunk_id, provider, model) DO UPDATE SET
+           dimensions = excluded.dimensions, vector = excluded.vector`,
+      ).run('chunk-1', provider, model, bytes / 4, Buffer.alloc(bytes, 1));
+    }
+
+    it('lets two providers hold vectors for the same chunk', () => {
+      insertVector('vertex', 'text-embedding-004');
+      insertVector('ollama', 'nomic-embed-text');
+
+      expect(vectorRows()).toBe(2);
+      expect(vectorRows('vertex')).toBe(1);
+      expect(vectorRows('ollama')).toBe(1);
+    });
+
+    it('treats a model upgrade inside one provider as a separate identity', () => {
+      // The column design could not represent this at all: both models would
+      // have shared `vector_vertex_json` and mixed two unrelated vector spaces
+      // — the exact failure the columns existed to prevent, arriving from
+      // inside a single provider.
+      insertVector('vertex', 'text-embedding-004');
+      insertVector('vertex', 'text-embedding-005');
+
+      expect(vectorRows('vertex')).toBe(2);
+    });
+
+    it('adds a third provider without touching the schema', () => {
+      insertVector('vertex', 'text-embedding-004');
+      db.prepare(
+        `INSERT INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run('chunk-1', 'some-future-provider', 'some-model', 3, Buffer.alloc(12, 2));
+
+      // No ALTER TABLE was needed. This is what the column layout could not do.
+      expect(vectorRows()).toBe(2);
+    });
+
+    it('upserting one identity leaves the other alone', () => {
+      insertVector('vertex', 'text-embedding-004');
+      insertVector('ollama', 'nomic-embed-text');
+
+      insertVector('ollama', 'nomic-embed-text', 16);
+
+      expect(vectorRows('vertex')).toBe(1);
+      const row = db
+        .prepare(`SELECT dimensions FROM chunk_vectors WHERE provider = 'ollama'`)
+        .get() as { dimensions: number };
+      expect(row.dimensions).toBe(4);
+    });
+
+    it('cascades away every provider when the chunk itself is deleted', () => {
+      insertVector('vertex', 'text-embedding-004');
+      insertVector('ollama', 'nomic-embed-text');
+
+      // Two levels: file_registry → code_chunks → chunk_vectors. Correct on a
+      // content change, and the reason a provider switch must never re-chunk.
+      db.prepare(
+        `INSERT OR REPLACE INTO file_registry (path, hash, last_indexed, skeleton_signature)
+         VALUES (?, ?, ?, ?)`,
+      ).run('src/a.ts', 'hash-2', 2, null);
+
+      expect(vectorRows()).toBe(0);
+    });
+
+    it('reports which identities are populated, model included', () => {
+      insertVector('vertex', 'text-embedding-004');
+      insertVector('ollama', 'nomic-embed-text');
+
+      const rows = db
+        .prepare('SELECT DISTINCT provider, model FROM chunk_vectors ORDER BY provider')
+        .all() as { provider: string; model: string }[];
+
+      expect(rows.map((r) => `${r.provider}/${r.model}`)).toEqual([
+        'ollama/nomic-embed-text',
+        'vertex/text-embedding-004',
+      ]);
+    });
+  });
+
   describe('the backfill path — a provider switch is not a content change', () => {
     it('fills only the empty column, in place, for chunks that already exist', () => {
       // This is what `backfillMissingVectors` does: no re-chunk, no new ids, no
