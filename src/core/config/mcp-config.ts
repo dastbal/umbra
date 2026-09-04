@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 
 /** A JSON object whose values may be arbitrary MCP client configuration. */
 type JsonObject = Record<string, unknown>;
@@ -10,6 +11,46 @@ export interface McpConfigurationResult {
   path: string;
   /** Whether the Umbra server was added, updated, or already current. */
   status: 'created' | 'updated' | 'unchanged';
+}
+
+/** A locally detectable MCP client with a verified Umbra configuration adapter. */
+export type SupportedMcpClient = 'codex' | 'claude';
+
+/** Describes a detected client without changing any consumer configuration. */
+export interface DetectedMcpClient {
+  /** Client identifier accepted by the setup command. */
+  readonly client: SupportedMcpClient;
+  /** Executable that was found on PATH. */
+  readonly executable: string;
+}
+
+/** Returns the stdio process shape usable by any MCP client. */
+export function buildUmbraMcpServer(rootDir: string): JsonObject {
+  return {
+    type: 'stdio',
+    command: 'npx',
+    args: ['-y', '@dastbal/umbra', 'mcp', '--root', path.resolve(rootDir)],
+  };
+}
+
+/** Detects only clients whose configuration contract Umbra verifies and owns. */
+export function detectSupportedMcpClients(): DetectedMcpClient[] {
+  const candidates: readonly DetectedMcpClient[] = [
+    { client: 'codex', executable: 'codex' },
+    { client: 'claude', executable: 'claude' },
+  ];
+  return candidates.filter(({ executable }) => executableExists(executable));
+}
+
+/** Configures Codex through its own CLI and verifies the resulting named entry. */
+export function configureCodexMcp(rootDir: string): void {
+  const resolvedRoot = path.resolve(rootDir);
+  execFileSync(
+    'codex',
+    ['mcp', 'add', 'umbra', '--', 'npx', '-y', '@dastbal/umbra', 'mcp', '--root', resolvedRoot],
+    { stdio: 'pipe', windowsHide: true },
+  );
+  execFileSync('codex', ['mcp', 'get', 'umbra'], { stdio: 'pipe', windowsHide: true });
 }
 
 /**
@@ -46,12 +87,17 @@ export function ensureUmbraMcpConfiguration(rootDir: string): McpConfigurationRe
 }
 
 /** Builds the process definition that pins Umbra to one repository at launch. */
-function buildUmbraMcpServer(rootDir: string): JsonObject {
-  return {
-    type: 'stdio',
-    command: 'npx',
-    args: ['-y', '@dastbal/umbra', 'mcp', '--root', rootDir],
-  };
+/** Checks command availability without executing its target client workflow. */
+function executableExists(executable: string): boolean {
+  try {
+    execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', [executable], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Reads a valid MCP configuration, or prepares a new empty one. */

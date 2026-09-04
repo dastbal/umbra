@@ -201,10 +201,10 @@ async function warmIndex(port: Parameters<typeof probeEmbeddings>[0]): Promise<v
   report('warming the semantic index...');
 
   try {
-    // Suppress the indexer's own progress chatter: it is a terminal affordance,
-    // and here there is no terminal. The redirected sink already keeps it off
-    // stdout; this keeps it out of the client's log as well.
-    IndexerService.silent = true;
+    // The shared sink was redirected to stderr before startup, so index progress
+    // is safe for JSON-RPC and visible to the operator. This is especially
+    // important for Ollama, whose model load can take minutes.
+    IndexerService.silent = false;
     await new IndexerService(port).indexProject();
     report('index ready');
   } catch (error: unknown) {

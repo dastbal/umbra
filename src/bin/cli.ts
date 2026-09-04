@@ -29,7 +29,13 @@ import {
   migrateLegacyAgentDirectory,
 } from "../core/config/agent-directory";
 import { ensureWorkspaceSkills } from "../core/config/workspace-scaffold";
-import { ensureUmbraMcpConfiguration } from '../core/config/mcp-config';
+import {
+  buildUmbraMcpServer,
+  configureCodexMcp,
+  detectSupportedMcpClients,
+  ensureUmbraMcpConfiguration,
+  SupportedMcpClient,
+} from '../core/config/mcp-config';
 import { hasIncompleteToolTurn } from '../presentation/cli/incomplete-tool-turn';
 import {
   loadTurnAudits,
@@ -45,6 +51,7 @@ import { startMcpServer } from '../presentation/mcp';
 import { IndexerService } from '../core/rag/indexer';
 import { resolveEmbeddings } from '../core/rag/embeddings/embeddings-resolver';
 import { probeEmbeddings } from '../core/rag/embeddings/embeddings-availability';
+import { formatIndexIntegrity, inspectIndexIntegrity } from '../core/rag/index-integrity';
 
 const program = new Command();
 suppressLangSmithTransportLogs();
@@ -89,6 +96,50 @@ async function setupLangSmith(): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     log.error(`Could not configure LangSmith: ${message}`);
   }
+}
+
+/** Configures one verified MCP client only after the operator confirms the pinned root. */
+async function setupMcpClient(client: SupportedMcpClient): Promise<void> {
+  const rootDir = path.resolve(process.cwd());
+  const server = buildUmbraMcpServer(rootDir);
+  log.sys(`Umbra will serve: ${rootDir}`);
+  log.sys(`MCP command: ${server.command} ${(server.args as string[]).join(' ')}`);
+  const enabled = await confirm({
+    question: `Configure Umbra for ${client === 'codex' ? 'Codex' : 'Claude'}?`,
+    defaultValue: false,
+    yesLabel: 'Configure MCP',
+    noLabel: 'Not now',
+  });
+  if (enabled !== true) {
+    log.sys('MCP configuration was not changed.');
+    return;
+  }
+
+  try {
+    if (client === 'codex') {
+      configureCodexMcp(rootDir);
+      log.sys('Codex MCP entry verified. Restart Codex to load it in an existing session.');
+      return;
+    }
+    const result = ensureUmbraMcpConfiguration(rootDir);
+    log.sys(`Claude MCP configuration ${result.status}: ${result.path}`);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.error(`MCP configuration was not changed: ${message}`);
+  }
+}
+
+/** Detects supported clients and configures each one through its verified adapter. */
+async function setupDetectedMcpClients(): Promise<void> {
+  const clients = detectSupportedMcpClients();
+  if (clients.length === 0) {
+    const server = buildUmbraMcpServer(process.cwd());
+    log.sys('No verified local MCP client was detected. Copy this standard stdio definition into your client:');
+    console.log(JSON.stringify({ mcpServers: { umbra: server } }, null, 2));
+    return;
+  }
+  log.sys(`Detected MCP clients: ${clients.map((entry) => entry.client).join(', ')}.`);
+  for (const client of clients) await setupMcpClient(client.client);
 }
 
 /**
@@ -340,7 +391,8 @@ program
   .command('doctor')
   .description('Validate local setup without sending repository context')
   .option('--live', 'Send one minimal provider health prompt after local checks')
-  .action(async (options: { live?: boolean }) => {
+  .option('--index', 'Inspect persisted index coverage without contacting an embedding provider')
+  .action(async (options: { live?: boolean; index?: boolean }) => {
     const checks: Array<{ name: string; passed: boolean }> = [];
     const nodeMajor = Number(process.versions.node.split('.')[0]);
     checks.push({ name: 'Node.js >= 20', passed: nodeMajor >= 20 });
@@ -363,6 +415,13 @@ program
       } catch {
         checks.push({ name: 'Live provider response', passed: false });
       }
+    }
+
+    if (options.index) {
+      const identity = resolveEmbeddings().port.identity;
+      const report = inspectIndexIntegrity(process.cwd(), identity);
+      console.log(formatIndexIntegrity(report));
+      checks.push({ name: 'Semantic index coverage', passed: report.healthy });
     }
 
     for (const check of checks) {
@@ -409,6 +468,21 @@ setupProgram
   .command('langsmith')
   .description('Optionally configure private LangSmith tracing for this project')
   .action(setupLangSmith);
+
+setupProgram
+  .command('mcp')
+  .description('Detect and optionally configure verified local MCP clients for this repository')
+  .action(setupDetectedMcpClients);
+
+setupProgram
+  .command('codex')
+  .description('Optionally configure the current repository as a Codex MCP server')
+  .action(async () => setupMcpClient('codex'));
+
+setupProgram
+  .command('claude')
+  .description('Optionally configure the current repository as a Claude MCP server')
+  .action(async () => setupMcpClient('claude'));
 
 program
   .command("init")
@@ -482,22 +556,15 @@ program
     }
 
     const enableMcp = await confirm({
-      question: 'Enable Umbra as this project\'s read-only MCP server? This updates only its "umbra" entry in .mcp.json.',
+      question: 'Configure Umbra as this project\'s read-only MCP server for detected clients?',
       defaultValue: false,
       yesLabel: 'Enable MCP server',
       noLabel: 'Not now',
     });
     if (enableMcp === true) {
-      try {
-        const mcp = ensureUmbraMcpConfiguration(process.cwd());
-        const state = mcp.status === 'unchanged' ? 'already current' : mcp.status;
-        log.sys(`MCP configuration ${state}: ${mcp.path}`);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        log.error(`MCP configuration was not changed: ${message}`);
-      }
+      await setupDetectedMcpClients();
     } else {
-      log.sys('MCP server was not enabled. Run `umbra init` again whenever you want to configure it.');
+      log.sys('MCP server was not enabled. Run `umbra setup mcp` whenever you want to configure it.');
     }
   });
 

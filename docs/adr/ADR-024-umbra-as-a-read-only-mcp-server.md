@@ -5,7 +5,7 @@
 | **Category** | Architecture · Packaging · Integration |
 | **Author** | David Balladares (decision) · Claude (record) |
 | **Date** | 2026-09-02 |
-| **Status** | ✅ **Accepted** — amended 7× 2026-09-03. Amendment 1 was **wrong** and is corrected in amendment 6 |
+| **Status** | ✅ **Accepted** — amended 8× 2026-09-04. Amendment 1 was **wrong** and is corrected in amendment 6 |
 
 ---
 
@@ -613,6 +613,22 @@ syntax a team has chosen.
   failure-boundary tests.
 - `src/bin/cli.ts` — `init`'s explicit MCP opt-in.
 - `README.md` — generated local configuration and portable team configuration.
+- `src/core/config/mcp-config.ts` — `detectSupportedMcpClients`, `configureCodexMcp`, `ensureUmbraMcpConfiguration`.
+- `src/bin/cli.ts` — `setupMcpClient`, `setupDetectedMcpClients`.
+
+### 8 — 2026-09-04 · Client adapters are explicit; the server remains portable
+
+Umbra serves standard stdio MCP, but client configuration formats are not a
+protocol feature. `umbra setup mcp` therefore detects and offers only verified
+adapters. `setup codex` invokes `codex mcp add umbra -- npx -y @dastbal/umbra
+mcp --root <absolute-root>` and verifies it with `codex mcp get umbra`; `setup
+claude` preserves the existing additive `.mcp.json` behavior. Both show the
+pinned root and require a default-No confirmation. Unknown clients receive a
+copyable standard definition instead of an unsafe guessed write.
+
+The normal command does not include `--no-index`: the server warms its one
+pinned root at startup. That preserves the original warm-index constraint while
+keeping `--no-index` available only for deliberate diagnostics.
 
 ---
 

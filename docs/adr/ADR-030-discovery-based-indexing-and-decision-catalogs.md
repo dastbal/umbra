@@ -291,6 +291,17 @@ chunker, schema migration and retrieval presentation were not built. The
 module-aware curated catalog is accepted independently, and the body-indexing
 idea remains deferred rather than being presented as shipped behavior.
 
+## Amendment — 2026-09-04 · One root owns one durable index
+
+The discovery result is still one served root even when it finds several
+TypeScript projects. Its `.umbra/memory.db` is the sole workspace database for
+that root; packages contribute source paths but do not create sibling `.umbra`
+directories. Index persistence now commits each file registry row, its chunks,
+the active identity's `chunk_vectors` rows, and dependency edges in one SQLite
+transaction after embeddings succeed. A failed file retains its previous hash
+or no registry row, so discovery retries it rather than reporting a complete
+index with no vectors. `umbra doctor --index` inspects these tables read-only.
+
 ## Related files
 
 - `src/core/config/workspace-discovery.ts` — proposed `WorkspaceDiscoveryService`.
@@ -299,6 +310,7 @@ idea remains deferred rather than being presented as shipped behavior.
 - `src/core/state/file-registry.ts` — `FileRegistry#isFileChanged`, `updateFile`.
 - `src/core/state/db.ts` — `AgentDB#initialize` schema migrations.
 - `src/core/rag/index-stamp.ts` — `IndexStamp`, `writeIndexStamp`.
+- `src/core/rag/index-integrity.ts` — `inspectIndexIntegrity`, `formatIndexIntegrity`.
 - `src/core/rag/retriever.ts` — `RetrieverService#query`, `getContextForLLM`.
 - `src/core/tools/rag-tools.ts` — `askCodebaseTool`, `refreshIndexTool`.
 - `src/core/tools/adr-index.ts` — `buildAdrIndex`, `discoverAdrs`, `formatAdrIndex`.

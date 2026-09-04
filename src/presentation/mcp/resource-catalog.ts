@@ -1,5 +1,6 @@
 import { buildAdrIndex, formatAdrIndex } from '../../core/tools/adr-index';
 import { readIndexStamp } from '../../core/rag/index-stamp';
+import { formatIndexIntegrity, inspectIndexIntegrity } from '../../core/rag/index-integrity';
 import {
   McpResourceContents,
   McpResourceDescriptor,
@@ -97,7 +98,8 @@ function describeIndexStatus(rootDir: string): string {
   if (stamp === undefined) {
     return (
       'No semantic index stamp found. Either the index was never built, or it was built before ' +
-      'index provenance was recorded. Semantic search may be unavailable or incomplete.'
+      'index provenance was recorded. Semantic search may be unavailable or incomplete.\n\n' +
+      formatIndexIntegrity(inspectIndexIntegrity(rootDir))
     );
   }
 
@@ -121,6 +123,15 @@ function describeIndexStatus(rootDir: string): string {
 
   if (stamp.status === 'empty') {
     lines.push('', `UNAVAILABLE: ${stamp.diagnostic ?? 'No indexable source files were discovered.'}`);
+  }
+
+  const integrity = inspectIndexIntegrity(rootDir, {
+    provider: stamp.provider,
+    model: stamp.model,
+  });
+  lines.push('', formatIndexIntegrity(integrity));
+  if (!integrity.healthy && stamp.status === 'complete') {
+    lines.push('', 'WARNING: the stamp says complete but durable vector coverage is incomplete. Run `umbra index` after fixing the reported cause.');
   }
 
   return lines.join('\n');

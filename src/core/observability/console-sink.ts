@@ -89,3 +89,71 @@ export function writeFragment(fragment: string): void {
   }
   activeSink(fragment);
 }
+
+/**
+ * Repaints one terminal line when Umbra owns an interactive stdout.
+ *
+ * Redirected output and MCP diagnostics deliberately receive complete lines:
+ * control characters would make logs unreadable and would be fatal on MCP's
+ * protocol stdout. The active sink is the authority for that distinction.
+ *
+ * @param line - Current transient status without a trailing newline.
+ * @returns Nothing.
+ */
+export function writeTransientLine(line: string): void {
+  if (activeSink === defaultSink && process.stdout.isTTY) {
+    const fitted = fitTerminalProgress(line);
+    process.stdout.write(`\r\u001b[2K${colorizeTransientProgress(fitted)}`);
+    return;
+  }
+  activeSink(line);
+}
+
+/** Finishes an interactive transient line before durable output is written. */
+export function finishTransientLine(): void {
+  if (activeSink === defaultSink && process.stdout.isTTY) process.stdout.write('\n');
+}
+
+/**
+ * Keeps dynamic progress within one physical terminal row.
+ *
+ * Padding to a stable width prevents short status messages leaving remnants of
+ * longer ones, while truncation prevents a long path from wrapping and making
+ * the terminal appear to jump.
+ */
+function fitTerminalProgress(line: string): string {
+  const terminalColumns = process.stdout.columns ?? 100;
+  const width = Math.max(40, Math.min(96, terminalColumns - 2));
+  const visible = line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line;
+  return visible.padEnd(width, ' ');
+}
+
+/** Adds terminal-only colour after measuring the plain fixed-width line. */
+function colorizeTransientProgress(line: string): string {
+  const parts = line.split('|');
+  if (parts.length < 4) return line;
+  const [percentage, position, filePath, ...status] = parts;
+  const state = status.join('|');
+  const stateColor = /saved/.test(state)
+    ? ANSI.green
+    : /working/.test(state)
+      ? ANSI.yellow
+      : /embedding|embedded/.test(state)
+        ? ANSI.magenta
+        : ANSI.cyan;
+  return `${ANSI.brightCyan}${percentage}${ANSI.reset}${ANSI.dim}|${ANSI.reset}` +
+    `${ANSI.cyan}${position}${ANSI.reset}${ANSI.dim}|${ANSI.reset}` +
+    `${ANSI.yellow}${filePath}${ANSI.reset}${ANSI.dim}|${ANSI.reset}` +
+    `${stateColor}${state}${ANSI.reset}`;
+}
+
+/** ANSI palette deliberately local to interactive terminal output. */
+const ANSI = {
+  reset: '\u001b[0m',
+  dim: '\u001b[2m',
+  brightCyan: '\u001b[96m',
+  cyan: '\u001b[36m',
+  yellow: '\u001b[33m',
+  magenta: '\u001b[35m',
+  green: '\u001b[32m',
+} as const;

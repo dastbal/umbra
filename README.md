@@ -707,6 +707,13 @@ It waits for a client and prints its startup to **stderr**:
 [umbra mcp] publishing 4 tools: ask_codebase, list_adrs, query_dependency_graph, run_integrity_check
 ```
 
+During a cold index it also prints per-file progress, percentage, embedding
+batch and elapsed time. An interactive `umbra deep` terminal repaints one
+concise status line instead of flooding the console; redirected output and MCP
+diagnostics retain complete lines. If Ollama is still loading or embedding after
+15 seconds, a heartbeat names the exact file and batch. MCP diagnostics always
+use `stderr`, never JSON-RPC `stdout`.
+
 **`publishing 4 tools` means it works.** `3` is not a failure: it means
 embeddings are unavailable, and the line above it says exactly why. Ctrl+C to
 stop.
@@ -717,13 +724,26 @@ Nothing to clone and nothing to install globally. In the repository you want
 served, run:
 
 ```bash
-npx -y @dastbal/umbra init
+npx -y @dastbal/umbra@2.2.3 init
 ```
 
-Choose **Enable MCP server** when prompted. Umbra adds or refreshes only its
-`umbra` entry in `.mcp.json`, preserving every other configured MCP server. It
-does this only after your explicit answer; `npm install` and package postinstall
-hooks never modify consumer configuration.
+Choose **Configure MCP server** when prompted. Umbra detects verified local
+clients and always shows the absolute repository root and startup command before
+asking for confirmation. It changes nothing by default; `npm install` and
+package postinstall hooks never modify consumer configuration.
+
+Run the flow again at any time:
+
+```bash
+umbra setup mcp       # detect Codex and Claude
+umbra setup codex     # configure and verify Codex only
+umbra setup claude    # update only mcpServers.umbra in .mcp.json
+```
+
+Codex is configured through `codex mcp add` and verified with `codex mcp get
+umbra`; restart an existing Codex session afterwards. Claude keeps the additive
+project `.mcp.json` adapter. Other MCP clients receive a standard JSON definition
+to copy, rather than Umbra guessing their configuration format.
 
 The generated entry pins the current repository by its absolute path. If your
 team wants a portable, committed Claude Code configuration instead, create
@@ -763,6 +783,18 @@ all.
 | `--root <path>` | **Required.** The repository to serve. Fixed at launch; no tool argument can change it |
 | `--embeddings <vertex\|ollama>` | Provider for semantic search. Defaults to `.umbra/agent.config.json`, else `ollama` |
 | `--no-index` | Do not warm the semantic index at launch |
+
+After a first index, verify durable coverage without calling an embedding
+provider:
+
+```bash
+umbra doctor --index
+```
+
+It reports the root's `.umbra/memory.db`, registered files, chunks, vectors per
+provider/model, dimensions, and paths whose chunks have no vector. Vectors live
+in `chunk_vectors`, keyed by `(chunk_id, provider, model)`; `file_registry`
+alone only proves that a file was seen, not that it is searchable.
 
 ### Monorepo discovery
 

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { ensureUmbraMcpConfiguration } from './mcp-config';
+import { buildUmbraMcpServer, ensureUmbraMcpConfiguration } from './mcp-config';
 
 describe('ensureUmbraMcpConfiguration', () => {
   let rootDir: string;
@@ -27,6 +27,14 @@ describe('ensureUmbraMcpConfiguration', () => {
           args: ['-y', '@dastbal/umbra', 'mcp', '--root', rootDir],
         },
       },
+    });
+  });
+
+  it('builds a client-neutral stdio definition with an absolute pinned root', () => {
+    expect(buildUmbraMcpServer(path.join(rootDir, '..', path.basename(rootDir)))).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@dastbal/umbra', 'mcp', '--root', rootDir],
     });
   });
 

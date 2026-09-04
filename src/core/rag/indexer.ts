@@ -2,7 +2,7 @@ import { FileRegistry } from '../state/file-registry';
 import { NestChunker } from '../tools/ast/chunker';
 import { AgentDB } from '../state/db';
 import { runtimeRoot } from '../config/runtime-root';
-import { writeFragment, writeLine } from '../observability/console-sink';
+import { finishTransientLine, writeFragment, writeLine, writeTransientLine } from '../observability/console-sink';
 import { EmbeddingsPort } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
 import { readIndexStamp, writeIndexStamp } from './index-stamp';
@@ -14,6 +14,7 @@ import {
 } from './embedding-input';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { GraphEdge, ProcessedChunk } from '../types';
 import { WorkspaceDiscoveryService, WorkspaceFile } from '../config/workspace-discovery';
 
@@ -35,9 +36,27 @@ export class IndexerService {
    */
   public static silent = false;
 
+  /** Whether the current index run owns a repaintable terminal line. */
+  private static hasTransientProgress = false;
+
   /** Conditional logger — silent when streaming. */
   private static log(...args: unknown[]): void {
+    IndexerService.finishProgress();
     if (!IndexerService.silent) writeLine(args.map((arg) => String(arg)).join(' '));
+  }
+
+  /** Emits a concise progress summary without growing an interactive terminal. */
+  private static progress(message: string): void {
+    if (IndexerService.silent) return;
+    writeTransientLine(message);
+    IndexerService.hasTransientProgress = true;
+  }
+
+  /** Ends a repaintable line before a durable diagnostic or final result. */
+  private static finishProgress(): void {
+    if (!IndexerService.hasTransientProgress) return;
+    finishTransientLine();
+    IndexerService.hasTransientProgress = false;
   }
 
   // Optimization: Send chunks to Vertex AI in groups to respect rate limits and improve speed.
@@ -140,53 +159,135 @@ export class IndexerService {
 
     IndexerService.log(`📦 Found ${filesToProcess.length} files to process.`);
 
-    // --- CAMBIO IMPORTANTE ---
-    // Acumuladores separados
-    const pendingChunks: ProcessedChunk[] = [];
-    const pendingEdges: GraphEdge[] = []; // <--- Acumulamos el grafo aquí
-
-    // 1. PRIMERA PASADA: Registrar archivos y generar datos
-    for (const file of filesToProcess) {
-      await this.processSingleFile(file, pendingChunks, pendingEdges);
+    let indexedFiles = 0;
+    const failures: string[] = [];
+    for (let position = 0; position < filesToProcess.length; position += 1) {
+      const file = filesToProcess[position]!;
+      try {
+        await this.indexSingleFile(file, position + 1, filesToProcess.length);
+        indexedFiles += 1;
+      } catch (error: unknown) {
+        IndexerService.finishProgress();
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${file.relativePath}: ${message}`);
+        writeLine(`❌ Indexing ${file.relativePath} was not committed: ${message}`);
+      }
     }
 
-    // 2. SEGUNDA PASADA: Guardar Grafo (Ahora que todos los archivos existen en registry)
-    if (pendingEdges.length > 0) {
-      IndexerService.log(`🕸️ Saving ${pendingEdges.length} dependency relations...`);
-      this.saveGraph(pendingEdges);
+    // A file becomes fresh only inside indexSingleFile's transaction, after its
+    // vectors exist. A failed provider call therefore leaves its old hash in
+    // file_registry (or no row for a new file) and the next run retries it.
+    IndexerService.finishProgress();
+    IndexerService.log(
+      failures.length > 0
+        ? `⚠️  Indexing finished with ${failures.length} uncommitted file(s) — rerun after fixing embeddings.`
+        : '✅ Indexing Complete.',
+    );
+    writeIndexStamp(rootDir, identity, {
+      filesIndexed: indexedFiles,
+      status: failures.length > 0 ? 'partial' : 'complete',
+      diagnostic: failures.length > 0 ? failures.slice(0, 5).join('; ') : undefined,
+    });
+  }
+
+  /**
+   * Builds, embeds, and atomically commits one source file.
+   *
+   * No database write occurs before all embeddings for this file are present.
+   * This is intentionally less throughput-oriented than the former global
+   * batches: the durable unit is a source file, so interruption can never make
+   * a file registry hash claim vectors that were never saved.
+   */
+  private async indexSingleFile(file: WorkspaceFile, position: number, total: number): Promise<void> {
+    const percentage = Math.floor((position / total) * 100);
+    IndexerService.progress(`${percentage}% | ${position}/${total} | ${compactPath(file.relativePath)} | analyzing`);
+    const content = fs.readFileSync(file.absolutePath, 'utf-8');
+    const hash = crypto.createHash('md5').update(content).digest('hex');
+    const analysis = this.chunker.analyze(file.relativePath, content, hash);
+    const chunks = splitChunksForEmbedding(
+      analysis.chunks.map((chunk) => ({ ...chunk, filePath: file.relativePath } as ProcessedChunk & { filePath: string })),
+    ) as Array<ProcessedChunk & { filePath: string }>;
+    const vectors = chunks.length === 0 ? [] : await this.embedFileChunks(chunks, file.relativePath, position, total);
+    if (vectors.length !== chunks.length || vectors.some((vector) => vector.length === 0)) {
+      throw new Error(`Embedding provider returned ${vectors.length} unusable vectors for ${chunks.length} chunks.`);
     }
 
-      // 3. TERCERA PASADA: Guardar Vectores
-      // Every stored source unit is made safe for the smallest supported
-      // embedding context before any provider receives it. This is lossless:
-      // a large method becomes several persisted chunks rather than a silently
-      // truncated embedding prompt.
-      const embeddableChunks = splitChunksForEmbedding(pendingChunks);
-      if (embeddableChunks.length > pendingChunks.length) {
-        IndexerService.log(
-          `✂️  Split ${embeddableChunks.length - pendingChunks.length} oversized source fragment(s) for safe embeddings.`,
-        );
+    const identity = this.embeddings.identity;
+    const replaceFile = this.db.prepare(`
+      INSERT OR REPLACE INTO file_registry (path, hash, last_indexed, skeleton_signature)
+      VALUES (?, ?, ?, ?)
+    `);
+    const insertChunk = this.db.prepare(`
+      INSERT INTO code_chunks (id, file_path, chunk_type, content, metadata)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET file_path = excluded.file_path, chunk_type = excluded.chunk_type,
+        content = excluded.content, metadata = excluded.metadata
+    `);
+    const insertVector = this.db.prepare(`
+      INSERT INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(chunk_id, provider, model) DO UPDATE SET dimensions = excluded.dimensions, vector = excluded.vector
+    `);
+    const insertEdge = this.db.prepare(`INSERT OR IGNORE INTO dependency_graph (source, target, relation) VALUES (?, ?, ?)`);
+    const commit = this.db.transaction(() => {
+      replaceFile.run(file.relativePath, hash, Date.now(), analysis.skeleton === null ? null : JSON.stringify(analysis.skeleton));
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index]!;
+        const vector = vectors[index]!;
+        insertChunk.run(chunk.id, chunk.filePath, chunk.type, chunk.content, JSON.stringify(chunk.metadata));
+        insertVector.run(chunk.id, identity.provider, identity.model, vector.length, encodeVector(vector));
       }
-      let embedOutcome = { embeddedBatches: 0, failedBatches: 0 };
-      if (embeddableChunks.length > 0) {
-        embedOutcome = await this.embedAndSaveBatches(embeddableChunks);
+      for (const edge of analysis.dependencies) insertEdge.run(edge.sourcePath, edge.targetPath, edge.relation);
+    });
+    commit();
+    IndexerService.progress(`${percentage}% | ${position}/${total} | ${compactPath(file.relativePath)} | saved ${chunks.length} chunks`);
+  }
+
+  /** Embeds all chunks belonging to one file before that file becomes durable. */
+  private async embedFileChunks(
+    chunks: readonly ProcessedChunk[], filePath: string, filePosition: number, fileTotal: number,
+  ): Promise<number[][]> {
+    const vectors: number[][] = [];
+    const batches = Math.ceil(chunks.length / this.BATCH_SIZE);
+    for (let start = 0, batchNumber = 1; start < chunks.length; start += this.BATCH_SIZE, batchNumber += 1) {
+      const batch = chunks.slice(start, start + this.BATCH_SIZE);
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const label = `${Math.floor((filePosition / fileTotal) * 100)}% | ${filePosition}/${fileTotal} | ${compactPath(filePath)} | batch ${batchNumber}/${batches}`;
+          IndexerService.progress(`${label} | embedding ${batch.length} chunks`);
+          const startedAt = Date.now();
+          const result = await this.awaitEmbeddingWithHeartbeat(
+            this.embeddings.embedDocuments(batch.map(embeddingInputFor)),
+            label,
+          );
+          vectors.push(...result);
+          IndexerService.progress(`${label} | embedded ${formatElapsed(Date.now() - startedAt)}`);
+          lastError = undefined;
+          break;
+        } catch (error: unknown) {
+          lastError = error;
+        }
       }
+      if (lastError !== undefined) {
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+      }
+    }
+    return vectors;
+  }
 
-      // Reporting completion after failed batches is worse than the failure
-      // itself: the operator reads a green line, trusts an index that is
-      // missing content, and later wonders why semantic search cannot find it.
-      IndexerService.log(
-        embedOutcome.failedBatches > 0
-          ? '⚠️  Indexing finished with gaps — reindex once the cause is fixed.'
-          : '✅ Indexing Complete.',
-      );
-
-      // Recorded from the same value that was just printed, so the stamp on
-      // disk and the line on screen can never disagree about completeness.
-      writeIndexStamp(rootDir, identity, {
-        filesIndexed: filesToProcess.length,
-        status: embedOutcome.failedBatches > 0 ? 'partial' : 'complete',
-      });
+  /** Emits a visible heartbeat while an embedding request is pending. */
+  private async awaitEmbeddingWithHeartbeat<T>(request: Promise<T>, label: string): Promise<T> {
+    const startedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      IndexerService.progress(`${label} | working ${formatElapsed(Date.now() - startedAt)}`);
+    }, 15_000);
+    heartbeat.unref();
+    try {
+      return await request;
+    } finally {
+      clearInterval(heartbeat);
+    }
   }
 
   // ==========================================
@@ -539,4 +640,15 @@ export class IndexerService {
     runMany(edges);
   }
 
+}
+
+/** Formats elapsed indexing work without exposing implementation-specific timestamps. */
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+/** Keeps a transient line readable when a repository uses very deep paths. */
+function compactPath(filePath: string): string {
+  return filePath.length <= 34 ? filePath : `…${filePath.slice(-33)}`;
 }
