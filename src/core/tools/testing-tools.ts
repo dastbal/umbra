@@ -7,6 +7,7 @@ import * as path from "path";
 import { log } from "./utils/logger";
 import { AgentSecurityPolicy } from '../security';
 import { runtimeRoot } from '../config/runtime-root';
+import { WorkspaceDiscoveryService, WorkspaceDiscoveryError } from '../config/workspace-discovery';
 
 const execFileAsync = promisify(execFile);
 const securityPolicy = new AgentSecurityPolicy();
@@ -53,11 +54,26 @@ export const integrityCheckTool = tool(
     if (authorization.decision !== 'allow') return `❌ APPROVAL_REQUIRED: ${authorization.reason}`;
     log.tool("Running TypeScript integrity check...");
     try {
+      const projects = new WorkspaceDiscoveryService(rootDir).discover().typeScriptProjects;
+      if (projects.length === 0) {
+        return '⚠️ INTEGRITY CHECK UNSUPPORTED: no tsconfig.json was discovered under the pinned repository root.';
+      }
       const tscPath = path.join(rootDir, 'node_modules', 'typescript', 'bin', 'tsc');
-      const { stdout } = await execFileAsync(process.execPath, [tscPath, '--noEmit'], { cwd: rootDir });
+      const outputs: string[] = [];
+      for (const project of projects) {
+        const { stdout } = await execFileAsync(
+          process.execPath,
+          [tscPath, '--noEmit', '--project', project.absolutePath],
+          { cwd: rootDir },
+        );
+        outputs.push(`✅ ${project.relativePath}${stdout.length > 0 ? `\n${stdout}` : ''}`);
+      }
       log.tool("TypeScript integrity check PASSED.");
-      return `✅ INTEGRITY CHECK PASSED.\n${stdout}`;
+      return `✅ INTEGRITY CHECK PASSED.\n${outputs.join('\n')}`;
     } catch (error: any) {
+      if (error instanceof WorkspaceDiscoveryError) {
+        return `⚠️ INTEGRITY CHECK UNSUPPORTED: ${error.message}`;
+      }
       const failure = error as { stdout?: string; stderr?: string; message?: string };
       const errorMessage = failure.stdout || failure.stderr || failure.message || "Unknown error";
       log.error(`TypeScript integrity check FAILED.\n${errorMessage}`);

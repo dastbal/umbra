@@ -33,7 +33,7 @@ import { EmbeddingsIdentity } from './embeddings/embeddings.port';
  */
 
 /** Whether the index covers everything it attempted. */
-export type IndexStatus = 'complete' | 'partial';
+export type IndexStatus = 'complete' | 'partial' | 'empty';
 
 /** What is known about the index on disk. */
 export interface IndexStamp {
@@ -49,6 +49,8 @@ export interface IndexStamp {
   readonly filesIndexed: number;
   /** Whether any batch failed. */
   readonly status: IndexStatus;
+  /** Discovery failure recorded before any embedding call, when the scope is empty. */
+  readonly diagnostic?: string;
 }
 
 /** File name of the stamp inside the workspace directory. */
@@ -69,7 +71,7 @@ export const INDEX_STAMP_FILE = 'index.identity.json';
 export function writeIndexStamp(
   rootDir: string,
   identity: EmbeddingsIdentity,
-  run: { filesIndexed: number; status: IndexStatus },
+  run: { filesIndexed: number; status: IndexStatus; diagnostic?: string },
 ): void {
   const stamp: IndexStamp = {
     provider: identity.provider,
@@ -78,6 +80,7 @@ export function writeIndexStamp(
     indexedAt: Date.now(),
     filesIndexed: run.filesIndexed,
     status: run.status,
+    diagnostic: run.diagnostic,
   };
 
   try {
@@ -118,7 +121,8 @@ export function readIndexStamp(rootDir: string): IndexStamp | undefined {
       dimensions: typeof parsed.dimensions === 'number' ? parsed.dimensions : 0,
       indexedAt: parsed.indexedAt,
       filesIndexed: typeof parsed.filesIndexed === 'number' ? parsed.filesIndexed : 0,
-      status: parsed.status === 'partial' ? 'partial' : 'complete',
+      status: parsed.status === 'partial' || parsed.status === 'empty' ? parsed.status : 'complete',
+      diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic : undefined,
     };
   } catch {
     return undefined;

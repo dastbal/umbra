@@ -32,8 +32,10 @@ import * as fs from 'fs'; // Necesario para verificar si existe el archivo .ts o
  */
 export class NestChunker {
   private project: Project;
+  private readonly rootDir: string;
 
-  constructor() {
+  constructor(rootDir: string = process.cwd()) {
+    this.rootDir = path.resolve(rootDir);
     // Initialize ts-morph project.
     // We skip loading the whole tsconfig for speed, processing files individually.
     this.project = new Project({
@@ -254,7 +256,7 @@ export class NestChunker {
 
     // Necesitamos el directorio absoluto para resolver, así que combinamos CWD + sourcePath
     // Nota: Asumimos que sourcePath entra como relativa, ej: 'src/users/users.service.ts'
-    const absoluteSourcePath = path.resolve(process.cwd(), sourcePath);
+    const absoluteSourcePath = path.resolve(this.rootDir, sourcePath);
     const sourceDir = path.dirname(absoluteSourcePath);
 
     for (const imp of imports) {
@@ -270,7 +272,7 @@ export class NestChunker {
           // 4. Normalization: Convert back to relative path for the Database
           // We use split/join to force forward slashes (/) even on Windows for DB consistency.
           const relativeTarget = path
-            .relative(process.cwd(), resolvedPath)
+            .relative(this.rootDir, resolvedPath)
             .split(path.sep)
             .join('/');
 

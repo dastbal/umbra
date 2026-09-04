@@ -1,15 +1,18 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { agentPath } from '../config/agent-directory';
+import { WorkspaceDiscoveryService } from '../config/workspace-discovery';
 
-const CACHE_VERSION = 1;
-const ADR_FILE_PATTERN = /^(ADR-\d{3,})-.+\.md$/i;
+const CACHE_VERSION = 2;
+const ADR_FILE_PATTERN = /^(ADR[-_]\d{3,})[-_].+\.md$/i;
 const MAX_CONTEXT_LENGTH = 220;
 
 /** A compact, project-relative description of one Architecture Decision Record. */
 export interface AdrIndexEntry {
   /** Stable ADR identifier parsed from its filename. */
   id: string;
+  /** Module/catalog that owns this decision record. */
+  module: string;
   /** ADR path relative to the project root, normalized with `/`. */
   path: string;
   /** Title from the document H1 without its ADR identifier. */
@@ -42,10 +45,12 @@ interface AdrIndexCache {
 
 interface AdrCandidate {
   id: string;
+  module: string;
   path: string;
   absolutePath: string;
   size: number;
   mtimeMs: number;
+  curated?: Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>;
 }
 
 /**
@@ -75,8 +80,8 @@ export function buildAdrIndex(rootDir: string, refresh = false): AdrIndex {
 
   const entries = candidates.map((candidate) => ({
     ...candidate,
-    ...readAdrMetadata(candidate.absolutePath, candidate.id),
-  })).map(({ absolutePath: _absolutePath, ...entry }) => entry);
+    ...(candidate.curated ?? readAdrMetadata(candidate.absolutePath, candidate.id)),
+  })).map(({ absolutePath: _absolutePath, curated: _curated, ...entry }) => entry);
   const generatedAt = new Date().toISOString();
   const nextCache: AdrIndexCache = {
     version: CACHE_VERSION,
@@ -97,39 +102,71 @@ export function buildAdrIndex(rootDir: string, refresh = false): AdrIndex {
  * @returns A path-and-metadata list without full ADR bodies.
  */
 export function formatAdrIndex(index: AdrIndex): string {
-  if (index.entries.length === 0) {
-    return 'ADR catalog (cached): no decision records found in docs/adr.';
+  return formatAdrIndexForModule(index);
+}
+
+/** Formats the complete catalog or one requested module. */
+export function formatAdrIndexForModule(index: AdrIndex, module?: string): string {
+  const entries = module === undefined
+    ? index.entries
+    : index.entries.filter((entry) => entry.module === module);
+  if (module !== undefined && entries.length === 0) {
+    const available = [...new Set(index.entries.map((entry) => entry.module))].sort();
+    return `❌ ADR module "${module}" was not found. Available modules: ${available.join(', ') || '(none)'}.`;
+  }
+  if (entries.length === 0) {
+    return 'ADR catalog: no decision records were discovered.';
   }
 
-  const lines = index.entries.map((entry) =>
-    `- ${entry.id} — ${entry.title} [${entry.statusLabel}]; context: ${entry.context}`,
+  const lines = entries.map((entry) =>
+    `- [${entry.module}] ${entry.id} — ${entry.title} [${entry.statusLabel}]; context: ${entry.context}`,
   );
 
-  return `ADR catalog (${index.status}; ${index.entries.length} decisions):\n${lines.join('\n')}`;
+  return `ADR catalog (${index.status}; ${entries.length} decisions):\n${lines.join('\n')}`;
 }
 
 function discoverAdrs(rootDir: string): AdrCandidate[] {
-  const adrDirectory = path.join(rootDir, 'docs', 'adr');
-  if (!fs.existsSync(adrDirectory)) return [];
-
   const candidates: AdrCandidate[] = [];
-  for (const entry of fs.readdirSync(adrDirectory, { withFileTypes: true })) {
-    if (!entry.isFile()) continue;
-    const match = ADR_FILE_PATTERN.exec(entry.name);
-    if (match === null) continue;
-
-    const absolutePath = path.resolve(adrDirectory, entry.name);
-    const stat = fs.statSync(absolutePath);
-    candidates.push({
-      id: match[1].toUpperCase(),
-      path: path.join('docs', 'adr', entry.name).split(path.sep).join('/'),
-      absolutePath,
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-    });
+  for (const catalog of new WorkspaceDiscoveryService(rootDir).discoverAdrCatalogs()) {
+    const curated = catalog.readmePath === undefined ? new Map<string, Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>>() : readCuratedCatalog(path.join(rootDir, catalog.readmePath));
+    for (const entry of fs.readdirSync(catalog.absolutePath, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const match = ADR_FILE_PATTERN.exec(entry.name);
+      if (match === null) continue;
+      const absolutePath = path.resolve(catalog.absolutePath, entry.name);
+      const stat = fs.statSync(absolutePath);
+      candidates.push({
+        id: match[1].replace('_', '-').toUpperCase(),
+        module: catalog.module,
+        path: path.relative(rootDir, absolutePath).split(path.sep).join('/'),
+        absolutePath,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        curated: curated.get(entry.name),
+      });
+    }
   }
 
-  return candidates.sort((left, right) => left.id.localeCompare(right.id));
+  return candidates.sort((left, right) => left.module.localeCompare(right.module) || left.id.localeCompare(right.id));
+}
+
+/** Reads the human-maintained index row for each linked ADR, when a catalog supplies one. */
+function readCuratedCatalog(readmePath: string): Map<string, Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>> {
+  const metadata = new Map<string, Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>>();
+  for (const line of fs.readFileSync(readmePath, 'utf8').split(/\r?\n/)) {
+    if (!line.startsWith('|') || !/\]\(([^)]+)\)/.test(line)) continue;
+    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+    const link = /\]\(([^)]+)\)/.exec(cells[0] ?? '')?.[1];
+    if (link === undefined) continue;
+    const fileName = path.basename(link);
+    const title = (cells[1] ?? '').replace(/\[([^\]]+)\]\([^)]*\)/, '$1').trim();
+    const statusLabel = (cells[2] ?? '').trim();
+    const context = truncate((cells[4] ?? cells[3] ?? '').trim());
+    if (title.length > 0 && statusLabel.length > 0 && context.length > 0) {
+      metadata.set(fileName, { title, statusLabel, context });
+    }
+  }
+  return metadata;
 }
 
 function readAdrMetadata(absolutePath: string, id: string): Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'> {
@@ -196,6 +233,7 @@ function matchesCandidates(entries: AdrIndexEntry[], candidates: AdrCandidate[])
   return entries.every((entry, index) => {
     const candidate = candidates[index];
     return entry.id === candidate.id
+      && entry.module === candidate.module
       && entry.path === candidate.path
       && entry.size === candidate.size
       && entry.mtimeMs === candidate.mtimeMs;
@@ -226,6 +264,7 @@ function isEntry(value: unknown): value is AdrIndexEntry {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return typeof record.id === 'string'
+    && typeof record.module === 'string'
     && typeof record.path === 'string'
     && typeof record.title === 'string'
     && typeof record.statusLabel === 'string'

@@ -15,6 +15,7 @@ import {
 import * as path from 'path';
 import * as fs from 'fs';
 import { GraphEdge, ProcessedChunk } from '../types';
+import { WorkspaceDiscoveryService, WorkspaceFile } from '../config/workspace-discovery';
 
 /**
  * The Indexer Service (The Orchestrator) 🎼
@@ -25,7 +26,7 @@ export class IndexerService {
   private registry: FileRegistry;
   private chunker: NestChunker;
   private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
-  private static isIndexing = false;
+  private static activeIndex: Promise<void> | undefined;
 
   /**
    * When true, all progress console.log calls are suppressed.
@@ -52,7 +53,7 @@ export class IndexerService {
    */
   constructor(embeddings: EmbeddingsPort = resolveEmbeddings().port) {
     this.registry = new FileRegistry();
-    this.chunker = new NestChunker();
+    this.chunker = new NestChunker(runtimeRoot());
     this.db = AgentDB.getInstance();
     this.embeddings = embeddings;
   }
@@ -60,23 +61,32 @@ export class IndexerService {
   /**
    * Main Entry Point: Scans the project and updates the brain.
    * Scans files, checks hashes, generates embeddings, and saves the knowledge graph.
-   * * @param sourceDir - Relative path to source code (usually 'src').
    */
-  public async indexProject(sourceDir: string = 'src') {
-    if (IndexerService.isIndexing) {
-      writeLine('⏳ Indexing already in progress. Skipping duplicate request.');
-      return;
-    }
-    IndexerService.isIndexing = true;
+  public indexProject(): Promise<void> {
+    if (IndexerService.activeIndex !== undefined) return IndexerService.activeIndex;
+    const active = this.indexProjectOnce();
+    IndexerService.activeIndex = active;
+    void active.finally(() => {
+      if (IndexerService.activeIndex === active) IndexerService.activeIndex = undefined;
+    });
+    return active;
+  }
 
+  /** Performs one shared index run after callers have joined the active promise. */
+  private async indexProjectOnce(): Promise<void> {
+    const rootDir = runtimeRoot();
+    let discovery;
     try {
-      const rootDir = runtimeRoot();
-      const fullSourceDir = path.join(rootDir, sourceDir);
+      discovery = new WorkspaceDiscoveryService(rootDir).discover();
+    } catch (error: unknown) {
+      const diagnostic = error instanceof Error ? error.message : String(error);
+      writeIndexStamp(rootDir, this.embeddings.identity, { filesIndexed: 0, status: 'empty', diagnostic });
+      throw error;
+    }
 
-      IndexerService.log(`🚀 Starting Indexing Process on: ${sourceDir}`);
+      IndexerService.log(`🚀 Starting Indexing Process on: ${discovery.sourceOrigin} (${discovery.sourceFiles.length} files)`);
 
-    const files = this.getAllFiles(fullSourceDir);
-    const filesToProcess: string[] = [];
+    const filesToProcess: WorkspaceFile[] = [];
 
     // A provider switch invalidates every vector even though no file changed.
     // `FileRegistry` tracks content hashes, so on its own it would report
@@ -103,8 +113,8 @@ export class IndexerService {
     // Check changes. A provider switch is deliberately NOT treated as a
     // content change -- see `backfillMissingVectors` for why re-chunking here
     // destroyed the other provider's index.
-    for (const file of files) {
-      if (this.registry.isFileChanged(file)) {
+    for (const file of discovery.sourceFiles) {
+      if (this.registry.isFileChanged(file.relativePath, file.absolutePath)) {
         filesToProcess.push(file);
       }
     }
@@ -136,8 +146,8 @@ export class IndexerService {
     const pendingEdges: GraphEdge[] = []; // <--- Acumulamos el grafo aquí
 
     // 1. PRIMERA PASADA: Registrar archivos y generar datos
-    for (const filePath of filesToProcess) {
-      await this.processSingleFile(filePath, pendingChunks, pendingEdges);
+    for (const file of filesToProcess) {
+      await this.processSingleFile(file, pendingChunks, pendingEdges);
     }
 
     // 2. SEGUNDA PASADA: Guardar Grafo (Ahora que todos los archivos existen en registry)
@@ -177,9 +187,6 @@ export class IndexerService {
         filesIndexed: filesToProcess.length,
         status: embedOutcome.failedBatches > 0 ? 'partial' : 'complete',
       });
-    } finally {
-      IndexerService.isIndexing = false;
-    }
   }
 
   // ==========================================
@@ -322,12 +329,12 @@ export class IndexerService {
    * Updates Registry, and Accumulates Chunks.
    */
   private processSingleFile(
-    filePath: string,
+    file: WorkspaceFile,
     chunkAccumulator: ProcessedChunk[],
     edgeAccumulator: GraphEdge[], // <--- Nuevo parámetro
   ) {
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = fs.readFileSync(file.absolutePath, 'utf-8');
 
       // A. Calculate Hash
       const hash = require('crypto')
@@ -336,13 +343,13 @@ export class IndexerService {
         .digest('hex');
 
       // B. Analyze
-      const analysis = this.chunker.analyze(filePath, content, hash);
+      const analysis = this.chunker.analyze(file.relativePath, content, hash);
 
       // --- CAMBIO CLAVE: ORDEN DE OPERACIONES ---
 
       // 1. PRIMERO: Registrar el archivo en DB.
       // Si no hacemos esto, el foreign key de 'source' fallará si intentáramos guardar algo.
-      this.registry.updateFile(filePath, analysis.skeleton);
+      this.registry.updateFile(file.relativePath, analysis.skeleton, file.absolutePath);
 
       // 2. SEGUNDO: Acumular relaciones para guardarlas DESPUÉS
       // No llamamos a this.saveGraph() aquí.
@@ -351,12 +358,12 @@ export class IndexerService {
       // 3. TERCERO: Acumular Chunks
       const chunksWithFile = analysis.chunks.map((c) => ({
         ...c,
-        filePath: filePath,
+        filePath: file.relativePath,
       }));
 
       chunkAccumulator.push(...(chunksWithFile as ProcessedChunk[]));
     } catch (error) {
-      writeLine(`❌ Error processing file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+      writeLine(`❌ Error processing file ${file.relativePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -532,29 +539,4 @@ export class IndexerService {
     runMany(edges);
   }
 
-  /**
-   * Recursively gets all .ts files in a directory.
-   * Returns RELATIVE paths (e.g., 'src/users/users.service.ts') to ensure consistency in DB.
-   */
-  private getAllFiles(dir: string, fileList: string[] = []): string[] {
-    const files = fs.readdirSync(dir);
-
-    files.forEach((file) => {
-      const absolutePath = path.join(dir, file);
-      const stat = fs.statSync(absolutePath);
-
-      if (stat.isDirectory()) {
-        this.getAllFiles(absolutePath, fileList);
-      } else {
-        // Filter: Only TS files, ignore tests (.spec.ts)
-        if (file.endsWith('.ts') && !file.endsWith('.spec.ts')) {
-          // KEY FIX: Normalize to relative path before adding to list
-          const relativePath = path.relative(process.cwd(), absolutePath);
-          fileList.push(relativePath);
-        }
-      }
-    });
-
-    return fileList;
-  }
 }

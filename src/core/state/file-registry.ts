@@ -24,13 +24,13 @@ export class FileRegistry {
    * * @param filePath - Relative path of the file (e.g., 'src/users.service.ts')
    * @returns {boolean} True if the file is new or modified; False if cached.
    */
-  public isFileChanged(filePath: string): boolean {
+  public isFileChanged(filePath: string, absolutePath: string = filePath): boolean {
     // 1. If file was deleted or doesn't exist, strictly it "changed" (it's gone),
     // but for indexing purposes, we skip it or handle cleanup.
-    if (!fs.existsSync(filePath)) return true;
+    if (!fs.existsSync(absolutePath)) return true;
 
     // 2. Compute current Hash
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const content = fs.readFileSync(absolutePath, 'utf-8');
     const newHash = this.computeHash(content);
 
     // 3. Query DB
@@ -56,10 +56,10 @@ export class FileRegistry {
    * * @param filePath - The path of the file
    * @param skeleton - The JSON string representing the AST Skeleton (Class/Method signatures)
    */
-  public updateFile(filePath: string, skeleton: object | null) {
-    if (!fs.existsSync(filePath)) return;
+  public updateFile(filePath: string, skeleton: object | null, absolutePath: string = filePath) {
+    if (!fs.existsSync(absolutePath)) return;
 
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const content = fs.readFileSync(absolutePath, 'utf-8');
     const hash = this.computeHash(content);
     const now = Date.now();
     const skeletonStr = skeleton ? JSON.stringify(skeleton) : null;

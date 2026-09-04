@@ -4,12 +4,18 @@ import { RetrieverService } from "../rag/retriever";
 import { clearPendingRetrievalAlias, stageRetrievalAlias } from "../rag/retrieval-memory";
 import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
+import { readIndexStamp } from '../rag/index-stamp';
+import { runtimeRoot } from '../config/runtime-root';
 
 export const askCodebaseTool = tool(
   async ({ query, context }) => {
     clearPendingRetrievalAlias();
     log.debug(`ask_codebase called with query: "${query}"`);
     try {
+      const stamp = readIndexStamp(runtimeRoot());
+      if (stamp?.status === 'empty') {
+        return `❌ Code index unavailable: ${stamp.diagnostic ?? 'No indexable source files were discovered.'}`;
+      }
       log.tool(`Querying codebase: "${query}"`);
       const retriever = new RetrieverService();
       const report = await retriever.getContextForLLM(query, context);

@@ -764,6 +764,23 @@ all.
 | `--embeddings <vertex\|ollama>` | Provider for semantic search. Defaults to `.umbra/agent.config.json`, else `ollama` |
 | `--no-index` | Do not warm the semantic index at launch |
 
+### Monorepo discovery
+
+Umbra discovers TypeScript source from package `tsconfig.json` files and workspace
+declarations, not from a guessed root `src/`. It ignores dependency/build trees,
+indexes `.ts` and `.tsx`, and keeps all stored paths relative to the fixed
+`--root`. If a repository's declared source boundary needs an explicit override,
+commit an `umbra.json` at its root:
+
+```json
+{ "indexing": { "sources": ["apps/*/src/**/*.ts", "apps/web/features/**/*.tsx"] } }
+```
+
+`list_adrs` also discovers module catalogs such as `docs/payments/adr/`; its
+optional `module` argument filters the result. The `.umbra/` directory, including
+`memory.db`, is local root-bound cache state: it is safe to delete and should be
+gitignored. `umbra init` adds that ignore rule without rewriting existing rules.
+
 Prefer putting the provider in `.umbra/agent.config.json` rather than in
 `.mcp.json` — that file is machine-local and gitignored, so each person chooses
 without changing what the team shares:

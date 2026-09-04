@@ -100,10 +100,12 @@ function publishListAdrs(): PublishedTool {
         .boolean()
         .optional()
         .describe('Rebuild the cached catalog instead of reading it.'),
+      module: z.string().min(1).optional().describe('Optional discovered ADR module to list.'),
     },
     invoke: async (args) => {
       const refresh = args.refresh === true;
-      return toToolResult(await runTool(listAdrsTool, { refresh }));
+      const module = typeof args.module === 'string' ? args.module : undefined;
+      return toToolResult(await runTool(listAdrsTool, { refresh, module }));
     },
   };
 }

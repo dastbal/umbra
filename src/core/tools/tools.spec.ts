@@ -18,6 +18,7 @@ import { RetrieverService } from "../rag/retriever";
 import { ToolMessage } from "@langchain/core/messages";
 import { GraphInterrupt } from "@langchain/langgraph";
 import { wrapUntrustedFileContent } from "./utils/untrusted-content";
+import { WorkspaceDiscoveryService } from '../config/workspace-discovery';
 
 // Mock child_process
 const mockExecFile = jest.fn();
@@ -288,6 +289,13 @@ describe("Tools Unit Tests", () => {
   describe("integrityCheckTool", () => {
     it("should run tsc --noEmit", async () => {
       mockExecFile.mockResolvedValue({ stdout: "all good", stderr: "" });
+      jest.spyOn(WorkspaceDiscoveryService.prototype, 'discover').mockReturnValue({
+        rootDir,
+        sourceFiles: [],
+        sourceOrigin: 'tsconfig',
+        adrCatalogs: [],
+        typeScriptProjects: [{ absolutePath: path.join(rootDir, 'tsconfig.json'), relativePath: 'tsconfig.json' }],
+      });
       const res = await integrityCheckTool.invoke({});
       expect(mockExecFile).toHaveBeenCalledWith(
         process.execPath,

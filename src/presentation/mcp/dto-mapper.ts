@@ -138,7 +138,7 @@ export function withProvenance(
     model: string;
     indexedAt?: number;
     filesIndexed?: number;
-    status?: 'complete' | 'partial';
+    status?: 'complete' | 'partial' | 'empty';
     chunksSearched?: number;
     /** Set only when the active provider differs from the one that indexed. */
     queriedWith?: string;

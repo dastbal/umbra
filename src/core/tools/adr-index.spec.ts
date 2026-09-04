@@ -89,4 +89,20 @@ describe('ADR index', () => {
     expect(refreshed.status).toBe('rebuilt');
     expect(refreshed.entries[0].statusLabel).toBe('Aceptada');
   });
+
+  it('prefers metadata from a module catalog README over re-derived ADR body text', () => {
+    const catalog = path.join(rootDir, 'docs', 'payments', 'adr');
+    fs.mkdirSync(catalog, { recursive: true });
+    fs.writeFileSync(
+      path.join(catalog, 'README.md'),
+      '| ID | Title | Status | Tags | Summary |\n| --- | --- | --- | --- | --- |\n| [ADR_001](./ADR_001_SETTLEMENT.md) | Settlement workflow | Accepted | payments | Curated summary |\n',
+    );
+    fs.writeFileSync(path.join(catalog, 'ADR_001_SETTLEMENT.md'), '# ADR-001 — stale body title');
+
+    const entry = buildAdrIndex(rootDir).entries.find((candidate) => candidate.module === 'payments');
+
+    expect(entry).toEqual(expect.objectContaining({
+      id: 'ADR-001', title: 'Settlement workflow', statusLabel: 'Accepted', context: 'Curated summary',
+    }));
+  });
 });

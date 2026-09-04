@@ -119,5 +119,9 @@ function describeIndexStatus(rootDir: string): string {
     );
   }
 
+  if (stamp.status === 'empty') {
+    lines.push('', `UNAVAILABLE: ${stamp.diagnostic ?? 'No indexable source files were discovered.'}`);
+  }
+
   return lines.join('\n');
 }
