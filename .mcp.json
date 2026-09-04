@@ -2,12 +2,13 @@
   "mcpServers": {
     "umbra": {
       "type": "stdio",
-      "command": "node",
+      "command": "npx",
       "args": [
-        "${CLAUDE_PROJECT_DIR}/dist/bin/cli.js",
+        "-y",
+        "@dastbal/umbra",
         "mcp",
         "--root",
-        "${CLAUDE_PROJECT_DIR}"
+        "C:\\Users\\BLUELABEL-PROGRAMMER\\Documents\\london\\London\\nestjs-ai-agent-lib"
       ]
     }
   }
