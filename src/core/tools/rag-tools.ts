@@ -6,26 +6,15 @@ import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
 import { readIndexStamp } from '../rag/index-stamp';
 import { runtimeRoot } from '../config/runtime-root';
+import { executeCodebaseSearch } from './read-only-executions';
 
 export const askCodebaseTool = tool(
   async ({ query, context }) => {
-    clearPendingRetrievalAlias();
     log.debug(`ask_codebase called with query: "${query}"`);
-    try {
-      const stamp = readIndexStamp(runtimeRoot());
-      if (stamp?.status === 'empty') {
-        return `❌ Code index unavailable: ${stamp.diagnostic ?? 'No indexable source files were discovered.'}`;
-      }
-      log.tool(`Querying codebase: "${query}"`);
-      const retriever = new RetrieverService();
-      const report = await retriever.getContextForLLM(query, context);
-      const candidate = retriever.learningCandidate;
-      if (candidate !== undefined) stageRetrievalAlias(candidate);
-      return report;
-    } catch (error: any) {
-      log.error(`Error during codebase query "${query}": ${error.message}`);
-      return `❌ Error querying codebase: ${error.message}`;
-    }
+    log.tool(`Querying codebase: "${query}"`);
+    const { result, modelContent } = await executeCodebaseSearch({ query, context });
+    if (result.status === 'error') log.error(`Error during codebase query "${query}": ${result.diagnostics[0].message}`);
+    return [modelContent, result] as const;
   },
   {
     name: "ask_codebase",
@@ -36,6 +25,7 @@ export const askCodebaseTool = tool(
         "Optional clarification from the operator after an earlier search lacked evidence.",
       ),
     }),
+    responseFormat: 'content_and_artifact',
   },
 );
 

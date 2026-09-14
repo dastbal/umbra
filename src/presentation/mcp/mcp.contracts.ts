@@ -100,7 +100,7 @@ export interface McpToolDescriptor {
   inputSchema: McpToolSchema;
 }
 
-/** A single block of tool output. Only text is produced by this server. */
+/** A textual fallback block for clients that do not consume structured output. */
 export interface McpTextContent {
   type: 'text';
   text: string;
@@ -109,6 +109,8 @@ export interface McpTextContent {
 /** The result of `tools/call`. */
 export interface McpToolResult {
   content: McpTextContent[];
+  /** The validated public result, equivalent to the JSON text fallback. */
+  structuredContent?: Record<string, unknown>;
   /** True when the tool declined or failed. Never omitted on a failure. */
   isError?: boolean;
 }

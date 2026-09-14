@@ -1,0 +1,4 @@
+interface:
+  display_name: Umbra Tool Usage
+  short_description: Use Umbra evidence and typed results safely
+  default_prompt: Use Umbra's available read-only tools to gather grounded evidence, interpret result states, and report a verified conclusion.

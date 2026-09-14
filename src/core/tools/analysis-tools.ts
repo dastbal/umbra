@@ -8,6 +8,7 @@ import { log } from "./utils/logger";
 import { authorizeFileAction } from "./utils/authorize";
 import { wrapUntrustedFileContent } from "./utils/untrusted-content";
 import { resolveWorkspacePath } from "../security";
+import { executeDependencyGraph, formatDependencyGraphForModel } from './read-only-executions';
 
 /** The skeleton shape the chunker produces for a logic file. */
 interface LogicSkeleton {
@@ -85,24 +86,9 @@ export const analyzeCodeStructureTool = tool(
 export const queryDependencyGraphTool = tool(
   async ({ filePath, direction }) => {
     log.debug(`query_dependency_graph called for: ${filePath} [${direction}]`);
-    try {
-      const db = AgentDB.getInstance();
-      const normalizedPath = filePath.split(path.sep).join('/');
-      let stmt;
-      if (direction === "inbound") {
-        stmt = db.prepare("SELECT source, relation FROM dependency_graph WHERE target = ? OR target = ?");
-      } else {
-        stmt = db.prepare("SELECT target, relation FROM dependency_graph WHERE source = ? OR source = ?");
-      }
-      const results = stmt.all(normalizedPath, filePath) as any[];
-      if (results.length === 0) return `ℹ️ No ${direction} dependencies found for ${filePath}.`;
-      let output = `🕸️ DEPENDENCY GRAPH (${direction.toUpperCase()}) for ${filePath}:\n\n`;
-      results.forEach((row) => output += `- [${row.relation}] ${direction === "inbound" ? row.source : row.target}\n`);
-      return output;
-    } catch (error: any) {
-      log.error(`Failed to query dependency graph: ${error.message}`);
-      return `❌ Error querying dependency graph: ${error.message}`;
-    }
+    const result = executeDependencyGraph({ filePath, direction });
+    if (result.status === 'error') log.error(`Failed to query dependency graph: ${result.diagnostics[0].message}`);
+    return [formatDependencyGraphForModel(result), result] as const;
   },
   {
     name: "query_dependency_graph",
@@ -111,5 +97,6 @@ export const queryDependencyGraphTool = tool(
       filePath: z.string().describe("Relative path to the .ts file."),
       direction: z.enum(["inbound", "outbound"]),
     }),
+    responseFormat: 'content_and_artifact',
   },
 );

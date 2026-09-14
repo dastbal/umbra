@@ -1047,3 +1047,7 @@ and conflating them is what made the gate expensive.
 - An edited file and a newly added file are both serveable while the full report
   calls them unhealthy — the behaviour change, as a test rather than a claim.
 - It fails closed: an unreadable index is reported unserveable with its reason.
+
+## Amendment — 2026-09-14: MCP publishes validated results, not formatted internals
+
+ADR-032 moves the six read-only MCP capabilities behind shared application executions. MCP now declares an `outputSchema`, validates `structuredContent` before returning it, and supplies the identical object as JSON text for older clients. `blocked` and `error` set `isError`; empty, abstained, and partial results remain successful protocol calls with explicit domain state. The read-only and pinned-root constraints of this record are unchanged.

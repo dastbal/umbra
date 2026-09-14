@@ -51,7 +51,14 @@ jest.mock("../rag/indexer", () => ({
   })),
 }));
 jest.mock("../rag/retriever", () => ({
+  formatRetrievalContextForLLM: jest.fn().mockReturnValue("Mocked context"),
   RetrieverService: jest.fn().mockImplementation(() => ({
+    getContext: jest.fn().mockResolvedValue({
+      status: 'success', query: 'what is X', clarification: undefined, recoveredWithContext: false,
+      files: [{ filePath: 'src/mock.ts', imports: [], evidence: 'semantic', chunks: [{
+        type: 'function', content: 'Mocked context', metadata: { startLine: 1, endLine: 1 },
+      }] }],
+    }),
     getContextForLLM: jest.fn().mockResolvedValue("Mocked context"),
   })),
 }));
@@ -282,7 +289,7 @@ describe("Tools Unit Tests", () => {
   describe("askCodebaseTool", () => {
     it("should use RetrieverService", async () => {
       const res = await askCodebaseTool.invoke({ query: "what is X" });
-      expect(res).toBe("Mocked context");
+      expect(res).toContain("Mocked context");
     });
   });
 

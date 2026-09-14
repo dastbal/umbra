@@ -1939,6 +1939,12 @@ number from this one, where the titles happen to be unusually descriptive.
 
 ## A response-cost ceiling, because this gate only has floors
 
+> **Amendment — 2026-09-14.** ADR-032 now makes retrieval evidence, typed result
+> envelopes, and MCP JSON explicit and independently observable. No ceiling was
+> introduced: clients may consume both `structuredContent` and its text fallback,
+> so the pending measurement must count that effective duplication rather than
+> assuming the artifact or structured field is free.
+
 > Deferred 2026-09-10, branch `2.2.5`. Named as the follow-up metric in ADR-031's
 > 2026-09-10 amendment. Not built alongside the measurement that motivated it,
 > because a ceiling calibrated on one repository repeats the mistake ADR-028

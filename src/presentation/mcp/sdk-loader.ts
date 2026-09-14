@@ -59,6 +59,7 @@ export interface McpServerLike {
       title?: string;
       description?: string;
       inputSchema?: unknown;
+      outputSchema?: unknown;
       annotations?: Record<string, unknown>;
     },
     handler: (args: Record<string, unknown>) => Promise<unknown>,

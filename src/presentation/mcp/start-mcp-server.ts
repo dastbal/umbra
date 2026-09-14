@@ -12,6 +12,7 @@ import {
   inspectIndexServeability,
 } from '../../core/rag/index-integrity';
 import { readIndexStamp } from '../../core/rag/index-stamp';
+import { executeIndexStatus, formatIndexStatusForModel } from '../../core/tools/read-only-executions';
 // (the indexer's implementation is loaded lazily; see loadIndexingModules)
 import { withProvenance } from './dto-mapper';
 import { buildPromptCatalog } from './prompt-catalog';
@@ -139,7 +140,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
 
   const tools = buildToolCatalog({
     semanticSearchReadiness: () => semanticSearchReadiness(rootDir, lifecycle),
-    readIndexStatus: () => describeIndexStatus(rootDir, lifecycle),
+    readIndexStatus: () => executeIndexStatus(rootDir, lifecycle),
     decorateSemanticAnswer: (text) => decorateSemanticAnswer(rootDir, text),
     projectRootReady: () => rootDir !== undefined,
     projectRootMessage: () => lifecycle.message,
@@ -151,7 +152,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
       'background; call get_index_status before retrying ask_codebase. The repository is fixed for ' +
       'this session and cannot be changed by a tool argument.',
     tools,
-    resources: buildResourceCatalog(() => rootDir, () => describeIndexStatus(rootDir, lifecycle)),
+    resources: buildResourceCatalog(() => rootDir, () => formatIndexStatusForModel(executeIndexStatus(rootDir, lifecycle))),
     prompts: buildPromptCatalog(),
   });
 

@@ -70,13 +70,20 @@ export function buildSdkServer(sdk: McpSdk, catalogs: SdkServerCatalogs): McpSer
     server.registerTool(
       tool.name,
       {
+        title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema,
         // Declared so a client can reason about the call without trying it.
         // Every published tool reads; none of them writes, and that is a
         // property of the mode rather than of any one tool (ADR-024,
         // constraint 2).
-        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
       },
       async (args: Record<string, unknown>) => {
         // `invoke` already maps refusals and failures into `isError` results, so

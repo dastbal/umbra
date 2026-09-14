@@ -1,4 +1,20 @@
 import { McpToolResult } from './mcp.contracts';
+import { z } from 'zod';
+import { isToolResult, isToolResultError } from '../../core/tools/tool-result';
+
+/** Validates and presents one public result for both modern and text-only MCP clients. */
+export function toStructuredToolResult(schema: z.ZodType, value: unknown): McpToolResult {
+  const parsed: unknown = schema.parse(value);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('A public tool result must be an object.');
+  }
+  const structuredContent = parsed as Record<string, unknown>;
+  return {
+    content: [{ type: 'text', text: JSON.stringify(structuredContent) }],
+    structuredContent,
+    ...(isToolResult(structuredContent) && isToolResultError(structuredContent) ? { isError: true } : {}),
+  };
+}
 
 /**
  * The DTO boundary between Umbra's tools and a foreign client.

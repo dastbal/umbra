@@ -63,16 +63,36 @@ export interface RetrievalProvenance {
   readonly rankedIn: 'sql' | 'javascript';
 }
 
-interface FileContext {
-  filePath: string;
+/** One repository file selected for a grounded retrieval answer. */
+export interface RetrievalFileContext {
+  readonly filePath: string;
   evidence: RetrievalEvidence;
-  chunks: ProcessedChunk[];
-  imports: string[];
+  readonly chunks: ProcessedChunk[];
+  readonly imports: string[];
   // `null`, not just absent: the registry holds rows whose skeleton column is
   // SQLite NULL, and `getFileSkeleton` passes that through. Declared as `string`
   // alone, it read as a lie the old truthiness check happened to survive.
-  skeleton?: string | null; // <--- ADDED
+  readonly skeleton?: string | null;
 }
+
+/** Structured retrieval result produced before any presentation formatting. */
+export type RetrievalContextResult =
+  | {
+      readonly status: 'success';
+      readonly query: string;
+      readonly clarification?: string;
+      readonly recoveredWithContext: boolean;
+      readonly files: readonly RetrievalFileContext[];
+      readonly provenance?: RetrievalProvenance;
+    }
+  | {
+      readonly status: 'abstained';
+      readonly query: string;
+      readonly clarification?: string;
+      readonly reason: 'unknown_terms' | 'ungrounded';
+      readonly unknownTerms: readonly string[];
+      readonly provenance?: RetrievalProvenance;
+    };
 
 /**
  * Chooses the strongest evidence label for a file that owns several chunks.
@@ -104,6 +124,39 @@ export function noGroundedEvidenceReport(query: string): string {
     '',
     '⚠️ **NO GROUNDED EVIDENCE:** Semantic neighbours alone did not have independent lexical support. Refine the query with a symbol, path, or domain term.',
   ].join('\n');
+}
+
+/** Formats structured retrieval evidence for the model's tool message. */
+export function formatRetrievalContextForLLM(result: RetrievalContextResult): string {
+  if (result.status === 'abstained') {
+    if (result.reason === 'unknown_terms') return unknownTermReport(result.query, [...result.unknownTerms]);
+    return noGroundedEvidenceReport(result.query);
+  }
+
+  let output = `🔎 **RAG ANALYSIS REPORT**\n`;
+  output += `Query: "${result.query}"\n`;
+  output += `Found ${result.files.length} relevant files.\n\n`;
+
+  for (const fileCtx of result.files) {
+    output += `=================================================================\n`;
+    output += `📂 **FILE:** ${fileCtx.filePath}\n`;
+    output += `🔎 **MATCH:** ${fileCtx.evidence}\n`;
+    if (fileCtx.imports.length > 0) {
+      output += `🔗 **DEPENDENCIES (Imports):**\n`;
+      fileCtx.imports.slice(0, 5).forEach((dependency) => (output += `   - ${dependency}\n`));
+      if (fileCtx.imports.length > 5) output += `   - (...and ${fileCtx.imports.length - 5} more)\n`;
+    }
+    const skeleton = renderSkeletonForContext(fileCtx.skeleton);
+    if (skeleton !== undefined) output += `🏗️ **FILE SKELETON (MAP):**\n${skeleton}\n\n`;
+    output += `📝 **CODE SNIPPETS:**\n`;
+    for (const chunk of fileCtx.chunks) {
+      output += `   --- [${chunk.metadata.methodName || 'Class Structure'}] ---\n`;
+      output += `${chunk.content.trim()}\n\n`;
+    }
+    output += `💡 **AGENT HINT:** To edit this file or see full imports, run: read_file("${fileCtx.filePath}")\n`;
+    output += `=================================================================\n\n`;
+  }
+  return output;
 }
 
 export class RetrieverService {
@@ -510,7 +563,7 @@ export class RetrieverService {
    * 2. The file's dependencies (Graph Search).
    * 3. Explicit File Paths to encourage using 'read_file'.
    */
-  public async getContextForLLM(query: string, context?: string): Promise<string> {
+  public async getContext(query: string, context?: string): Promise<RetrievalContextResult> {
     this.lastLearningCandidate = undefined;
 
     // Before embedding anything: does the question name something this
@@ -553,7 +606,15 @@ export class RetrieverService {
               taught,
             );
 
-      if (stillUnknown.length > 0) return unknownTermReport(query, stillUnknown);
+      if (stillUnknown.length > 0) {
+        return {
+          status: 'abstained',
+          query,
+          ...(clarification === undefined ? {} : { clarification }),
+          reason: 'unknown_terms',
+          unknownTerms: stillUnknown,
+        };
+      }
     }
 
     let results = await this.query(query, 4);
@@ -568,7 +629,14 @@ export class RetrieverService {
     }
 
     if (!hasGroundedEvidence(results)) {
-      return noGroundedEvidenceReport(query);
+      return {
+        status: 'abstained',
+        query,
+        ...(clarified === undefined ? {} : { clarification: clarified }),
+        reason: 'ungrounded',
+        unknownTerms: [],
+        ...(this.lastProvenance === undefined ? {} : { provenance: this.lastProvenance }),
+      };
     }
 
     if (recoveredWithContext && clarified !== undefined) {
@@ -582,7 +650,7 @@ export class RetrieverService {
     }
 
     // Group chunks by File to provide a structured view
-    const filesMap = new Map<string, FileContext>();
+    const filesMap = new Map<string, RetrievalFileContext>();
 
     for (const res of results) {
       const path = res.chunk.filePath || 'unknown';
@@ -605,46 +673,18 @@ export class RetrieverService {
       filesMap.get(path)?.chunks.push(res.chunk);
     }
 
-    // Build the formatted string
-    let output = `🔎 **RAG ANALYSIS REPORT**\n`;
-    output += `Query: "${query}"\n`;
-    output += `Found ${filesMap.size} relevant files.\n\n`;
+    return {
+      status: 'success',
+      query,
+      ...(clarified === undefined ? {} : { clarification: clarified }),
+      recoveredWithContext,
+      files: [...filesMap.values()],
+      ...(this.lastProvenance === undefined ? {} : { provenance: this.lastProvenance }),
+    };
+  }
 
-    filesMap.forEach((fileCtx) => {
-      output += `=================================================================\n`;
-      output += `📂 **FILE:** ${fileCtx.filePath}\n`;
-      output += `🔎 **MATCH:** ${fileCtx.evidence}\n`;
-
-      if (fileCtx.imports.length > 0) {
-        output += `🔗 **DEPENDENCIES (Imports):**\n`;
-        // Show top 5 imports to give context on DTOs/Entities used
-        fileCtx.imports
-          .slice(0, 5)
-          .forEach((imp) => (output += `   - ${imp}\n`));
-        if (fileCtx.imports.length > 5)
-          output += `   - (...and ${fileCtx.imports.length - 5} more)\n`;
-      }
-
-      // Rendered rather than interpolated raw: the column holds JSON, and
-      // handing the model the stored envelope cost 43% of this block's tokens
-      // for no information. See `skeleton-render.ts` for what is dropped and why
-      // — the named bindings it omits are already in the snippet below.
-      const skeleton = renderSkeletonForContext(fileCtx.skeleton);
-      if (skeleton !== undefined) {
-        output += `🏗️ **FILE SKELETON (MAP):**\n${skeleton}\n\n`;
-      }
-
-      output += `📝 **CODE SNIPPETS:**\n`;
-      fileCtx.chunks.forEach((chunk) => {
-        output += `   --- [${chunk.metadata.methodName || 'Class Structure'}] ---\n`;
-        output += `${chunk.content.trim()}\n\n`;
-      });
-
-      output += `💡 **AGENT HINT:** To edit this file or see full imports, run: read_file("${fileCtx.filePath}")\n`;
-      output += `=================================================================\n\n`;
-    });
-    // console.log(output);
-
-    return output;
+  /** Generates the legacy model-facing report from the structured result. */
+  public async getContextForLLM(query: string, context?: string): Promise<string> {
+    return formatRetrievalContextForLLM(await this.getContext(query, context));
   }
 }

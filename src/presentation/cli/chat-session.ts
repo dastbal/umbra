@@ -33,7 +33,7 @@ import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegat
 import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
 import { describeErrorOrigin } from './error-origin';
 import { readVisibleText } from '../../core/llm/visible-text';
-import { diagnoseOffline } from './offline-diagnosis';
+import { diagnoseOffline } from './offline-diagnosis'; import { toolExecutionError } from './tool-event-result';
 import {
   approvePendingRetrievalAlias,
   hasPendingRetrievalAlias,
@@ -412,24 +412,24 @@ export class ChatSession {
           // ── Tool call started ────────────────────────────────────────────
           case 'on_tool_start': {
             hasToolActivity = true;
-            const toolName = event.name ?? 'unknown';
-            const toolInput = event.data?.input ?? {};
-            toolStartTimes.set(toolName, Date.now());
+            const toolName = event.name ?? 'unknown'; const toolInput = event.data?.input ?? {};
+            const runId = event.run_id ?? toolName; toolStartTimes.set(runId, Date.now());
             audit.recordToolStart(toolName);
             recordToolCall(spend);
             this.reportSpend(spend);
-            this.renderer.showToolStart(toolName, toolInput);
+            this.renderer.showToolStart(toolName, toolInput, event.run_id);
             break;
           }
 
           // ── Tool call finished ───────────────────────────────────────────
           case 'on_tool_end': {
             const toolName = event.name ?? 'unknown';
-            this.renderer.showToolEnd(toolName);
-            toolStartTimes.delete(toolName);
+            this.renderer.showToolEnd(toolName, event.data?.output?.artifact, event.run_id);
+            toolStartTimes.delete(event.run_id ?? toolName);
             audit.recordToolEnd(toolName);
             break;
           }
+          case 'on_tool_error': { const toolName = event.name ?? 'unknown'; this.renderer.showToolEnd(toolName, toolExecutionError(event.data?.error), event.run_id); toolStartTimes.delete(event.run_id ?? toolName); audit.recordToolEnd(toolName); break; }
 
           // ── Agent interrupted (HITL) ─────────────────────────────────────
           case 'on_chain_end': {
@@ -773,10 +773,10 @@ export class ChatSession {
         const token = readVisibleText(chunk?.content);
         if (token) this.renderer.streamToken(token);
       } else if (event.event === 'on_tool_start') {
-        this.renderer.showToolStart(event.name, event.data?.input ?? {});
+        this.renderer.showToolStart(event.name, event.data?.input ?? {}, event.run_id);
       } else if (event.event === 'on_tool_end') {
-        this.renderer.showToolEnd(event.name);
-      }
+        this.renderer.showToolEnd(event.name, event.data?.output?.artifact, event.run_id);
+      } else if (event.event === 'on_tool_error') { this.renderer.showToolEnd(event.name, toolExecutionError(event.data?.error), event.run_id); }
     }
   }
 
