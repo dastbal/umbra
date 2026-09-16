@@ -3,6 +3,7 @@ import { NestChunker } from '../tools/ast/chunker';
 import { analyzeNestGraph } from '../tools/ast/nest-graph';
 import { backfillNestGraph, replaceNestGraphForFile } from './nest-graph-store';
 import { backfillDependencyGraph } from './dependency-graph-backfill';
+import { replaceDependencyGraphForFile } from './dependency-graph-store';
 import { AgentDB } from '../state/db';
 import { runtimeRoot } from '../config/runtime-root';
 import {
@@ -375,7 +376,6 @@ export class IndexerService {
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(chunk_id, provider, model) DO UPDATE SET dimensions = excluded.dimensions, vector = excluded.vector
     `);
-    const insertEdge = this.db.prepare(`INSERT OR IGNORE INTO dependency_graph (source, target, relation) VALUES (?, ?, ?)`);
     const commit = this.db.transaction(() => {
       replaceFile.run(file.relativePath, hash, Date.now(), analysis.skeleton === null ? null : JSON.stringify(analysis.skeleton));
       for (let index = 0; index < chunks.length; index += 1) {
@@ -384,7 +384,7 @@ export class IndexerService {
         insertChunk.run(chunk.id, chunk.filePath, chunk.type, chunk.content, JSON.stringify(chunk.metadata));
         insertVector.run(chunk.id, identity.provider, identity.model, vector.length, encodeVector(vector));
       }
-      for (const edge of analysis.dependencies) insertEdge.run(edge.sourcePath, edge.targetPath, edge.relation);
+      replaceDependencyGraphForFile(this.db, file.relativePath, analysis.dependencies, hash);
 
       // Nest wiring is replaced inside the same transaction as the chunks it
       // belongs to. Committed separately it could be half-applied, and a

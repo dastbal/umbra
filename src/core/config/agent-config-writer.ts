@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { agentPath } from './agent-directory';
-import { parseAgentConfig } from './agent-config';
+import { parseAgentConfig, RetrievalPolicyId } from './agent-config';
 import type { EmbeddingsProvider } from '../rag/embeddings/embeddings.port';
 
 /** Outcome of a local agent-config update. */
@@ -53,6 +53,21 @@ export function setConfiguredEmbeddingsProvider(
   }
 }
 
+/**
+ * Persists an explicit GraphRAG policy without materialising unrelated
+ * configuration defaults.
+ *
+ * @param rootDir - Project root whose local Umbra policy is updated.
+ * @param policy - Approved policy to save, or undefined to restore the default.
+ * @returns The local write outcome.
+ */
+export function setConfiguredRetrievalPolicy(
+  rootDir: string,
+  policy: RetrievalPolicyId | undefined,
+): AgentConfigWriteResult {
+  return updateRagConfiguration(rootDir, policy === undefined ? {} : { retrievalPolicy: policy });
+}
+
 /** Reads an optional raw JSON object without introducing configuration defaults. */
 function readRawObject(configPath: string): Record<string, unknown> {
   if (!fs.existsSync(configPath)) return {};
@@ -61,6 +76,36 @@ function readRawObject(configPath: string): Record<string, unknown> {
     throw new Error('Agent configuration must be a JSON object.');
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Applies one validated partial RAG update atomically.
+ *
+ * @param rootDir - Project root whose local policy is changed.
+ * @param update - Values to merge into the existing `rag` object.
+ * @returns The local write outcome.
+ */
+function updateRagConfiguration(
+  rootDir: string,
+  update: Record<string, unknown>,
+): AgentConfigWriteResult {
+  const configPath = agentPath(rootDir, 'agent.config.json');
+  try {
+    const raw = readRawObject(configPath);
+    const rag = asRecord(raw.rag);
+    const next = { ...raw, rag: { ...rag, ...update } };
+    if (update.retrievalPolicy === undefined) delete (next.rag as Record<string, unknown>).retrievalPolicy;
+    parseAgentConfig(next);
+
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const temporary = `${configPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    fs.renameSync(temporary, configPath);
+    return { path: configPath, saved: true };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { path: configPath, saved: false, reason: message };
+  }
 }
 
 /** Narrows JSON values to records, rejecting arrays and null. */

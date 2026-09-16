@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { agentPath } from './agent-directory';
-import { setConfiguredEmbeddingsProvider } from './agent-config-writer';
+import { setConfiguredEmbeddingsProvider, setConfiguredRetrievalPolicy } from './agent-config-writer';
 
 describe('setConfiguredEmbeddingsProvider', () => {
   let rootDir: string;
@@ -37,5 +37,18 @@ describe('setConfiguredEmbeddingsProvider', () => {
 
     expect(result.saved).toBe(false);
     expect(fs.readFileSync(configPath, 'utf8')).toBe('{ invalid json');
+  });
+
+  it('persists an approved retrieval policy without changing embeddings', () => {
+    const configPath = agentPath(rootDir, 'agent.config.json');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, '{ "rag": { "embeddings": "ollama" } }');
+
+    const result = setConfiguredRetrievalPolicy(rootDir, 'combined-v1');
+
+    expect(result).toEqual({ path: configPath, saved: true });
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf8'))).toEqual({
+      rag: { embeddings: 'ollama', retrievalPolicy: 'combined-v1' },
+    });
   });
 });

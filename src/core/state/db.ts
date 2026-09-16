@@ -17,6 +17,7 @@ import {
 import { ensureLexicalIndex } from '../rag/lexical-index';
 import { ensureIndexLeaseSchema } from '../rag/index-run-lease';
 import { ensureNestGraphSchema } from '../rag/nest-graph-store';
+import { ensureDependencyGraphSchema } from '../rag/dependency-graph-store';
 import { ensureRetrievalMemory } from '../rag/retrieval-memory';
 import { enrichExistingTSDoc } from '../rag/tsdoc-enrichment';
 
@@ -152,6 +153,7 @@ export class AgentDB {
     db.prepare(
       `CREATE INDEX IF NOT EXISTS idx_graph_source ON dependency_graph(source)`,
     ).run();
+    ensureDependencyGraphSchema(db);
     db.prepare(
       `CREATE INDEX IF NOT EXISTS idx_chunks_file ON code_chunks(file_path)`,
     ).run();

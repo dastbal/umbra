@@ -66,6 +66,7 @@ import {
   completeSlashCommand,
   findSlashCommand,
   looksLikeSlashCommand,
+  parseSlashCommand,
   suggestSlashCommands,
   type SlashCommand,
 } from './slash-commands';
@@ -86,6 +87,12 @@ import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
 import { flushPendingTraces } from '../../core/observability';
 import { getAgentKernelTelemetry } from '../../core/agent/agent-kernel';
+import { GraphRagService } from '../../core/rag/graphrag';
+import {
+  renderDetectiveReplay,
+  renderDetectiveTrace,
+  renderPolicyPromotion,
+} from './detective-renderer';
 
 /**
  * Resolves the reasoning level the given model will actually run at.
@@ -277,6 +284,7 @@ export class ChatSession {
       learnSearch:       () => this.handleSearchLearning(),
       hasPendingSearchLearning: () => hasPendingRetrievalAlias(),
       isMentorActive:    () => this.mentorModeActive,
+      runDetective:      (input) => this.handleDetective(input),
     });
     this.graphConfig = {
       configurable: { thread_id: this.config.threadId },
@@ -804,9 +812,16 @@ export class ChatSession {
       // ── Slash command dispatcher ────────────────────────────────────────────
       // Every command comes from the one registry, so a new entry there is
       // reachable here with no change.
-      const command = findSlashCommand(this.slashCommands, trimmed);
+      const parsedCommand = parseSlashCommand(trimmed);
+      const command = parsedCommand === undefined
+        ? undefined
+        : findSlashCommand(this.slashCommands, parsedCommand.name);
       if (command) {
-        await command.run();
+        if (parsedCommand !== undefined && parsedCommand.input.length > 0 && command.acceptsInput !== true) {
+          process.stdout.write(colors.warning(`\n  ⚠️  ${command.name} does not accept trailing input.\n\n`));
+          continue;
+        }
+        await command.run(parsedCommand?.input);
         continue;
       }
 
@@ -1253,6 +1268,47 @@ export class ChatSession {
     }
 
     process.stdout.write(colors.accent('\n  ✅ Search wording saved locally for this project.\n\n'));
+  }
+
+  /**
+   * Runs local GraphRAG diagnostics without asking the configured chat model.
+   *
+   * @param input - `/detective` subcommand and question supplied by the operator.
+   * @returns Nothing after the local diagnostic is rendered.
+   */
+  private async handleDetective(input: string): Promise<void> {
+    const trimmed = input.trim();
+    if (!trimmed) {
+      process.stdout.write(colors.muted(
+        '\n  Usage: /detective <question> | deep <question> | replay <trace-id> | promote <policy>\n\n',
+      ));
+      return;
+    }
+
+    const [action, ...rest] = trimmed.split(/\s+/);
+    const remainder = rest.join(' ').trim();
+    const detective = new GraphRagService(undefined, undefined, this.config.auditRootDir);
+    try {
+      if (action === 'replay') {
+        if (!remainder) throw new Error('Usage: /detective replay <trace-id>');
+        process.stdout.write(renderDetectiveReplay(await detective.replay(remainder)));
+        return;
+      }
+      if (action === 'promote') {
+        if (!remainder) throw new Error('Usage: /detective promote <policy>');
+        process.stdout.write(renderPolicyPromotion(detective.promote(remainder)));
+        return;
+      }
+      if (action === 'deep') {
+        if (!remainder) throw new Error('Usage: /detective deep <question>');
+        process.stdout.write(renderDetectiveTrace(await detective.investigate(remainder, 'deep')));
+        return;
+      }
+      process.stdout.write(renderDetectiveTrace(await detective.investigate(trimmed, 'standard')));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stdout.write(colors.danger(`\n  ✗ Detective failed: ${message}\n\n`));
+    }
   }
 
   /**

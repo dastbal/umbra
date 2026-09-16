@@ -69,6 +69,33 @@ describe('MCP ask_codebase catalog', () => {
   });
 });
 
+describe('MCP GraphRAG Detective catalog', () => {
+  it('publishes a deterministic, opt-in GraphRAG investigation without a promotion input', () => {
+    const tool = buildToolCatalog({
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      readIndexStatus: () => indexStatus(),
+    }).find((candidate) => candidate.name === 'investigate_graphrag');
+
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.query).toBeDefined();
+    expect(tool?.inputSchema.mode).toBeDefined();
+    expect(tool?.inputSchema.policy).toBeUndefined();
+    expect(tool?.description).toContain('does not persist a Detective trace');
+  });
+
+  it('returns a typed retryable refusal while semantic retrieval is unavailable', async () => {
+    const tool = buildToolCatalog({
+      semanticSearchReadiness: () => ({ ready: false, message: 'indexing 23% (12/52 files)' }),
+      readIndexStatus: () => indexStatus('indexing'),
+    }).find((candidate) => candidate.name === 'investigate_graphrag');
+
+    await expect(tool?.invoke({ query: 'where is AGENT_TOKEN injected?' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { status: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', retryable: true },
+    });
+  });
+});
+
 describe('MCP query_nest_graph', () => {
   const catalog = () =>
     buildToolCatalog({

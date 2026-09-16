@@ -5,6 +5,8 @@ CLI usage, configuration, security behavior, and migration notes.
 
 - [Architecture](ARCHITECTURE.md) explains the active Deep-agent design and its
   historical context.
+- [GraphRAG Detective](graphrag-detective.md) explains the evolving local
+  retrieval laboratory, its bounded graph traversal, and policy promotion.
 - [Architecture decisions](adr/) record durable technical decisions.
 - [Deferred work](deferred-work.md) records work that was scoped and
   deliberately not implemented, including any open defect found while scoping

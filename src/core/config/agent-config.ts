@@ -3,6 +3,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { agentPath } from './agent-directory';
 
+/** Stable retrieval policies that an operator may explicitly approve locally. */
+export const retrievalPolicySchema = z.enum([
+  'balanced-v1',
+  'hybrid-v1',
+  'dependency-1-v1',
+  'dependency-2-v1',
+  'nest-v1',
+  'combined-v1',
+]);
+
+/** One code-defined GraphRAG policy identifier. */
+export type RetrievalPolicyId = z.infer<typeof retrievalPolicySchema>;
+
 const roleModelsSchema = z
   .object({
     supervisor: z.string().trim().min(1).default('gemini-2.5-flash-lite'),
@@ -85,6 +98,11 @@ const ragSchema = z
     embeddings: z.enum(['vertex', 'ollama']).optional(),
     /** Optional model override for the selected provider. */
     embeddingsModel: z.string().trim().min(1).optional(),
+    /**
+     * Operator-approved retrieval policy. Absent deliberately means the
+     * shipped balanced default rather than a materialised local choice.
+     */
+    retrievalPolicy: retrievalPolicySchema.optional(),
   })
   .strict()
   // The object defaults so `config.rag` always exists; its fields do not, so an

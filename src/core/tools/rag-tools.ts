@@ -18,7 +18,7 @@ export const askCodebaseTool = tool(
   },
   {
     name: "ask_codebase",
-    description: "Hybrid code search with dependency context. After an earlier abstention, send the original query plus context once; only repository evidence is returned.",
+    description: "Deterministic hybrid and bounded-graph code search. After an earlier abstention, send the original query plus context once; only repository evidence is returned.",
     schema: z.object({
       query: z.string().describe("Query describing logic or functionality."),
       context: z.string().max(2000).optional().describe(

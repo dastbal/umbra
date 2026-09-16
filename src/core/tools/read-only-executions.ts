@@ -9,10 +9,12 @@ import { WorkspaceDiscoveryError, WorkspaceDiscoveryService } from '../config/wo
 import { readIndexStamp } from '../rag/index-stamp';
 import { inspectIndexIntegrity } from '../rag/index-integrity';
 import {
-  formatRetrievalContextForLLM,
-  RetrieverService,
-  RetrievalContextResult,
-} from '../rag/retriever';
+  formatGraphRagContextForLLM,
+  DetectiveTrace,
+  GraphRagSearchResult,
+  GraphRagService,
+  GraphRagStrategy,
+} from '../rag/graphrag';
 import {
   findBindingsForModule,
   findBindingsForToken,
@@ -93,15 +95,43 @@ const retrievalChunkSchema = z.object({
   type: z.string(), content: z.string(), startLine: z.number().int(), endLine: z.number().int(),
   className: z.string().optional(), methodName: z.string().optional(),
 });
+const graphReadinessSchema = z.object({
+  ready: z.boolean(), reason: z.string(), pendingFiles: z.number().int().nonnegative(),
+});
+const retrievalRecommendationSchema = z.object({
+  state: z.enum(['sufficient', 'follow-up', 'clarify']),
+  tool: z.enum(['query_dependency_graph', 'query_nest_graph']).optional(),
+  subject: z.string().optional(),
+  reason: z.string(),
+});
+const retrievalStrategySchema = z.object({
+  policy: z.string(), plan: z.enum(['hybrid', 'dependency-1', 'dependency-2', 'nest', 'combined']),
+  depthReached: z.number().int().nonnegative(), nodesVisited: z.number().int().nonnegative(),
+  relationsInspected: z.number().int().nonnegative(), discardedBranches: z.number().int().nonnegative(),
+  stopReason: z.enum(['not-applicable', 'abstained', 'no-seeds', 'marginal-evidence', 'depth-budget', 'relation-budget', 'node-budget']),
+  marginalEvidence: z.array(z.object({
+    depth: z.number().int().positive(), frontierNodes: z.number().int().nonnegative(),
+    relationsInspected: z.number().int().nonnegative(), novelEvidence: z.number().int().nonnegative(),
+    discardedBranches: z.number().int().nonnegative(),
+  })),
+  estimatedTokens: z.number().int().nonnegative(), elapsedMs: z.number().nonnegative(),
+  readiness: z.object({ dependency: graphReadinessSchema, nest: graphReadinessSchema }),
+  recommendation: retrievalRecommendationSchema,
+});
 export const codebaseSearchDataSchema = z.object({
   query: z.string(), clarification: z.string().optional(), recoveredWithContext: z.boolean(),
   abstentionReason: z.enum(['unknown_terms', 'ungrounded']).optional(),
   unknownTerms: z.array(z.string()),
   files: z.array(z.object({
-    path: z.string(), evidence: z.enum(['semantic', 'lexical', 'hybrid']),
+    path: z.string(), origin: z.enum(['seed', 'graph']), evidence: z.enum(['semantic', 'lexical', 'hybrid', 'graph']),
+    score: z.number(), relations: z.array(z.string()),
     imports: z.array(z.string()), chunks: z.array(retrievalChunkSchema),
   })),
   provenance: retrievalProvenanceSchema.optional(),
+  // Absent only when the semantic readiness gate blocks execution before the
+  // deterministic planner can observe an index. Successful and abstained
+  // searches always carry this additive strategy projection.
+  retrieval: retrievalStrategySchema.optional(),
 });
 export const codebaseSearchResultSchema = createToolResultSchema(
   z.enum(['CODEBASE_MATCHES_FOUND', 'CODEBASE_NO_EVIDENCE', 'CODEBASE_INDEX_UNAVAILABLE', 'CODEBASE_SEARCH_ERROR']),
@@ -109,6 +139,47 @@ export const codebaseSearchResultSchema = createToolResultSchema(
 );
 export type CodebaseSearchData = z.infer<typeof codebaseSearchDataSchema>;
 export type CodebaseSearchResult = ToolResult<z.infer<typeof codebaseSearchResultSchema>['code'], CodebaseSearchData>;
+
+const graphRagBudgetSchema = z.object({
+  maxSeeds: z.number().int().nonnegative(), maxDepth: z.number().int().nonnegative(),
+  maxNodes: z.number().int().nonnegative(), maxRelations: z.number().int().nonnegative(),
+  maxChunks: z.number().int().nonnegative(), maxEstimatedTokens: z.number().int().nonnegative(),
+});
+const graphRagBranchSchema = z.object({
+  from: z.string(), to: z.string(), relation: z.string(), depth: z.number().int().positive(),
+  outcome: z.enum(['accepted', 'duplicate', 'budget', 'no-chunks']),
+});
+const graphRagQualitySchema = z.object({
+  corpusCaseId: z.string().optional(), sampleSize: z.union([z.literal(0), z.literal(1)]),
+  hitAt1: z.number().optional(), mrr: z.number().optional(), falseAbstention: z.boolean().optional(),
+  correctAbstention: z.boolean().optional(),
+});
+const graphRagPlanTraceSchema = z.object({
+  plan: z.enum(['hybrid', 'dependency-1', 'dependency-2', 'nest', 'combined']), eligible: z.boolean(),
+  reason: z.string().optional(), selectedPaths: z.array(z.string()),
+  selectedEvidence: z.array(z.object({
+    path: z.string(), origin: z.enum(['seed', 'graph']), score: z.number(), relations: z.array(z.string()),
+  })),
+  branches: z.array(graphRagBranchSchema), elapsedMs: z.number().nonnegative(),
+  metrics: retrievalStrategySchema.pick({
+    depthReached: true, nodesVisited: true, relationsInspected: true, stopReason: true,
+    marginalEvidence: true, discardedBranches: true, estimatedTokens: true,
+  }),
+  quality: graphRagQualitySchema, recommendation: retrievalRecommendationSchema,
+});
+export const graphRagInvestigationDataSchema = z.object({
+  runId: z.string(), persisted: z.literal(false), mode: z.enum(['standard', 'deep']),
+  indexFingerprint: z.string(), budget: graphRagBudgetSchema, plans: z.array(graphRagPlanTraceSchema),
+});
+export const graphRagInvestigationResultSchema = createToolResultSchema(
+  z.enum(['GRAPHRAG_INVESTIGATION_COMPLETE', 'GRAPHRAG_INVESTIGATION_ERROR']),
+  graphRagInvestigationDataSchema,
+);
+export type GraphRagInvestigationData = z.infer<typeof graphRagInvestigationDataSchema>;
+export type GraphRagInvestigationResult = ToolResult<
+  z.infer<typeof graphRagInvestigationResultSchema>['code'],
+  GraphRagInvestigationData
+>;
 
 const indexPhaseSchema = z.enum(['awaiting-root', 'starting', 'probing', 'indexing', 'ready', 'unavailable', 'failed', 'skipped']);
 export const indexStatusDataSchema = z.object({
@@ -376,7 +447,7 @@ export async function executeCodebaseSearch(input: {
 }): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
   const emptyData: CodebaseSearchData = {
     query: input.query, ...(input.context === undefined ? {} : { clarification: input.context }),
-    recoveredWithContext: false, unknownTerms: [], files: [],
+    recoveredWithContext: false, unknownTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
   };
   try {
     const stamp = readIndexStamp(runtimeRoot());
@@ -389,9 +460,9 @@ export async function executeCodebaseSearch(input: {
       return { result, modelContent: `Code index unavailable: ${message}` };
     }
     clearPendingRetrievalAlias();
-    const retriever = new RetrieverService();
-    const contextResult = await retriever.getContext(input.query, input.context);
-    const candidate = retriever.learningCandidate;
+    const graphRag = new GraphRagService();
+    const contextResult = await graphRag.search(input.query, input.context);
+    const candidate = contextResult.status === 'success' ? contextResult.learningCandidate : undefined;
     if (candidate !== undefined) stageRetrievalAlias(candidate);
     const data = toCodebaseSearchData(contextResult);
     if (contextResult.status === 'abstained') {
@@ -401,7 +472,7 @@ export async function executeCodebaseSearch(input: {
           : 'The nearest results lacked independent grounding evidence.',
         data, evidence: [], diagnostics: [], truncated: false, retryable: input.context === undefined,
         nextAction: input.context === undefined ? 'Clarify once with a repository symbol, path, or domain term.' : undefined };
-      return { result, modelContent: formatRetrievalContextForLLM(contextResult) };
+      return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
     }
     const evidence = contextResult.files.flatMap((file) => file.chunks.map((chunk) => ({
       path: file.filePath, startLine: chunk.metadata.startLine, endLine: chunk.metadata.endLine,
@@ -409,8 +480,12 @@ export async function executeCodebaseSearch(input: {
     })));
     const result: CodebaseSearchResult = { schemaVersion: 1, status: 'success', code: 'CODEBASE_MATCHES_FOUND',
       summary: `${contextResult.files.length} relevant file${contextResult.files.length === 1 ? '' : 's'} found.`,
-      data, evidence, diagnostics: [], truncated: false, retryable: false };
-    return { result, modelContent: formatRetrievalContextForLLM(contextResult) };
+      data, evidence, diagnostics: [], truncated: false, retryable: false,
+      ...(recommendationNextAction(contextResult.strategy.recommendation) === undefined ? {} : {
+        nextAction: recommendationNextAction(contextResult.strategy.recommendation),
+      }),
+    };
+    return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     const result: CodebaseSearchResult = { schemaVersion: 1, status: 'error', code: 'CODEBASE_SEARCH_ERROR',
@@ -421,18 +496,127 @@ export async function executeCodebaseSearch(input: {
   }
 }
 
-function toCodebaseSearchData(result: RetrievalContextResult): CodebaseSearchData {
+/**
+ * Compares bounded GraphRAG plans for an MCP caller without persisting its question.
+ *
+ * @param input - Natural-language query and optional expanded local budget.
+ * @returns Source-free deterministic plan comparison; never a promotion or a source write.
+ */
+export async function executeGraphRagInvestigation(input: {
+  readonly query: string;
+  readonly mode?: 'standard' | 'deep';
+}): Promise<GraphRagInvestigationResult> {
+  try {
+    const trace = await new GraphRagService().compare(input.query, input.mode ?? 'standard');
+    return {
+      schemaVersion: 1,
+      status: 'success',
+      code: 'GRAPHRAG_INVESTIGATION_COMPLETE',
+      summary: `${trace.plans.length} deterministic GraphRAG plan(s) compared without retaining a Detective trace.`,
+      data: toGraphRagInvestigationData(trace),
+      evidence: [],
+      diagnostics: [],
+      truncated: false,
+      retryable: false,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      schemaVersion: 1,
+      status: 'error',
+      code: 'GRAPHRAG_INVESTIGATION_ERROR',
+      summary: 'The GraphRAG comparison failed.',
+      data: { runId: '', persisted: false, mode: input.mode ?? 'standard', indexFingerprint: '', budget: emptyGraphRagBudget(), plans: [] },
+      evidence: [],
+      diagnostics: [{ severity: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', message }],
+      truncated: false,
+      retryable: false,
+    };
+  }
+}
+
+/** Projects a local trace into an MCP-safe result without code snippets or the query text. */
+function toGraphRagInvestigationData(trace: DetectiveTrace): GraphRagInvestigationData {
+  return {
+    runId: trace.id,
+    persisted: false,
+    mode: trace.mode,
+    indexFingerprint: trace.indexFingerprint,
+    budget: { ...trace.budget },
+    plans: trace.plans.map((plan) => ({
+      plan: plan.plan,
+      eligible: plan.eligible,
+      ...(plan.reason === undefined ? {} : { reason: plan.reason }),
+      selectedPaths: [...plan.selectedPaths],
+      selectedEvidence: plan.selectedEvidence.map((item) => ({ ...item, relations: [...item.relations] })),
+      branches: plan.branches.map((branch) => ({ ...branch })),
+      elapsedMs: plan.elapsedMs,
+      metrics: {
+        ...plan.metrics,
+        marginalEvidence: plan.metrics.marginalEvidence.map((hop) => ({ ...hop })),
+      },
+      quality: { ...plan.quality },
+      recommendation: { ...plan.recommendation },
+    })),
+  };
+}
+
+/** Gives an error result an explicit zero budget rather than pretending a comparison ran. */
+function emptyGraphRagBudget(): GraphRagInvestigationData['budget'] {
+  return { maxSeeds: 0, maxDepth: 0, maxNodes: 0, maxRelations: 0, maxChunks: 0, maxEstimatedTokens: 0 };
+}
+
+function toCodebaseSearchData(result: GraphRagSearchResult): CodebaseSearchData {
   if (result.status === 'abstained') {
     return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
       recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], files: [],
-      ...(result.provenance === undefined ? {} : { provenance: result.provenance }) };
+      ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
+      retrieval: toToolRetrievalStrategy(result.strategy),
+    };
   }
   return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
     recoveredWithContext: result.recoveredWithContext, unknownTerms: [],
-    files: result.files.map((file) => ({ path: file.filePath, evidence: file.evidence, imports: file.imports,
+    files: result.files.map((file) => ({ path: file.filePath, origin: file.origin, evidence: file.evidence, score: file.score, relations: [...file.relations], imports: [...file.imports],
       chunks: file.chunks.map((chunk) => ({ type: chunk.type, content: chunk.content,
         startLine: chunk.metadata.startLine, endLine: chunk.metadata.endLine,
         ...(chunk.metadata.className === undefined ? {} : { className: chunk.metadata.className }),
         ...(chunk.metadata.methodName === undefined ? {} : { methodName: chunk.metadata.methodName }) })) })),
-    ...(result.provenance === undefined ? {} : { provenance: result.provenance }) };
+    ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
+    retrieval: toToolRetrievalStrategy(result.strategy),
+  };
+}
+
+/** Copies readonly planner facts into the mutable arrays required by the validated tool result. */
+function toToolRetrievalStrategy(
+  strategy: GraphRagStrategy,
+): NonNullable<CodebaseSearchData['retrieval']> {
+  return {
+    ...strategy,
+    marginalEvidence: strategy.marginalEvidence.map((hop) => ({ ...hop })),
+  };
+}
+
+/** Builds a schema-valid no-work strategy for index-unavailable and error results. */
+function emptyRetrievalStrategy(): NonNullable<CodebaseSearchData['retrieval']> {
+  return {
+    policy: 'balanced-v1', plan: 'hybrid', depthReached: 0, nodesVisited: 0,
+    relationsInspected: 0, stopReason: 'not-applicable', marginalEvidence: [],
+    discardedBranches: 0, estimatedTokens: 0, elapsedMs: 0,
+    readiness: {
+      dependency: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0 },
+      nest: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0 },
+    },
+    recommendation: { state: 'clarify', reason: 'Retrieval did not run.' },
+  };
+}
+
+/** Translates a structured GraphRAG recommendation into the legacy string field. */
+function recommendationNextAction(
+  recommendation: NonNullable<CodebaseSearchData['retrieval']>['recommendation'],
+): string | undefined {
+  if (recommendation.state !== 'follow-up' || recommendation.tool === undefined) return undefined;
+  if (recommendation.tool === 'query_dependency_graph') {
+    return `Call query_dependency_graph for ${recommendation.subject ?? 'the grounded file'} if relationship detail is needed.`;
+  }
+  return `Call query_nest_graph for ${recommendation.subject ?? 'the grounded symbol'} if runtime wiring detail is needed.`;
 }

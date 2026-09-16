@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import {
   adrCatalogResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
-  executeCodebaseSearch, executeDependencyGraph, executeIntegrityCheck, executeListAdrs,
+  executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
   executeNestGraph, integrityResultSchema, nestGraphResultSchema,
+  graphRagInvestigationResultSchema,
   indexStatusResultSchema, type IndexStatusResult,
 } from '../../core/tools';
 import { McpToolResult } from './mcp.contracts';
@@ -92,10 +93,35 @@ function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): Publi
   });
   return {
     name: 'ask_codebase', title: 'Search the codebase',
-    description: 'Searches indexed code by meaning and returns paths, ranges, snippets, match reasons, and provenance. Scores are ranking signals, not confidence probabilities.',
+    description: 'Searches indexed code with the approved deterministic hybrid/graph policy and returns paths, ranges, snippets, provenance, and a next read-only recommendation. Scores are ranking signals, not confidence probabilities.',
     inputSchema: { query: z.string().min(1).describe('Original natural-language code question.'), context: z.string().max(2000).optional().describe('Optional one-time clarification.') },
     outputSchema: codebaseSearchResultSchema,
     invoke: async (args) => { const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional() }).parse(args); const readiness = readReadiness(); if (!readiness.ready) return unavailable(readiness.message); return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(input)).result); },
+    rootUnavailable: unavailable,
+  };
+}
+
+/** Publishes source-free GraphRAG plan comparison without granting any local configuration write. */
+function publishGraphRagInvestigation(readReadiness: () => SemanticSearchReadiness): PublishedTool {
+  const unavailable = (message: string) => toStructuredToolResult(graphRagInvestigationResultSchema, {
+    schemaVersion: 1, status: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', summary: 'GraphRAG comparison is unavailable.',
+    data: { runId: '', persisted: false, mode: 'standard', indexFingerprint: '', budget: { maxSeeds: 0, maxDepth: 0, maxNodes: 0, maxRelations: 0, maxChunks: 0, maxEstimatedTokens: 0 }, plans: [] },
+    evidence: [], diagnostics: diagnostic(message, 'GRAPHRAG_INVESTIGATION_ERROR'), truncated: false, retryable: true,
+  });
+  return {
+    name: 'investigate_graphrag', title: 'Compare GraphRAG retrieval plans',
+    description: 'Compares deterministic bounded hybrid, dependency, and NestJS retrieval plans from one shared semantic seed lookup. Returns source-free paths, graph routes, budgets, timing, stop receipts, and recommendations; it does not persist a Detective trace, call a chat model, or change configuration.',
+    inputSchema: {
+      query: z.string().min(1).describe('Original natural-language code question.'),
+      mode: z.enum(['standard', 'deep']).optional().describe('Use deep only for a bounded local experiment.'),
+    },
+    outputSchema: graphRagInvestigationResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ query: z.string().min(1), mode: z.enum(['standard', 'deep']).optional() }).parse(args);
+      const readiness = readReadiness();
+      if (!readiness.ready) return unavailable(readiness.message);
+      return toStructuredToolResult(graphRagInvestigationResultSchema, await executeGraphRagInvestigation(input));
+    },
     rootUnavailable: unavailable,
   };
 }
@@ -108,7 +134,7 @@ export function buildToolCatalog(options: {
   projectRootReady?: () => boolean;
   projectRootMessage?: () => string;
 }): PublishedTool[] {
-  const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), {
+  const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), publishGraphRagInvestigation(options.semanticSearchReadiness), {
     name: 'get_index_status', title: 'Get index status', description: 'Reports live lifecycle, persisted provenance, and durable coverage as separate fields without invoking an embedding provider.', inputSchema: {}, outputSchema: indexStatusResultSchema,
     invoke: async () => toStructuredToolResult(indexStatusResultSchema, options.readIndexStatus()),
   }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
