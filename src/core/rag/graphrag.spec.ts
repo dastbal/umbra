@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { GraphRagService } from './graphrag';
+import { formatGraphRagContextForLLM, GraphRagService } from './graphrag';
 import type { RetrievalContextResult, RetrieverService } from './retriever';
 
 const UNIQUE_SECRET = 'private-source-must-never-appear-in-detective-trace';
@@ -67,10 +67,34 @@ describe('GraphRagService', () => {
     const dependencyTraversalQueries = prepare.mock.calls.filter(([sql]) =>
       typeof sql === 'string' && sql.includes('FROM dependency_graph WHERE source = ? OR target = ?'),
     );
-    // dependency-1, dependency-2, and combined each inspect two live frontier
-    // levels in this fixture. A second traversal solely for trace rendering
-    // would double this to twelve.
-    expect(dependencyTraversalQueries).toHaveLength(6);
+    // dependency-1 inspects exactly one live frontier level. dependency-2 and
+    // combined inspect two; a second traversal solely for trace rendering
+    // would double the expected five reads.
+    expect(dependencyTraversalQueries).toHaveLength(5);
+  });
+
+  it('caps dependency-1 at one outgoing hop even when the mode budget permits more', async () => {
+    const service = new GraphRagService(fakeRetriever(retrieve), db, rootDir);
+
+    const trace = await service.investigate('where does EntryService delegate?');
+    const dependencyOne = trace.plans.find((plan) => plan.plan === 'dependency-1');
+
+    expect(dependencyOne?.metrics).toMatchObject({ depthReached: 1, stopReason: 'depth-budget' });
+    expect(dependencyOne?.metrics.marginalEvidence).toHaveLength(1);
+  });
+
+  it('labels the configured policy and executed plan separately in the agent receipt', async () => {
+    const service = new GraphRagService(fakeRetriever(retrieve), db, rootDir);
+
+    const result = await service.search('where does EntryService delegate?');
+
+    expect(result.status).toBe('success');
+    if (result.status !== 'success') return;
+    expect(formatGraphRagContextForLLM(result)).toContain('policy: balanced-v1');
+    expect(formatGraphRagContextForLLM(result)).toContain('plan: dependency-2');
+    expect(formatGraphRagContextForLLM(result)).toContain('nodesVisited:');
+    expect(formatGraphRagContextForLLM(result)).toContain('relationsInspected:');
+    expect(formatGraphRagContextForLLM(result)).toContain('stopReason:');
   });
 
   it('traverses dependency relationships in both directions for dependency-2', async () => {

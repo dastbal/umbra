@@ -573,8 +573,9 @@ export class GraphRagService {
     }
 
     const seeds = this.seedFiles(prepared.base.files, budget.maxSeeds);
+    const traversalBudget = this.budgetForPlan(plan, budget);
     const traversal = this.isEligible(plan, prepared.readiness)
-      ? this.traverse(plan, seeds.map((seed) => seed.filePath), budget)
+      ? this.traverse(plan, seeds.map((seed) => seed.filePath), traversalBudget)
       : this.emptyTraversal(seeds.length, 'not-applicable');
     const files = this.selectFiles(seeds, traversal.candidates, budget);
     const strategy: GraphRagStrategy = {
@@ -605,6 +606,13 @@ export class GraphRagService {
         ...(this.retriever.learningCandidate === undefined ? {} : { learningCandidate: this.retriever.learningCandidate }),
       },
     };
+  }
+
+  /** Narrows a shared mode budget when a plan promises a stricter semantic limit. */
+  private budgetForPlan(plan: GraphRagPlanId, budget: GraphRagBudget): GraphRagBudget {
+    return plan === 'dependency-1'
+      ? { ...budget, maxDepth: Math.min(budget.maxDepth, 1) }
+      : budget;
   }
 
   /** Converts one plan run into privacy-safe Detective facts. */
@@ -1101,7 +1109,13 @@ export function formatGraphRagContextForLLM(result: GraphRagSearchResult): strin
   const lines = [
     '🔎 **GRAPHRAG ANALYSIS REPORT**',
     `Query: "${result.query}"`,
-    `Strategy: ${result.strategy.plan} via ${result.strategy.policy}; depth ${result.strategy.depthReached}; ${result.strategy.relationsInspected} relationships inspected.`,
+    'RETRIEVAL RECEIPT — preserve these identifiers exactly when reporting them. `policy` is the configured profile; `plan` is the plan actually executed. Never substitute one for the other.',
+    `policy: ${result.strategy.policy}`,
+    `plan: ${result.strategy.plan}`,
+    `depthReached: ${result.strategy.depthReached}`,
+    `nodesVisited: ${result.strategy.nodesVisited}`,
+    `relationsInspected: ${result.strategy.relationsInspected}`,
+    `stopReason: ${result.strategy.stopReason}`,
     '',
   ];
   for (const file of result.files) {

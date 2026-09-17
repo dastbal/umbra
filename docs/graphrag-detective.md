@@ -115,3 +115,26 @@ MRR, and abstention facts instead of guessing. Aggregate median and p95 claims
 remain the benchmark runner's job. Comparisons must name the same corpus and
 index fingerprint. A human reads those facts before promotion; the metrics
 inform the decision but do not automate it.
+
+## Observed local audit — 2026-09-17
+
+One unlabelled Deep Detective run completed against a healthy local index. The
+four hybrid seeds were plausible MCP/search entry points. Dependency expansion
+admitted additional import neighbours, while the NestJS projection contributed
+no matching relationship for those seeds. `dependency-2` and `combined` reached
+the same relation ceiling, so this run does not support a claim that the
+combined plan improved evidence.
+
+The run also exposed a contract discrepancy: the profile named
+`dependency-1-v1` reached depth two, although the policy table describes one
+outgoing hop. The trace did its job by making the discrepancy visible. It was
+corrected on 2026-09-17: `GraphRagService#budgetForPlan` now caps this plan at
+one hop regardless of the wider standard or deep mode budget. Earlier traces
+remain historical observations and must not be compared as if they had used the
+corrected plan.
+
+The displayed 1–34 ms values measure deterministic graph planning after the
+shared hybrid seed retrieval; they do not include the embedding lookup. The
+question had no versioned expected paths, so Hit@1, MRR, and abstention quality
+were correctly reported as unavailable rather than inferred from a readable
+answer.
