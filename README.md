@@ -10,6 +10,13 @@ a semantic index of the code, the decision records behind it, an AST-level
 dependency graph, and the NestJS wiring graph — which module binds a token and
 who injects it.
 
+> **GraphRAG for code, not just vector search.** Umbra first finds grounded
+> semantic and lexical evidence, then follows real, typed repository
+> relationships — imports, re-exports, NestJS providers, injection tokens, and
+> module bindings — under deterministic depth, node, relationship, chunk, and
+> context budgets. Every result says whether it came from a semantic seed or a
+> graph route, and why traversal stopped.
+
 **It does two things with that knowledge, and they are independent.** Pick the
 one you want; you do not need the other.
 
@@ -30,6 +37,7 @@ and it makes every agent you already use better at your codebase.
 
 **[Part 1 — MCP server](#part-1--umbra-as-an-mcp-server)**
 - [What it publishes](#what-it-publishes)
+- [GraphRAG, without a hidden agent](#graphrag-without-a-hidden-agent)
 - [Connect it, in three commands](#connect-it-in-three-commands)
 - [Semantic search without a cloud account](#semantic-search-without-a-cloud-account)
 - [Verify it](#verify-it)
@@ -103,12 +111,30 @@ tools remain available once the project root is validated.
 
 ### GraphRAG, without a hidden agent
 
-`ask_codebase` performs one shared hybrid lookup for grounded source seeds. The
-selected local policy may then follow bounded SQLite relationships such as
-imports, re-exports, NestJS providers, injections, and module bindings. The
-result reports the configured `policy`, executed `plan`, reached depth, visited
-nodes, inspected relationships, stop reason, and whether each file arrived as a
-semantic `seed` or through the `graph`.
+Umbra's retrieval pipeline is deliberately richer than “embed a question and
+return similar text”:
+
+```text
+question
+  → hybrid retrieval: semantic vectors + lexical grounding
+  → grounded source seeds
+  → bounded typed graph traversal in SQLite
+  → selected source evidence with seed/graph provenance and a stop receipt
+  → the calling assistant reasons from that evidence
+```
+
+`ask_codebase` performs the shared hybrid lookup once. The selected local
+policy then chooses a deterministic plan — hybrid only, one-hop dependency,
+two-hop dependency, NestJS wiring, or combined — and may follow SQLite
+relationships such as imports, re-exports, providers, injections, and module
+bindings. It is GraphRAG with production guardrails: no LLM chooses the route,
+no traversal continues only because budget remains, and an unavailable or stale
+graph falls back to grounded hybrid retrieval instead of claiming that a
+relationship does not exist.
+
+The response makes the work inspectable: configured `policy`, executed `plan`,
+reached depth, visited nodes, inspected relationships, stop reason, and whether
+each selected file arrived as a semantic `seed` or through the `graph`.
 
 `investigate_graphrag(query, mode?)` is for diagnosis: it compares all eligible
 plans from the same semantic seeds and returns source-free paths, routes,
