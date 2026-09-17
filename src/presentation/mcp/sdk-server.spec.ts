@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { buildSdkServer } from './sdk-server';
 import { loadMcpSdk } from './sdk-loader';
 import { PublishedTool } from './tool-catalog';
+import { createToolResultSchema } from '../../core/tools/tool-result';
+import { toStructuredToolResult } from './dto-mapper';
 import { log } from '../../core/tools/utils/logger';
 import { resetLogSink, setLogSink } from '../../core/observability/console-sink';
 
@@ -176,6 +178,48 @@ describe('MCP server built on the official SDK', () => {
     expect(called.error).toBeUndefined();
     expect(called.result.isError).toBe(true);
     expect(called.result.content[0].text).toContain('read-only');
+  });
+
+  it('advertises and validates a complete typed result through stdio', async () => {
+    // This is deliberately a full Umbra result schema rather than a raw output
+    // shape. The SDK must serialize it in tools/list and validate the matching
+    // structuredContent during tools/call; otherwise a catalog can look healthy
+    // while every real tool fails before it executes.
+    const resultSchema = createToolResultSchema(
+      z.enum(['ADR_CATALOG_READY', 'ADR_CATALOG_ERROR']),
+      z.object({ entries: z.array(z.string()) }),
+    );
+    const result = {
+      schemaVersion: 1 as const,
+      status: 'success' as const,
+      code: 'ADR_CATALOG_READY',
+      summary: 'One architecture decision is available.',
+      data: { entries: ['ADR-001'] },
+      evidence: [],
+      diagnostics: [],
+      truncated: false,
+      retryable: false,
+    };
+    const output = await exchange(
+      [stubTool({
+        outputSchema: resultSchema,
+        invoke: async () => toStructuredToolResult(resultSchema, result),
+      })],
+      [
+        handshake,
+        { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+        { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_adrs', arguments: {} } },
+      ],
+    );
+
+    const messages = output.lines.map((line) => JSON.parse(line));
+    const listed = messages.find((message) => message.id === 2);
+    const called = messages.find((message) => message.id === 3);
+
+    expect(listed.result.tools[0].outputSchema.type).toBe('object');
+    expect(called.error).toBeUndefined();
+    expect(called.result.structuredContent).toEqual(result);
+    expect(JSON.parse(called.result.content[0].text)).toEqual(result);
   });
 
   /**

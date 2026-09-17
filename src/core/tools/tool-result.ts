@@ -72,10 +72,21 @@ export function createToolResultSchema<TData extends z.ZodType, TCode extends z.
     retryable: z.boolean(),
     nextAction: z.string().optional(),
   };
-  return z.discriminatedUnion('status', [
-    z.object({ ...common, status: z.enum(['success', 'partial', 'empty', 'abstained']) }),
-    z.object({ ...common, status: z.enum(['blocked', 'error']), diagnostics: z.array(toolDiagnosticSchema).min(1) }),
-  ]) as unknown as z.ZodType<ToolResult<z.infer<TCode>, z.infer<TData>>>;
+  // MCP SDK 1.x normalizes an advertised output schema as an object before it
+  // validates `structuredContent`. A discriminated union is valid Zod, but it
+  // has no object root for that SDK boundary. Keep the same state invariant in
+  // the canonical Zod contract while exposing one object-shaped schema to every
+  // presentation adapter.
+  return z.object({ ...common, status: toolResultStatusSchema })
+    .superRefine((result, context) => {
+      if ((result.status === 'blocked' || result.status === 'error') && result.diagnostics.length === 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['diagnostics'],
+          message: 'Blocked and error results require at least one diagnostic.',
+        });
+      }
+    }) as unknown as z.ZodType<ToolResult<z.infer<TCode>, z.infer<TData>>>;
 }
 
 /** Narrows an unknown LangChain artifact to Umbra's shared result contract. */
