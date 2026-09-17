@@ -78,7 +78,8 @@ Decided in [ADR-024](docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
 
 | Kind | Name | What it answers |
 |---|---|---|
-| Tool | `ask_codebase` | Semantic search in natural language, with the index's provenance and age on every answer |
+| Tool | `ask_codebase` | Grounded hybrid code search with the approved bounded GraphRAG policy, provenance, retrieval receipt, and a next read-only recommendation |
+| Tool | `investigate_graphrag` | Compare the bounded hybrid, dependency, and NestJS retrieval plans without calling a chat model, saving a trace, or changing configuration |
 | Tool | `query_dependency_graph` | *What breaks if I change this file* — inbound or outbound edges from the AST, each labelled with its kind: `import`, `re-export`, `require`, `dynamic-import` |
 | Tool | `query_nest_graph` | *Which module provides this token, and who injects it* — NestJS wiring, including modules whose providers live in a `forRoot()` rather than in the `@Module` decorator |
 | Tool | `list_adrs` | *Why* is the code shaped this way — path, title and status of every decision record, without their bodies |
@@ -99,6 +100,22 @@ that edge exists.
 selected provider has produced durable vector coverage. Until then it returns a
 retryable status directing the client to `get_index_status`; the other read-only
 tools remain available once the project root is validated.
+
+### GraphRAG, without a hidden agent
+
+`ask_codebase` performs one shared hybrid lookup for grounded source seeds. The
+selected local policy may then follow bounded SQLite relationships such as
+imports, re-exports, NestJS providers, injections, and module bindings. The
+result reports the configured `policy`, executed `plan`, reached depth, visited
+nodes, inspected relationships, stop reason, and whether each file arrived as a
+semantic `seed` or through the `graph`.
+
+`investigate_graphrag(query, mode?)` is for diagnosis: it compares all eligible
+plans from the same semantic seeds and returns source-free paths, routes,
+budgets, timings, and stop receipts. It does not contain a chat model, retain
+the question, promote a policy, or write configuration. Wait until
+`get_index_status` reports `ready` before either retrieval tool; a temporary
+unavailable result during provider probing is intentional and retryable.
 
 ## Connect it, in three commands
 
@@ -224,7 +241,7 @@ It waits for a client and prints its startup to **stderr**:
 
 ```
 [umbra mcp] umbra mcp — serving /path/to/repo
-[umbra mcp] publishing 6 tools: ask_codebase, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check
+[umbra mcp] publishing 7 tools: ask_codebase, investigate_graphrag, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check
 [umbra mcp] MCP transport connected; index warm-up continues in the background.
 ```
 
@@ -819,10 +836,10 @@ Ollama, Gemini, and Claude through Vertex AI, with one reasoning vocabulary
 across all of them. Interactive `/model` switching, persistent sessions, context
 compression and self-healing recovery. A skills system that loads the right
 guide per task, and two levels of mentoring. Turn budgets bounded on tool calls,
-tokens, wall clock and cost. LangSmith tracing, opt-in. The MCP server, with six
-read-only tools, hybrid retrieval that abstains rather than guessing, an AST
-dependency graph, the NestJS wiring graph, and a retrieval quality gate that runs
-on every push with no provider.
+tokens, wall clock and cost. LangSmith tracing, opt-in. The MCP server, with
+seven read-only tools, hybrid retrieval that abstains rather than guessing,
+bounded deterministic GraphRAG, an AST dependency graph, the NestJS wiring
+graph, and a retrieval quality gate that runs on every push with no provider.
 
 **Planned.** An HTTP/streamable MCP transport, so one process can serve several
 clients. MCP elicitation, which is the prerequisite for anything in that mode
