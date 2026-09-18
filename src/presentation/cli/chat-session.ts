@@ -67,7 +67,6 @@ import {
   findSlashCommand,
   looksLikeSlashCommand,
   parseSlashCommand,
-  suggestSlashCommands,
   type SlashCommand,
 } from './slash-commands';
 import { ContextCompressor } from '../../core/agent/context-compressor';
@@ -78,10 +77,13 @@ import {
 } from '../../core/config/reasoning-profile';
 import {
   classifyOrchestrationTask,
-  classifySmallTalk,
   formatOrchestrationRoute,
-  type SmallTalkKind,
 } from '../../core/agent/task-classifier';
+import {
+  handleSmallTalk,
+  reportUnknownCommand,
+  showHelp,
+} from './conversation-output';
 import { shouldRetryEmptyTurn } from './empty-turn-retry';
 import { shouldRecoverToolCycle } from './tool-cycle-recovery';
 import { TurnAudit, type TurnTraceMetadata } from './turn-audit';
@@ -279,7 +281,7 @@ export class ChatSession {
       switchModel:       () => this.handleModelSwitch(),
       toggleMentor:      () => this.handleMentorToggle(),
       openCommandPicker: () => this.handleHelp(),
-      printHelp:         () => this.showHelp(),
+      printHelp:         () => showHelp(this.slashCommands, this.mentorModeActive),
       exitSession:       () => this.shutdown(),
       learnSearch:       () => this.handleSearchLearning(),
       hasPendingSearchLearning: () => hasPendingRetrievalAlias(),
@@ -320,7 +322,7 @@ export class ChatSession {
 
     // Send first message if provided (from CLI argument)
     const first = firstMessage?.trim();
-    if (first && !this.handledAsSmallTalk(first)) {
+    if (first && !handleSmallTalk(first)) {
       await this.sendMessage(first);
     }
 
@@ -828,11 +830,11 @@ export class ChatSession {
       // A slash-prefixed word that matches nothing is a typo, not a prompt.
       // Sending it to the agent would spend a turn on it and answer nonsense.
       if (looksLikeSlashCommand(trimmed)) {
-        this.reportUnknownCommand(trimmed);
+        reportUnknownCommand(this.slashCommands, trimmed);
         continue;
       }
 
-      if (this.handledAsSmallTalk(trimmed)) continue;
+      if (handleSmallTalk(trimmed)) continue;
 
       await this.sendMessage(trimmed);
       // Phase 2: proactive compression — check token budget after each turn.
@@ -1231,7 +1233,7 @@ export class ChatSession {
    * Without a TTY it prints the static list via {@link showHelp}.
    */
   private async handleHelp(): Promise<void> {
-    if (!isInteractive()) { this.showHelp(); return; }
+    if (!isInteractive()) { showHelp(this.slashCommands, this.mentorModeActive); return; }
 
     // Rows come from the registry, so a command added there appears here with
     // no change and can never be listed but unreachable.
@@ -1392,83 +1394,4 @@ export class ChatSession {
     }
   }
 
-  /**
-   * Answers conversational input locally, bypassing the agent entirely.
-   *
-   * A greeting is not a task, but the Deep-agent system prompt applies its
-   * investigation protocol to every message: one recorded turn spent 11 tool
-   * calls and 108 seconds on the word "hey" (`interactive-turns.jsonl`, audit
-   * `84ad7c97`). This is the same shape as the unknown-command branch in
-   * {@link promptLoop} — recognised locally, answered without spending a turn.
-   *
-   * Both entry points route through here on purpose. The CLI argument path in
-   * {@link start} calls `sendMessage` directly, so a gate placed only in the
-   * prompt loop would leave `umbra deep "hey"` paying the full cost.
-   *
-   * @param input - Trimmed user input.
-   * @returns True when the input was answered here and must not reach the agent.
-   */
-  private handledAsSmallTalk(input: string): boolean {
-    const kind = classifySmallTalk(input);
-    if (kind === null) return false;
-    this.replyToSmallTalk(kind);
-    return true;
-  }
-
-  /**
-   * Prints the local acknowledgement for one conversational message kind.
-   *
-   * The wording stays short on purpose: this is the CLI acknowledging a
-   * greeting, not the agent reasoning about one. A farewell points at `/exit`
-   * rather than closing the session, because leaving is the operator's call.
-   *
-   * @param kind - Which conversational message was recognised.
-   */
-  private replyToSmallTalk(kind: SmallTalkKind): void {
-    const lines: Record<SmallTalkKind, string> = {
-      greeting: 'Ready when you are. Describe a task, or type /help.',
-      thanks: 'Any time.',
-      farewell: 'Still here — type /exit to close the session.',
-    };
-
-    console.log('');
-    console.log(`  ${colors.primary('⬡')}  ${lines[kind]}`);
-    console.log('');
-  }
-
-  private reportUnknownCommand(input: string): void {
-    const near = suggestSlashCommands(this.slashCommands, input);
-    console.log('');
-    console.log(colors.warning(`  Unknown command: ${input}`));
-    if (near.length > 0) {
-      console.log(colors.muted(`  Did you mean: ${near.map((c) => c.name).join(', ')}`));
-    } else {
-      console.log(colors.muted('  Type /help to see the available commands.'));
-    }
-    console.log('');
-  }
-
-  /**
-   * Displays the list of available slash commands as static text.
-   *
-   * Retained as the non-interactive path for {@link handleHelp}, and still the
-   * right output when the user only wants to read what exists.
-   */
-  private showHelp(): void {
-    // Widest name, so the descriptions line up however many commands exist.
-    const width = Math.max(...this.slashCommands.map((c) => c.name.length));
-
-    console.log('');
-    console.log(colors.secondary.bold('  Available slash commands:'));
-    for (const command of this.slashCommands) {
-      const badge = command.badge?.() ?? '';
-      const styledBadge = badge
-        ? (this.mentorModeActive ? colors.accent.bold(badge) : colors.muted(badge))
-        : '';
-      const name = colors.primary.bold(command.name.padEnd(width));
-      console.log(`  ${name}${styledBadge}  — ${command.description}`);
-    }
-    console.log(`  ${colors.muted('Ctrl+C'.padEnd(width))}  — Exit the session`);
-    console.log('');
-  }
 }

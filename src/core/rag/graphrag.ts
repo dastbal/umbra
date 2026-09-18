@@ -1003,7 +1003,7 @@ export class GraphRagService {
 
   /** Creates a minimal abstention solely to resolve a direct policy's plan identifier. */
   private emptyAbstention(query: string): RetrievalContextResult {
-    return { status: 'abstained', query, reason: 'ungrounded', unknownTerms: [] };
+    return { status: 'abstained', query, reason: 'ungrounded', unknownTerms: [], ignoredModifiers: [] };
   }
 
   /** Generates a corpus-sensitive fingerprint without retaining source contents. */
@@ -1105,6 +1105,7 @@ export function formatGraphRagContextForLLM(result: GraphRagSearchResult): strin
       ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
       reason: result.reason,
       unknownTerms: result.unknownTerms,
+      ignoredModifiers: result.ignoredModifiers,
       ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
     });
   }

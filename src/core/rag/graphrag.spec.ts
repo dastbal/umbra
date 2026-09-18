@@ -99,7 +99,7 @@ describe('GraphRagService', () => {
 
   it('traverses dependency relationships in both directions for dependency-2', async () => {
     retrieve.mockResolvedValue({
-      status: 'success', query: 'who imports TargetService?', recoveredWithContext: false,
+      status: 'success', query: 'who imports TargetService?', recoveredWithContext: false, ignoredModifiers: [],
       files: [{
         filePath: 'src/target.ts', evidence: 'hybrid', imports: [],
         chunks: [{
@@ -171,6 +171,7 @@ describe('GraphRagService', () => {
       status: 'success',
       query: 'oversized context',
       recoveredWithContext: false,
+      ignoredModifiers: [],
       files: [{
         filePath: 'src/entry.ts', evidence: 'hybrid', imports: [],
         chunks: Array.from({ length: 10 }, (_, index) => ({
@@ -327,6 +328,7 @@ function seedContext(): RetrievalContextResult {
     status: 'success',
     query: 'where does EntryService delegate?',
     recoveredWithContext: false,
+    ignoredModifiers: [],
     files: [{
       filePath: 'src/entry.ts',
       evidence: 'hybrid',

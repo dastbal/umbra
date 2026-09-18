@@ -56,7 +56,7 @@ export interface AdrCatalogLocation {
 export interface WorkspaceDiscovery {
   readonly rootDir: string;
   readonly sourceFiles: readonly WorkspaceFile[];
-  readonly sourceOrigin: 'config' | 'tsconfig' | 'legacy-src';
+  readonly sourceOrigin: 'config' | 'tsconfig' | 'legacy-src' | 'prisma';
   readonly typeScriptProjects: readonly WorkspacePath[];
   readonly adrCatalogs: readonly AdrCatalogLocation[];
 }
@@ -170,7 +170,7 @@ export class WorkspaceDiscoveryService {
   }
 
   /** Lets TypeScript interpret each package's include/files/rootDir contract. */
-  private discoverConfiguredTypeScriptFiles(projects: readonly WorkspaceFile[]): WorkspaceFile[] {
+  private discoverConfiguredTypeScriptFiles(projects: readonly WorkspacePath[]): WorkspaceFile[] {
     const files = new Map<string, WorkspaceFile>();
     for (const project of projects) {
       const config = ts.readConfigFile(project.absolutePath, ts.sys.readFile);

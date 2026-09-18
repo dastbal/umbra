@@ -212,7 +212,7 @@ export function parseSlashCommand(input: string): ParsedSlashCommand | undefined
  * @returns The matching commands, registry order preserved.
  */
 export function completeSlashCommand(
-  commands: SlashCommand[],
+  commands: readonly SlashCommand[],
   partial: string,
 ): SlashCommand[] {
   const normalized = partial.toLowerCase();
@@ -285,7 +285,7 @@ function editDistance(a: string, b: string): number {
  * @returns The suggested commands, most likely first. Empty when nothing is close.
  */
 export function suggestSlashCommands(
-  commands: SlashCommand[],
+  commands: readonly SlashCommand[],
   input: string,
 ): SlashCommand[] {
   const normalized = input.toLowerCase();

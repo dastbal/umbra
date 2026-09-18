@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ChatSession } from './chat-session';
+import { handleSmallTalk } from './conversation-output';
 
 interface ChatSessionInternals {
   sendMessage(input: string): Promise<void>;
-  handledAsSmallTalk(input: string): boolean;
 }
 
 describe('ChatSession tool-cycle recovery', () => {
@@ -91,9 +91,9 @@ describe('ChatSession conversation gate', () => {
     'answers %j without ever reaching the agent',
     (input) => {
       const agent = { streamEvents: jest.fn() };
-      const session = buildSession(agent) as unknown as ChatSessionInternals;
+      buildSession(agent);
 
-      expect(session.handledAsSmallTalk(input)).toBe(true);
+      expect(handleSmallTalk(input)).toBe(true);
       // The whole point: audit `84ad7c97` recorded 11 tool calls and 108
       // seconds for "hey". A handled greeting must cost zero model calls.
       expect(agent.streamEvents).not.toHaveBeenCalled();
@@ -108,8 +108,8 @@ describe('ChatSession conversation gate', () => {
     'segui',
   ])('lets %j through to the agent', (input) => {
     const agent = { streamEvents: jest.fn() };
-    const session = buildSession(agent) as unknown as ChatSessionInternals;
+    buildSession(agent);
 
-    expect(session.handledAsSmallTalk(input)).toBe(false);
+    expect(handleSmallTalk(input)).toBe(false);
   });
 });
