@@ -285,3 +285,28 @@ Noting it here so the next review finds the answer in the record instead of
 rediscovering the mechanism and reading it as a bug. The measured cost of the
 rule — correct abstention 0% → 100% for false abstention 0% → 2.2% — is the part
 that makes it a trade rather than an oversight, and it is one paragraph above.
+
+## Amendment — 2026-09-18 · Syntax words do not identify a code subject
+
+An external package review exposed a lexical failure unrelated to the absence
+gate: a question such as “which use case imports a FIRST quote” could rank
+large module files because `import` occurs in every TypeScript import block.
+That word describes the requested relationship, not the code subject.
+
+`lexicalTerms` in `src/core/rag/lexical-index.ts` now removes a small set of
+TypeScript syntax words only when the same question contains another searchable
+term. A question solely about `import` remains searchable, so this is not a
+global stoplist and does not erase a legitimate operator request. The same
+normalization feeds the direct path/metadata evidence check, preventing syntax
+filler from independently grounding an unrelated file.
+
+After rank fusion, `preferExecutableEvidence` in
+`src/core/rag/hybrid-ranking.ts` keeps hybrid evidence above lexical or semantic
+only results, then shows a method or function before a class signature. This is
+a presentation order over already-grounded candidates; it neither combines raw
+BM25 with vector scores nor weakens the abstention predicate.
+
+Verification on 2026-09-18: focused lexical, hybrid-ranking, retriever,
+GraphRAG, AST-chunker, integrity, MCP-catalog, and SDK-server Jest suites passed (87 tests), and strict
+TypeScript compilation passed. No provider benchmark was run, so no new quality
+metric is claimed.

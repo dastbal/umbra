@@ -137,6 +137,22 @@ describe('GraphRagService', () => {
     expect(result.files.map((file) => file.filePath)).toContain('src/target.ts');
   });
 
+  it('names the exact file that prevents a NestJS graph plan from running', async () => {
+    db.prepare('DELETE FROM nest_scan WHERE file_path = ?').run('src/target.ts');
+    const service = new GraphRagService(fakeRetriever(retrieve), db, rootDir);
+
+    const result = await service.search('where does EntryService delegate?');
+
+    expect(result.status).toBe('success');
+    if (result.status !== 'success') return;
+    expect(result.strategy.readiness.nest).toMatchObject({
+      ready: false,
+      pendingFiles: 1,
+      affectedPaths: ['src/target.ts'],
+    });
+    expect(result.strategy.readiness.nest.reason).toContain('src/target.ts');
+  });
+
   it('never uses a stale dependency projection when the independent NestJS projection is available', async () => {
     db.prepare('DELETE FROM dependency_scan WHERE file_path = ?').run('src/target.ts');
     const service = new GraphRagService(fakeRetriever(retrieve), db, rootDir);
@@ -190,6 +206,31 @@ describe('GraphRagService', () => {
     if (result.status !== 'success') return;
     expect(result.files.flatMap((file) => file.chunks)).toHaveLength(8);
     expect(result.strategy.estimatedTokens).toBeLessThanOrEqual(8_000);
+  });
+
+  it('reserves room for accepted graph evidence instead of letting oversized seeds consume the whole answer', async () => {
+    retrieve.mockResolvedValue({
+      status: 'success',
+      query: 'oversized graph context',
+      recoveredWithContext: false,
+      ignoredModifiers: [],
+      droppedTerms: [],
+      files: [{
+        filePath: 'src/entry.ts', evidence: 'hybrid', imports: [],
+        chunks: Array.from({ length: 12 }, (_, index) => ({
+          id: `seed-${index}`, filePath: 'src/entry.ts', type: 'file' as const,
+          content: `export const source${index} = true;`,
+          metadata: { startLine: index + 1, endLine: index + 1 },
+        })),
+      }],
+    });
+    const service = new GraphRagService(fakeRetriever(retrieve), db, rootDir);
+
+    const result = await service.search('oversized graph context');
+
+    expect(result.status).toBe('success');
+    if (result.status !== 'success') return;
+    expect(result.files.map((file) => file.filePath)).toContain('src/target.ts');
   });
 
   it('stores the question and metadata but never source snippets in Detective traces', async () => {

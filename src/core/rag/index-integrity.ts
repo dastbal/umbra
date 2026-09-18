@@ -17,6 +17,12 @@ export interface VectorIdentityCoverage {
   readonly vectors: number;
 }
 
+/** An intentional source omission, with the durable reason the indexer recorded. */
+export interface SkippedIndexFile {
+  readonly path: string;
+  readonly reason: string;
+}
+
 /** Read-only evidence about the semantic index stored for one workspace root. */
 export interface IndexIntegrityReport {
   readonly databasePath: string;
@@ -27,6 +33,7 @@ export interface IndexIntegrityReport {
   readonly files: number;
   readonly indexedFiles: number;
   readonly skippedFiles: number;
+  readonly skipped: readonly SkippedIndexFile[];
   readonly chunks: number;
   readonly vectors: readonly VectorIdentityCoverage[];
   readonly missingVectors: number;
@@ -103,6 +110,13 @@ export function inspectIndexIntegrity(
     const files = count(db, 'SELECT COUNT(*) AS total FROM file_registry');
     const indexedFiles = count(db, "SELECT COUNT(*) AS total FROM file_registry WHERE index_state = 'indexed'");
     const skippedFiles = count(db, "SELECT COUNT(*) AS total FROM file_registry WHERE index_state = 'skipped'");
+    const skipped = db.prepare(
+      `SELECT path, COALESCE(skip_reason, 'No reason recorded.') AS reason
+         FROM file_registry
+        WHERE index_state = 'skipped'
+        ORDER BY path
+        LIMIT 20`,
+    ).all() as SkippedIndexFile[];
     const chunks = count(db, 'SELECT COUNT(*) AS total FROM code_chunks');
     const vectors = db.prepare(
       `SELECT provider, model, dimensions, COUNT(*) AS vectors
@@ -164,6 +178,7 @@ export function inspectIndexIntegrity(
       files,
       indexedFiles,
       skippedFiles,
+      skipped,
       chunks,
       vectors,
       missingVectors,
@@ -362,6 +377,7 @@ export function formatIndexIntegrity(report: IndexIntegrityReport): string {
   appendPaths(lines, 'chunkless', report.chunklessPaths);
   appendPaths(lines, 'pending paths', report.pendingPaths);
   appendPaths(lines, 'stale paths', report.stalePaths);
+  appendSkipped(lines, report.skipped);
   if (report.dimensionConflictIdentities.length > 0) lines.push(`dimension conflicts: ${report.dimensionConflictIdentities.join(', ')}`);
   if (report.diagnostic !== undefined) lines.push(`diagnostic:     ${report.diagnostic}`);
   return lines.join('\n');
@@ -402,6 +418,7 @@ function emptyReport(
     files: 0,
     indexedFiles: 0,
     skippedFiles: 0,
+    skipped: [],
     chunks: 0,
     vectors: [],
     missingVectors: 0,
@@ -482,4 +499,11 @@ function formatLease(lease: IndexLeaseSnapshot): string {
 /** Appends one bounded path group only when it contains affected source files. */
 function appendPaths(lines: string[], label: string, affected: readonly string[]): void {
   if (affected.length > 0) lines.push(`${label}:  ${affected.join(', ')}`);
+}
+
+/** Appends intentional omissions with their durable cause, not only a count. */
+function appendSkipped(lines: string[], skipped: readonly SkippedIndexFile[]): void {
+  if (skipped.length > 0) {
+    lines.push(`skipped paths:  ${skipped.map((file) => `${file.path} (${file.reason})`).join(', ')}`);
+  }
 }

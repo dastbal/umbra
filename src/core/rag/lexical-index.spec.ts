@@ -103,6 +103,13 @@ describe('lexical code index', () => {
     expect(() => findLexicalCandidates(db, '" OR * NEAR / retriever.ts', 12)).not.toThrow();
   });
 
+  it('drops TypeScript syntax filler when the query also carries a concrete subject', () => {
+    expect(toLexicalMatchExpression('which use case imports a FIRST quote')).toBe(
+      '"which" OR "use" OR "case" OR "first" OR "quote"',
+    );
+    expect(toLexicalMatchExpression('import')).toBe('"import"');
+  });
+
   it('accepts direct path or metadata evidence, not a content-only hit', () => {
     expect(
       hasExactLexicalEvidence(

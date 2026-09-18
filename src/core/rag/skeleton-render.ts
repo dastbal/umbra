@@ -19,10 +19,9 @@
  * A skeleton is a map. What a map owes the reader is *what this file depends
  * on*, not *which names it pulled from each dependency* — and the named
  * bindings are already in the answer twice over: the `DEPENDENCIES` block lists
- * first-party imports resolved through the dependency graph, and
- * `NestChunker#extractClassContext` prepends every import declaration verbatim
- * to each `class_signature` chunk, so the statements travel inside the snippet
- * as well. Emitting them a third time here bought nothing.
+ * first-party imports resolved through the dependency graph. Class-signature
+ * chunks deliberately no longer repeat import declarations, because a full
+ * import list can outweigh the class behaviour it was meant to contextualize.
  *
  * This renders module specifiers, split by whether they are first-party, and
  * capped the same way the sibling list is. The class and method signatures are

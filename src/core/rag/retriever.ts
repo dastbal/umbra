@@ -18,6 +18,7 @@ import {
 import {
   fuseRankings,
   hasGroundedEvidence,
+  preferExecutableEvidence,
   RetrievalEvidence,
 } from './hybrid-ranking';
 import { renderSkeletonForContext } from './skeleton-render';
@@ -283,7 +284,7 @@ export class RetrieverService {
     semantic.forEach((result) => byId.set(result.chunk.id, result));
     lexicalRows.forEach((result) => byId.set(result.chunk.id, result));
 
-    return fuseRankings(
+    const fused = fuseRankings(
       semantic.map((result) => ({ id: result.chunk.id, lexicalExact: false })),
       lexical.map((candidate) => {
         const result = byId.get(candidate.chunkId);
@@ -312,6 +313,11 @@ export class RetrieverService {
             },
           ];
     });
+    return preferExecutableEvidence(fused.map((candidate) => ({
+      ...candidate,
+      id: candidate.chunk.id,
+      type: candidate.chunk.type,
+    }))).map(({ id: _id, type: _type, ...candidate }) => candidate);
   }
 
   /**

@@ -99,7 +99,7 @@ const retrievalChunkSchema = z.object({
   artifactKind: z.literal('prisma-schema').optional(),
 });
 const graphReadinessSchema = z.object({
-  ready: z.boolean(), reason: z.string(), pendingFiles: z.number().int().nonnegative(),
+  ready: z.boolean(), reason: z.string(), pendingFiles: z.number().int().nonnegative(), affectedPaths: z.array(z.string()),
 });
 const retrievalRecommendationSchema = z.object({
   state: z.enum(['sufficient', 'follow-up', 'clarify']),
@@ -217,7 +217,7 @@ const indexPhaseSchema = z.enum(['awaiting-root', 'starting', 'probing', 'indexi
 export const indexStatusDataSchema = z.object({
   lifecycle: z.object({ phase: indexPhaseSchema, message: z.string(), startedAt: z.number().optional() }),
   stamp: z.object({ provider: z.string(), model: z.string(), dimensions: z.number(), indexedAt: z.number(), filesIndexed: z.number(), status: z.enum(['complete', 'partial', 'empty']) }).optional(),
-  integrity: z.object({ healthy: z.boolean(), databaseExists: z.boolean(), schemaValid: z.boolean(), discoveryValid: z.boolean(), discoveredFiles: z.number(), files: z.number(), indexedFiles: z.number(), skippedFiles: z.number(), chunks: z.number(), missingVectors: z.number(), pendingPaths: z.array(z.string()), stalePaths: z.array(z.string()), diagnostic: z.string().optional() }).optional(),
+  integrity: z.object({ healthy: z.boolean(), databaseExists: z.boolean(), schemaValid: z.boolean(), discoveryValid: z.boolean(), discoveredFiles: z.number(), files: z.number(), indexedFiles: z.number(), skippedFiles: z.number(), skipped: z.array(z.object({ path: z.string(), reason: z.string() })), chunks: z.number(), missingVectors: z.number(), pendingPaths: z.array(z.string()), stalePaths: z.array(z.string()), diagnostic: z.string().optional() }).optional(),
 });
 export const indexStatusResultSchema = createToolResultSchema(z.enum(['INDEX_STATUS_READY', 'INDEX_STATUS_AWAITING_ROOT', 'INDEX_STATUS_DEGRADED', 'INDEX_STATUS_ERROR']), indexStatusDataSchema);
 export type IndexStatusData = z.infer<typeof indexStatusDataSchema>;
@@ -231,7 +231,7 @@ export function executeIndexStatus(rootDir: string | undefined, lifecycle: Index
     const stamp = readIndexStamp(rootDir);
     const integrity = inspectIndexIntegrity(rootDir, stamp === undefined ? undefined : { provider: stamp.provider, model: stamp.model });
     if (stamp !== undefined) data.stamp = { provider: stamp.provider, model: stamp.model, dimensions: stamp.dimensions, indexedAt: stamp.indexedAt, filesIndexed: stamp.filesIndexed, status: stamp.status };
-    data.integrity = { healthy: integrity.healthy, databaseExists: integrity.databaseExists, schemaValid: integrity.schemaValid, discoveryValid: integrity.discoveryValid, discoveredFiles: integrity.discoveredFiles, files: integrity.files, indexedFiles: integrity.indexedFiles, skippedFiles: integrity.skippedFiles, chunks: integrity.chunks, missingVectors: integrity.missingVectors, pendingPaths: [...integrity.pendingPaths], stalePaths: [...integrity.stalePaths], ...(integrity.diagnostic === undefined ? {} : { diagnostic: integrity.diagnostic }) };
+    data.integrity = { healthy: integrity.healthy, databaseExists: integrity.databaseExists, schemaValid: integrity.schemaValid, discoveryValid: integrity.discoveryValid, discoveredFiles: integrity.discoveredFiles, files: integrity.files, indexedFiles: integrity.indexedFiles, skippedFiles: integrity.skippedFiles, skipped: [...integrity.skipped], chunks: integrity.chunks, missingVectors: integrity.missingVectors, pendingPaths: [...integrity.pendingPaths], stalePaths: [...integrity.stalePaths], ...(integrity.diagnostic === undefined ? {} : { diagnostic: integrity.diagnostic }) };
     return { schemaVersion: 1, status: integrity.healthy ? 'success' : 'partial', code: integrity.healthy ? 'INDEX_STATUS_READY' : 'INDEX_STATUS_DEGRADED', summary: integrity.healthy ? 'The code index has complete usable coverage.' : 'The code index is inspectable but has coverage or integrity limitations.', data, evidence: [], diagnostics: integrity.diagnostic === undefined ? [] : [{ severity: 'warning', code: 'INDEX_INTEGRITY', message: integrity.diagnostic }], truncated: false, retryable: false };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -244,7 +244,7 @@ export function formatIndexStatusForModel(result: IndexStatusResult): string {
   const lines = [`state:         ${result.data.lifecycle.phase}`, `message:       ${result.data.lifecycle.message}`];
   if (result.data.lifecycle.startedAt !== undefined) lines.push(`started at:    ${new Date(result.data.lifecycle.startedAt).toISOString()}`);
   if (result.data.stamp !== undefined) lines.push(`provider:      ${result.data.stamp.provider}`, `model:         ${result.data.stamp.model}`, `stamp status:  ${result.data.stamp.status}`, `files indexed: ${result.data.stamp.filesIndexed}`);
-  if (result.data.integrity !== undefined) lines.push(`healthy:       ${result.data.integrity.healthy}`, `discovered:    ${result.data.integrity.discoveredFiles}`, `indexed:       ${result.data.integrity.indexedFiles}`, `chunks:        ${result.data.integrity.chunks}`, `pending:       ${result.data.integrity.pendingPaths.length}`, `stale:         ${result.data.integrity.stalePaths.length}`);
+  if (result.data.integrity !== undefined) lines.push(`healthy:       ${result.data.integrity.healthy}`, `discovered:    ${result.data.integrity.discoveredFiles}`, `indexed:       ${result.data.integrity.indexedFiles}`, `chunks:        ${result.data.integrity.chunks}`, `pending:       ${result.data.integrity.pendingPaths.length}`, `stale:         ${result.data.integrity.stalePaths.length}`, `skipped:       ${result.data.integrity.skipped.map((file) => `${file.path} (${file.reason})`).join(', ') || 'none'}`);
   return lines.join('\n');
 }
 
@@ -733,8 +733,8 @@ function emptyRetrievalStrategy(): NonNullable<CodebaseSearchData['retrieval']> 
     relationsInspected: 0, stopReason: 'not-applicable', marginalEvidence: [],
     discardedBranches: 0, estimatedTokens: 0, elapsedMs: 0,
     readiness: {
-      dependency: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0 },
-      nest: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0 },
+      dependency: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0, affectedPaths: [] },
+      nest: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0, affectedPaths: [] },
     },
     recommendation: { state: 'clarify', reason: 'Retrieval did not run.' },
   };

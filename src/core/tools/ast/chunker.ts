@@ -206,18 +206,15 @@ export class NestChunker {
 
   /**
    * Extracts the "Context" of a class without the heavy method implementation.
-   * Keeps imports (from file), class decorators, properties, and constructor.
+   * Keeps the declaration, decorators, properties, and constructor.
    */
   private extractClassContext(cls: ClassDeclaration): string {
-    // We clone the structure to manipulate text without breaking the original AST
-    // Ideally, we construct a string string representation:
     let text = cls
       .getDecorators()
       .map((d) => d.getText())
       .join('\n');
-    const documentation = this.documentationOf(cls);
-    if (documentation !== undefined) text = `${documentation}\n${text}`;
-    text += `\nexport class ${cls.getName()} {\n`;
+    if (text.length > 0) text += '\n';
+    text += `${this.classDeclarationHeader(cls)} {\n`;
 
     // Add properties (e.g., private readonly userService: UserService;)
     cls.getProperties().forEach((prop) => {
@@ -232,14 +229,32 @@ export class NestChunker {
 
     text += `  // Methods are indexed separately as child chunks...\n`;
     text += `}`;
+    return text;
+  }
 
-    // Prepend Imports from the source file for full context
-    const imports = cls
-      .getSourceFile()
-      .getImportDeclarations()
-      .map((i) => i.getText())
-      .join('\n');
-    return `${imports}\n\n${text}`;
+  /**
+   * Rebuilds only the declaration header from AST facts, never from a generic
+   * `export class` template that could erase abstractness or inheritance.
+   *
+   * @param cls - Parsed class declaration whose executable context is indexed.
+   * @returns A syntactically faithful class header without its opening brace.
+   */
+  private classDeclarationHeader(cls: ClassDeclaration): string {
+    const modifiers = cls.getModifiers().map((modifier) => modifier.getText()).join(' ');
+    const name = cls.getName() ?? 'AnonymousClass';
+    const typeParameters = cls.getTypeParameters().map((parameter) => parameter.getText()).join(', ');
+    const extendsClause = cls.getExtends();
+    const implementsClauses = cls.getImplements();
+    const parts = [
+      modifiers,
+      'class',
+      `${name}${typeParameters.length === 0 ? '' : `<${typeParameters}>`}`,
+      ...(extendsClause === undefined ? [] : [`extends ${extendsClause.getText()}`]),
+      ...(implementsClauses.length === 0
+        ? []
+        : [`implements ${implementsClauses.map((clause) => clause.getText()).join(', ')}`]),
+    ];
+    return parts.filter((part) => part.length > 0).join(' ');
   }
 
   /**

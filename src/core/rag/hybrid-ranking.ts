@@ -15,6 +15,14 @@ export interface HybridCandidate {
   readonly score: number;
 }
 
+/** A retrieved candidate with the source role needed for final presentation order. */
+export interface ExecutableEvidenceCandidate {
+  readonly id: string;
+  readonly type: string;
+  readonly score: number;
+  readonly evidence: RetrievalEvidence;
+}
+
 const RRF_K = 60;
 
 /**
@@ -86,4 +94,38 @@ export function hasGroundedEvidence(
   return candidates.some(
     (candidate) => candidate.evidence === 'hybrid' || candidate.lexicalExact,
   );
+}
+
+/**
+ * Orders already-grounded evidence so executable behaviour is shown before a
+ * class outline whose TSDoc or decorators merely describe that behaviour.
+ *
+ * This deliberately runs after hybrid fusion: it never turns a semantic-only
+ * neighbour into evidence and never compares BM25 with vector distances.
+ *
+ * @param candidates - Fused candidates paired with their indexed chunk role.
+ * @returns A new array ordered for useful source presentation.
+ */
+export function preferExecutableEvidence<T extends ExecutableEvidenceCandidate>(
+  candidates: readonly T[],
+): readonly T[] {
+  return [...candidates].sort((left, right) =>
+    evidencePriority(right.evidence) - evidencePriority(left.evidence) ||
+    executablePriority(right.type) - executablePriority(left.type) ||
+    right.score - left.score ||
+    left.id.localeCompare(right.id),
+  );
+}
+
+/** Keeps stronger independent evidence ahead of a source-role preference. */
+function evidencePriority(evidence: RetrievalEvidence): number {
+  return { semantic: 1, lexical: 2, hybrid: 3 }[evidence];
+}
+
+/** Gives implementation bodies precedence over descriptive declaration context. */
+function executablePriority(type: string): number {
+  if (type === 'method' || type === 'function') return 3;
+  if (type === 'file') return 2;
+  if (type === 'class_signature') return 1;
+  return 0;
 }
