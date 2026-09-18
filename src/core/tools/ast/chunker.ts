@@ -241,7 +241,7 @@ export class NestChunker {
    */
   private classDeclarationHeader(cls: ClassDeclaration): string {
     const modifiers = cls.getModifiers().map((modifier) => modifier.getText()).join(' ');
-    const name = cls.getName() ?? 'AnonymousClass';
+    const name = cls.getName() ?? '';
     const typeParameters = cls.getTypeParameters().map((parameter) => parameter.getText()).join(', ');
     const extendsClause = cls.getExtends();
     const implementsClauses = cls.getImplements();
