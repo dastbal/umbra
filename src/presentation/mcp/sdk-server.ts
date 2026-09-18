@@ -142,7 +142,7 @@ export function buildSdkServer(sdk: McpSdk, catalogs: SdkServerCatalogs): McpSer
         // Every published tool reads; none of them writes, and that is a
         // property of the mode rather than of any one tool (ADR-024,
         // constraint 2).
-        annotations: {
+        annotations: tool.annotations ?? {
           readOnlyHint: true,
           destructiveHint: false,
           idempotentHint: true,

@@ -9,6 +9,7 @@ import {
 } from '../../core/tools';
 import { McpToolResult } from './mcp.contracts';
 import { toStructuredToolResult } from './dto-mapper';
+import { McpConversationService } from './conversation-service';
 
 /** A read-only capability published to a foreign MCP client. */
 export interface PublishedTool {
@@ -19,6 +20,36 @@ export interface PublishedTool {
   readonly outputSchema?: z.ZodType;
   readonly invoke: (args: Record<string, unknown>) => Promise<McpToolResult>;
   readonly rootUnavailable?: (message: string) => McpToolResult;
+  /** Per-tool MCP metadata when a read invokes an external model service. */
+  readonly annotations?: Record<string, boolean>;
+}
+
+/** Publishes a durable, read-only advisor conversation with an opaque receipt. */
+function publishConversation(service: McpConversationService, rootDir: () => string | undefined): PublishedTool {
+  const schema = z.object({
+    conversationId: z.string().uuid(),
+    answer: z.string(),
+  });
+  return {
+    name: 'continue_conversation',
+    title: 'Continue repository conversation',
+    description: 'Starts or continues a read-only repository advisor conversation. Keep the returned conversationId to preserve its checked context across calls.',
+    inputSchema: {
+      message: z.string().trim().min(1).max(12_000).describe('The next user message.'),
+      conversationId: z.string().uuid().optional().describe('Opaque receipt returned by a prior conversation turn.'),
+    },
+    outputSchema: schema,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    invoke: async (args) => {
+      const activeRoot = rootDir();
+      if (activeRoot === undefined) {
+        return { content: [{ type: 'text', text: 'A validated project root is required before a conversation can start.' }], isError: true };
+      }
+      const input = z.object({ message: z.string().trim().min(1).max(12_000), conversationId: z.string().uuid().optional() }).parse(args);
+      const result = await service.continue(activeRoot, input.message, input.conversationId);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: schema.parse(result) };
+    },
+  };
 }
 
 /** Current availability of semantic retrieval without invoking a provider. */
@@ -171,11 +202,16 @@ export function buildToolCatalog(options: {
   decorateSemanticAnswer?: (text: string) => string;
   projectRootReady?: () => boolean;
   projectRootMessage?: () => string;
+  readProjectRoot?: () => string | undefined;
+  conversationService?: McpConversationService;
 }): PublishedTool[] {
   const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), publishWorkspaceSearch(), publishProjectInventory(), publishGraphRagInvestigation(options.semanticSearchReadiness), {
     name: 'get_index_status', title: 'Get index status', description: 'Reports live lifecycle, persisted provenance, and durable coverage as separate fields without invoking an embedding provider.', inputSchema: {}, outputSchema: indexStatusResultSchema,
     invoke: async () => toStructuredToolResult(indexStatusResultSchema, options.readIndexStatus()),
   }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
   if (options.projectRootReady === undefined) return catalog;
-  return catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
+  const rooted = catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
+  return options.conversationService === undefined
+    ? rooted
+    : [...rooted, publishConversation(options.conversationService, options.readProjectRoot ?? (() => undefined))];
 }
