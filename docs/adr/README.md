@@ -48,6 +48,7 @@ means the record needs an amendment — flag it instead of silently picking a si
 | [033](./ADR-033-prisma-schema-configuration-evidence.md) | Accepted | `rag`, `indexing`, `prisma`, `evidence` | Authoritative Prisma schemas are indexed as labelled configuration evidence; migrations and arbitrary configuration remain out of scope. |
 | [034](./ADR-034-repeated-manner-modifiers-do-not-block-retrieval.md) | Accepted | `rag`, `retrieval`, `abstention`, `language` | An absent `X by X` manner modifier does not block an otherwise grounded query, and remains visible to clients. |
 | [035](./ADR-035-live-workspace-evidence-search.md) | Accepted | `workspace`, `search`, `mcp`, `security`, `retrieval` | Safe literal live search and metadata inventory complement, but never silently broaden, semantic indexing. |
+| [036](./ADR-036-persistent-read-only-mcp-conversations.md) | Accepted | `mcp`, `sessions`, `checkpoint`, `safety`, `elicitation` | An opaque receipt maps advisor turns to a dedicated read-only LangGraph checkpoint; native elicitation remains capability-gated follow-up work. |
 
 > **Workspace directory renamed 2026-08-28.** Every `.agent/` path in records 001–017 now reads `.umbra/`. Those records are deliberately **not** rewritten — each was accurate when written — and [ADR-018](./ADR-018-one-named-workspace-directory.md) supersedes the name for all of them.
 
