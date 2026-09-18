@@ -151,7 +151,7 @@ describe('MCP server built on the official SDK', () => {
     expect(listed.result.tools[0].annotations.destructiveHint).toBe(false);
   });
 
-  it('never advertises sampling', async () => {
+  it('advertises logging for post-handshake operator liveness but never sampling', async () => {
     // Sampling would let this server spend the client's model budget on a
     // prompt nobody audited.
     const output = await exchange([stubTool()], [handshake]);
@@ -160,6 +160,7 @@ describe('MCP server built on the official SDK', () => {
       .map((line) => JSON.parse(line))
       .find((message) => message.id === 1);
 
+    expect(initialized.result.capabilities).toHaveProperty('logging');
     expect(initialized.result.capabilities).not.toHaveProperty('sampling');
   });
 

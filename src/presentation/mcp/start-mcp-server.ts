@@ -168,6 +168,13 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
 
   // This is intentionally before provider probing and index work.
   await server.connect(new load.sdk.StdioServerTransport());
+  await server.sendLoggingMessage({
+    level: 'notice',
+    logger: 'umbra.mcp',
+    data: rootDir === undefined
+      ? 'Umbra connected and is waiting for a validated project root.'
+      : 'Umbra connected; semantic-index warm-up continues in the background.',
+  });
   report('MCP transport connected; index warm-up continues in the background.');
 
   if (rootDir !== undefined) {
