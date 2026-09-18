@@ -45,6 +45,18 @@ describe('AgentKernel', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  it('gives code-search roles semantic, literal, and metadata search without a shell', () => {
+    const names = resolveCapabilityTools(['search_codebase']).map((tool) => tool.name);
+
+    expect(names).toEqual(expect.arrayContaining([
+      'ask_codebase',
+      'inspect_project',
+      'search_workspace',
+      'refresh_project_index',
+    ]));
+    expect(names).not.toContain('execute_command');
+  });
+
   it('builds an advisory subagent with kernel instructions and only declared tools', () => {
     const role = advisory();
     const subagent = buildSubagentFromProfile(role, context);

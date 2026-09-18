@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { runtimeRoot } from '../config/runtime-root';
 import { WorkspaceDiscoveryError, WorkspaceDiscoveryService } from '../config/workspace-discovery';
+import { WorkspaceEvidenceError, WorkspaceEvidenceService } from '../config/workspace-evidence';
 import { readIndexStamp } from '../rag/index-stamp';
 import { inspectIndexIntegrity } from '../rag/index-integrity';
 import {
@@ -26,6 +27,7 @@ import { AgentDB } from '../state/db';
 import { clearPendingRetrievalAlias, stageRetrievalAlias } from '../rag/retrieval-memory';
 import { AdrIndexEntry, buildAdrIndex } from './adr-index';
 import { createToolResultSchema, ToolResult } from './tool-result';
+import { wrapUntrustedFileContent } from './utils/untrusted-content';
 
 const execFileAsync = promisify(execFile);
 const securityPolicy = new AgentSecurityPolicy();
@@ -141,6 +143,33 @@ export const codebaseSearchResultSchema = createToolResultSchema(
 );
 export type CodebaseSearchData = z.infer<typeof codebaseSearchDataSchema>;
 export type CodebaseSearchResult = ToolResult<z.infer<typeof codebaseSearchResultSchema>['code'], CodebaseSearchData>;
+
+export const workspaceInventoryDataSchema = z.object({
+  filesByType: z.record(z.string(), z.number().int().nonnegative()),
+  excludedByReason: z.record(z.string(), z.number().int().nonnegative()),
+});
+export const workspaceInventoryResultSchema = createToolResultSchema(
+  z.enum(['WORKSPACE_INVENTORY_READY', 'WORKSPACE_INVENTORY_ERROR']),
+  workspaceInventoryDataSchema,
+);
+export type WorkspaceInventoryData = z.infer<typeof workspaceInventoryDataSchema>;
+export type WorkspaceInventoryResult = ToolResult<z.infer<typeof workspaceInventoryResultSchema>['code'], WorkspaceInventoryData>;
+
+const workspaceMatchSchema = z.object({
+  path: z.string(), line: z.number().int().positive(), text: z.string(),
+  artifactType: z.enum(['graphql', 'json', 'markdown', 'prisma', 'properties', 'sql', 'toml', 'typescript', 'xml', 'yaml']),
+});
+export const workspaceSearchDataSchema = z.object({
+  query: z.string(), path: z.string().optional(), scannedFiles: z.number().int().nonnegative(),
+  matches: z.array(workspaceMatchSchema),
+  excludedByReason: z.record(z.string(), z.number().int().nonnegative()),
+});
+export const workspaceSearchResultSchema = createToolResultSchema(
+  z.enum(['WORKSPACE_MATCHES_FOUND', 'WORKSPACE_NO_MATCHES', 'WORKSPACE_SEARCH_ERROR']),
+  workspaceSearchDataSchema,
+);
+export type WorkspaceSearchData = z.infer<typeof workspaceSearchDataSchema>;
+export type WorkspaceSearchResult = ToolResult<z.infer<typeof workspaceSearchResultSchema>['code'], WorkspaceSearchData>;
 
 const graphRagBudgetSchema = z.object({
   maxSeeds: z.number().int().nonnegative(), maxDepth: z.number().int().nonnegative(),
@@ -441,6 +470,100 @@ export function formatIntegrityForModel(result: IntegrityResult): string {
   }
   const projects = result.data.projects.map((project) => `✅ ${project.path}${project.output ? `\n${project.output}` : ''}`);
   return `✅ INTEGRITY CHECK PASSED.\n${projects.join('\n')}`;
+}
+
+/** Inspects safe workspace artifact metadata without reading their content or requiring an index. */
+export function executeProjectInventory(rootDir: string = runtimeRoot()): WorkspaceInventoryResult {
+  const emptyData: WorkspaceInventoryData = { filesByType: {}, excludedByReason: {} };
+  try {
+    const inventory = new WorkspaceEvidenceService(rootDir).inspect();
+    const data: WorkspaceInventoryData = {
+      filesByType: { ...inventory.filesByType },
+      excludedByReason: { ...inventory.excludedByReason },
+    };
+    const count = Object.values(data.filesByType).reduce((total, value) => total + value, 0);
+    return {
+      schemaVersion: 1, status: 'success', code: 'WORKSPACE_INVENTORY_READY',
+      summary: `${count} safe text artifact${count === 1 ? '' : 's'} mapped by type.`,
+      data, evidence: [], diagnostics: [], truncated: false, retryable: false,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      schemaVersion: 1, status: 'error', code: 'WORKSPACE_INVENTORY_ERROR',
+      summary: 'The workspace inventory failed.', data: emptyData, evidence: [],
+      diagnostics: [{ severity: 'error', code: 'WORKSPACE_INVENTORY_ERROR', message }],
+      truncated: false, retryable: false,
+    };
+  }
+}
+
+/** Formats metadata-only inventory for a model without presenting it as source evidence. */
+export function formatProjectInventoryForModel(result: WorkspaceInventoryResult): string {
+  if (result.status === 'error') return `❌ Workspace inventory failed: ${result.diagnostics[0].message}`;
+  const types = Object.entries(result.data.filesByType).map(([type, count]) => `- ${type}: ${count}`);
+  const excluded = Object.entries(result.data.excludedByReason).map(([reason, count]) => `- ${reason}: ${count}`);
+  return [
+    '📚 WORKSPACE INVENTORY (metadata only; this is not semantic index coverage)',
+    types.length === 0 ? 'No eligible text artifacts found.' : types.join('\n'),
+    excluded.length === 0 ? '' : `Excluded before any content read:\n${excluded.join('\n')}`,
+  ].filter((section) => section.length > 0).join('\n\n');
+}
+
+/** Runs a bounded literal search over safe workspace artifacts without consulting the semantic index. */
+export function executeWorkspaceSearch(input: {
+  query: string; path?: string; maxMatches?: number;
+}, rootDir: string = runtimeRoot()): WorkspaceSearchResult {
+  const emptyData: WorkspaceSearchData = {
+    query: input.query, ...(input.path === undefined ? {} : { path: input.path }),
+    scannedFiles: 0, matches: [], excludedByReason: {},
+  };
+  try {
+    const search = new WorkspaceEvidenceService(rootDir).search(input);
+    const data: WorkspaceSearchData = {
+      query: search.query, ...(input.path === undefined ? {} : { path: input.path }),
+      scannedFiles: search.scannedFiles,
+      matches: search.matches.map((match) => ({ ...match })),
+      excludedByReason: { ...search.excludedByReason },
+    };
+    if (data.matches.length === 0) {
+      return {
+        schemaVersion: 1, status: 'empty', code: 'WORKSPACE_NO_MATCHES',
+        summary: `No safe literal matches found for '${search.query}'.`, data,
+        evidence: [], diagnostics: [], truncated: search.truncated, retryable: false,
+        nextAction: 'Try ask_codebase for a concept, or narrow search_workspace with a repository-relative path.',
+      };
+    }
+    return {
+      schemaVersion: 1, status: search.truncated ? 'partial' : 'success', code: 'WORKSPACE_MATCHES_FOUND',
+      summary: `${data.matches.length} literal workspace match${data.matches.length === 1 ? '' : 'es'} found.`, data,
+      evidence: data.matches.map((match) => ({
+        path: match.path, startLine: match.line, endLine: match.line,
+        reason: `live literal ${match.artifactType} match`,
+      })),
+      diagnostics: [], truncated: search.truncated, retryable: false,
+      ...(search.truncated ? { nextAction: 'Narrow the search path or query; the bounded live scan is incomplete.' } : {}),
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    const blocked = error instanceof WorkspaceEvidenceError
+      && (message.includes('escapes the repository') || message.includes('excluded by policy'));
+    return {
+      schemaVersion: 1, status: blocked ? 'blocked' : 'error', code: 'WORKSPACE_SEARCH_ERROR',
+      summary: blocked ? 'The workspace search path is blocked.' : 'The workspace search failed.', data: emptyData,
+      evidence: [], diagnostics: [{ severity: 'error', code: 'WORKSPACE_SEARCH_ERROR', message }],
+      truncated: false, retryable: false,
+    };
+  }
+}
+
+/** Frames literal source lines as untrusted content before they reach a model. */
+export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): string {
+  if (result.status === 'blocked' || result.status === 'error') return `❌ Workspace search failed: ${result.diagnostics[0].message}`;
+  if (result.data.matches.length === 0) return `ℹ️ ${result.summary}`;
+  const lines = result.data.matches.map((match) => `${match.path}:${match.line} [${match.artifactType}] ${match.text}`);
+  const suffix = result.truncated ? '\n\n[The live literal search was truncated; narrow the request before drawing a complete conclusion.]' : '';
+  return `🔎 LIVE WORKSPACE SEARCH (literal matches; not semantic ranking)\n${wrapUntrustedFileContent(lines.join('\n'))}${suffix}`;
 }
 
 /** Searches the code index and retains evidence before model formatting. */

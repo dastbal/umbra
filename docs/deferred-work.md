@@ -2219,3 +2219,39 @@ to the lifecycle observer.
    notification contract that clients demonstrably consume.
 3. Test the client-visible sequence and timeout behaviour before advertising it
    as a startup fix.
+
+---
+
+## Local artifact-policy adviser
+
+> Deferred 2026-09-18 while implementing ADR-035's deterministic workspace
+> inventory and literal evidence search.
+
+### The idea
+
+Offer an optional local LLM adviser that proposes **artifact classes** worth
+adding to semantic indexing after `inspect_project` reports the repository's
+safe type inventory.
+
+### What is actually missing
+
+Umbra can now distinguish that a workspace contains Prisma, SQL, JSON, YAML,
+and contracts without indexing their content. It still needs a human decision
+and an artifact-specific parser before any of those classes becomes semantic
+evidence. An adviser must not turn extension frequency into permission to index
+history, generated output, or secrets.
+
+### The mechanism to reuse
+
+`inspect_project` supplies metadata-only counts and exclusion reasons;
+ADR-033's Prisma adapter supplies the pattern for one authoritative artifact
+class, explicit labelling, and a consumer fixture that tests stale history.
+
+### Plan
+
+1. Give the local adviser only paths, extensions, sizes, and inventory counts —
+   never file bodies or secret-like paths.
+2. Have it return a proposed artifact class, rationale, risk, and the parser
+   work required; it may not alter `umbra.json` or indexing policy.
+3. Require an operator decision, a new ADR or amendment, a parser, a labelled
+   result contract, and a benchmark fixture before activating one class.

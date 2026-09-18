@@ -2,9 +2,10 @@ import { z } from 'zod';
 import {
   adrCatalogResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
   executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
+  executeProjectInventory, executeWorkspaceSearch,
   executeNestGraph, integrityResultSchema, nestGraphResultSchema,
   graphRagInvestigationResultSchema,
-  indexStatusResultSchema, type IndexStatusResult,
+  indexStatusResultSchema, type IndexStatusResult, workspaceInventoryResultSchema, workspaceSearchResultSchema,
 } from '../../core/tools';
 import { McpToolResult } from './mcp.contracts';
 import { toStructuredToolResult } from './dto-mapper';
@@ -88,7 +89,7 @@ function publishIntegrityCheck(): PublishedTool {
 function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): PublishedTool {
   const unavailable = (message: string) => toStructuredToolResult(codebaseSearchResultSchema, {
     schemaVersion: 1, status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE', summary: 'Semantic search is unavailable.',
-    data: { query: '', recoveredWithContext: false, unknownTerms: [], files: [] }, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
+    data: { query: '', recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], files: [] }, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
     nextAction: 'Read get_index_status and retry after durable coverage is ready.',
   });
   return {
@@ -98,6 +99,43 @@ function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): Publi
     outputSchema: codebaseSearchResultSchema,
     invoke: async (args) => { const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional() }).parse(args); const readiness = readReadiness(); if (!readiness.ready) return unavailable(readiness.message); return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(input)).result); },
     rootUnavailable: unavailable,
+  };
+}
+
+/** Publishes a metadata-only map of the pinned workspace's safe artifact types. */
+function publishProjectInventory(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(workspaceInventoryResultSchema, {
+    schemaVersion: 1, status: 'error', code: 'WORKSPACE_INVENTORY_ERROR', summary: 'The workspace inventory is unavailable.',
+    data: { filesByType: {}, excludedByReason: {} }, evidence: [], diagnostics: diagnostic(message, 'WORKSPACE_INVENTORY_ERROR'), truncated: false, retryable: false,
+  });
+  return {
+    name: 'inspect_project', title: 'Inspect project artifact types',
+    description: 'Maps safe project artifact types and exclusions without reading content or requiring an index.',
+    inputSchema: {}, outputSchema: workspaceInventoryResultSchema,
+    invoke: async () => toStructuredToolResult(workspaceInventoryResultSchema, executeProjectInventory()), rootUnavailable: failure,
+  };
+}
+
+/** Publishes bounded literal workspace search without requiring semantic-index coverage. */
+function publishWorkspaceSearch(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(workspaceSearchResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'WORKSPACE_SEARCH_ERROR', summary: 'The workspace search is blocked.',
+    data: { query: '', scannedFiles: 0, matches: [], excludedByReason: {} }, evidence: [], diagnostics: diagnostic(message, 'WORKSPACE_SEARCH_ERROR'), truncated: false, retryable: false,
+  });
+  return {
+    name: 'search_workspace', title: 'Search workspace literally',
+    description: 'Finds exact literal text in safe project artifacts, including files outside the semantic index. Results are live matches, not semantic ranking.',
+    inputSchema: {
+      query: z.string().trim().min(1).max(500).describe('Exact literal text to find.'),
+      path: z.string().min(1).optional().describe('Optional repository-relative file or directory.'),
+      maxMatches: z.number().int().min(1).max(100).optional().describe('Maximum matches to return; defaults to 100.'),
+    },
+    outputSchema: workspaceSearchResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ query: z.string().trim().min(1).max(500), path: z.string().min(1).optional(), maxMatches: z.number().int().min(1).max(100).optional() }).parse(args);
+      return toStructuredToolResult(workspaceSearchResultSchema, executeWorkspaceSearch(input));
+    },
+    rootUnavailable: failure,
   };
 }
 
@@ -134,7 +172,7 @@ export function buildToolCatalog(options: {
   projectRootReady?: () => boolean;
   projectRootMessage?: () => string;
 }): PublishedTool[] {
-  const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), publishGraphRagInvestigation(options.semanticSearchReadiness), {
+  const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), publishWorkspaceSearch(), publishProjectInventory(), publishGraphRagInvestigation(options.semanticSearchReadiness), {
     name: 'get_index_status', title: 'Get index status', description: 'Reports live lifecycle, persisted provenance, and durable coverage as separate fields without invoking an embedding provider.', inputSchema: {}, outputSchema: indexStatusResultSchema,
     invoke: async () => toStructuredToolResult(indexStatusResultSchema, options.readIndexStatus()),
   }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];

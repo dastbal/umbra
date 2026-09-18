@@ -82,6 +82,7 @@ async function exchange(
 function stubTool(overrides: Partial<PublishedTool> = {}): PublishedTool {
   return {
     name: 'list_adrs',
+    title: 'List architecture decisions',
     description: 'stub',
     inputSchema: { refresh: z.boolean().optional() },
     invoke: async () => ({ content: [{ type: 'text', text: 'catalog' }] }),

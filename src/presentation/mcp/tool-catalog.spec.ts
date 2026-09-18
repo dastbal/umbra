@@ -69,6 +69,37 @@ describe('MCP ask_codebase catalog', () => {
   });
 });
 
+describe('MCP live workspace evidence catalog', () => {
+  const catalog = () => buildToolCatalog({
+    semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+    readIndexStatus: () => indexStatus(),
+  });
+
+  it('publishes literal search and metadata inventory without requiring semantic readiness', () => {
+    const search = catalog().find((candidate) => candidate.name === 'search_workspace');
+    const inventory = catalog().find((candidate) => candidate.name === 'inspect_project');
+
+    expect(search?.inputSchema.query).toBeDefined();
+    expect(search?.inputSchema.path).toBeDefined();
+    expect(search?.description).toContain('not semantic ranking');
+    expect(inventory?.inputSchema).toEqual({});
+  });
+
+  it('blocks literal search at the same pinned-root boundary as other workspace tools', async () => {
+    const search = buildToolCatalog({
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      readIndexStatus: () => indexStatus(),
+      projectRootReady: () => false,
+      projectRootMessage: () => 'Open exactly one project and reconnect.',
+    }).find((candidate) => candidate.name === 'search_workspace');
+
+    await expect(search?.invoke({ query: 'idempotencyKey' })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { status: 'blocked', code: 'WORKSPACE_SEARCH_ERROR' },
+    });
+  });
+});
+
 describe('MCP GraphRAG Detective catalog', () => {
   it('publishes a deterministic, opt-in GraphRAG investigation without a promotion input', () => {
     const tool = buildToolCatalog({

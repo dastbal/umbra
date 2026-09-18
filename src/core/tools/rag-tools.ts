@@ -6,7 +6,13 @@ import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
 import { readIndexStamp } from '../rag/index-stamp';
 import { runtimeRoot } from '../config/runtime-root';
-import { executeCodebaseSearch } from './read-only-executions';
+import {
+  executeCodebaseSearch,
+  executeProjectInventory,
+  executeWorkspaceSearch,
+  formatProjectInventoryForModel,
+  formatWorkspaceSearchForModel,
+} from './read-only-executions';
 
 export const askCodebaseTool = tool(
   async ({ query, context }) => {
@@ -24,6 +30,42 @@ export const askCodebaseTool = tool(
       context: z.string().max(2000).optional().describe(
         "Optional clarification from the operator after an earlier search lacked evidence.",
       ),
+    }),
+    responseFormat: 'content_and_artifact',
+  },
+);
+
+/** Maps the safe artifact types present in the pinned project without reading their content. */
+export const inspectProjectTool = tool(
+  async () => {
+    const result = executeProjectInventory();
+    return [formatProjectInventoryForModel(result), result] as const;
+  },
+  {
+    name: 'inspect_project',
+    description: 'Maps safe project artifact types and exclusions without reading file content or requiring an index.',
+    schema: z.object({}),
+    responseFormat: 'content_and_artifact',
+  },
+);
+
+/** Finds exact literal text in safe project artifacts, including files outside the semantic index. */
+export const searchWorkspaceTool = tool(
+  async ({ query, path, maxMatches }) => {
+    const result = executeWorkspaceSearch({
+      query,
+      ...(path === undefined ? {} : { path }),
+      ...(maxMatches === undefined ? {} : { maxMatches }),
+    });
+    return [formatWorkspaceSearchForModel(result), result] as const;
+  },
+  {
+    name: 'search_workspace',
+    description: 'Searches safe workspace text for an exact literal. Use for known symbols, keys, or phrases that may be outside the semantic index. Returns live matches, not semantic ranking.',
+    schema: z.object({
+      query: z.string().trim().min(1).max(500).describe('Exact literal text to find.'),
+      path: z.string().min(1).optional().describe('Optional repository-relative file or directory to search.'),
+      maxMatches: z.number().int().min(1).max(100).optional().describe('Maximum matches to return; defaults to 100.'),
     }),
     responseFormat: 'content_and_artifact',
   },
