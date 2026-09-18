@@ -87,12 +87,15 @@ describe('WorkspaceEvidenceService', () => {
   it('supports a direct safe-file search while refusing an ignored directory', () => {
     write('prisma/schema.prisma', 'model Payment {\n  idempotencyKey String? @unique\n}');
     write('node_modules/package/index.js', 'const idempotencyKey = "dependency";');
+    write('.env', 'idempotencyKey=secret');
 
     const service = new WorkspaceEvidenceService(rootDir);
 
     expect(service.search({ query: 'idempotencyKey', path: 'prisma/schema.prisma' }).matches)
       .toMatchObject([{ path: 'prisma/schema.prisma', line: 2 }]);
     expect(() => service.search({ query: 'idempotencyKey', path: 'node_modules' }))
+      .toThrow('excluded by policy');
+    expect(() => service.search({ query: 'idempotencyKey', path: '.env' }))
       .toThrow('excluded by policy');
   });
 });

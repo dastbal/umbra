@@ -90,6 +90,19 @@ Umbra's pre-read policy or expose its write tools.
 - Focused Jest suites passed: 3 suites, 26 tests.
 - `tsc --noEmit` passed.
 
+## Amendment — 2026-09-18 · Explicit forbidden targets are blocked
+
+A direct request for a secret-like file was initially skipped before its
+contents were read, but was reported as `empty`. That preserved confidentiality
+but gave the wrong meaning: `empty` means a permitted scan completed without a
+match. Direct paths covered by the pre-read exclusion policy now fail as
+`blocked` with `WORKSPACE_SEARCH_ERROR`. Recursive scans continue to skip and
+count excluded artifacts, because they are not an explicit request to inspect
+one forbidden target.
+
+`workspace-evidence.spec.ts` covers the boundary at the service and
+`read-only-executions.workspace.spec.ts` verifies the typed MCP-facing outcome.
+
 ## Related files
 
 - `src/core/config/workspace-evidence.ts` — `WorkspaceEvidenceService`,

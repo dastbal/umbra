@@ -561,9 +561,12 @@ export function executeWorkspaceSearch(input: {
 export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): string {
   if (result.status === 'blocked' || result.status === 'error') return `❌ Workspace search failed: ${result.diagnostics[0].message}`;
   if (result.data.matches.length === 0) return `ℹ️ ${result.summary}`;
-  const lines = result.data.matches.map((match) => `${match.path}:${match.line} [${match.artifactType}] ${match.text}`);
+  const matches = result.data.matches.map((match) => wrapUntrustedFileContent(
+    `${match.path}:${match.line}`,
+    `[${match.artifactType}] ${match.text}`,
+  ));
   const suffix = result.truncated ? '\n\n[The live literal search was truncated; narrow the request before drawing a complete conclusion.]' : '';
-  return `🔎 LIVE WORKSPACE SEARCH (literal matches; not semantic ranking)\n${wrapUntrustedFileContent(lines.join('\n'))}${suffix}`;
+  return `🔎 LIVE WORKSPACE SEARCH (literal matches; not semantic ranking)\n${matches.join('\n')}${suffix}`;
 }
 
 /** Searches the code index and retains evidence before model formatting. */

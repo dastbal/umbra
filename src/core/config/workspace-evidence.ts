@@ -168,6 +168,9 @@ export class WorkspaceEvidenceService {
     if (normalizedTarget.split('/').some((segment) => IGNORED_DIRECTORIES.has(segment))) {
       throw new WorkspaceEvidenceError(`The search path is excluded by policy: ${relativePath}`);
     }
+    if (exclusionReason(normalizedTarget) !== undefined) {
+      throw new WorkspaceEvidenceError(`The search path is excluded by policy: ${relativePath}`);
+    }
     const files: WorkspaceEvidenceFile[] = [];
     const visit = (current: string): void => {
       const entries = fs.readdirSync(current, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
