@@ -126,6 +126,7 @@ export const codebaseSearchDataSchema = z.object({
   abstentionReason: z.enum(['unknown_terms', 'ungrounded']).optional(),
   unknownTerms: z.array(z.string()),
   ignoredModifiers: z.array(z.string()),
+  droppedTerms: z.array(z.string()),
   files: z.array(z.object({
     path: z.string(), origin: z.enum(['seed', 'graph']), evidence: z.enum(['semantic', 'lexical', 'hybrid', 'graph']),
     score: z.number(), relations: z.array(z.string()),
@@ -575,7 +576,7 @@ export async function executeCodebaseSearch(input: {
 }): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
   const emptyData: CodebaseSearchData = {
     query: input.query, ...(input.context === undefined ? {} : { clarification: input.context }),
-    recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], files: [], retrieval: emptyRetrievalStrategy(),
+    recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
   };
   try {
     const stamp = readIndexStamp(runtimeRoot());
@@ -697,13 +698,13 @@ function emptyGraphRagBudget(): GraphRagInvestigationData['budget'] {
 function toCodebaseSearchData(result: GraphRagSearchResult): CodebaseSearchData {
   if (result.status === 'abstained') {
     return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
-    recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], ignoredModifiers: [...result.ignoredModifiers], files: [],
+    recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], ignoredModifiers: [...result.ignoredModifiers], droppedTerms: [], files: [],
       ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
       retrieval: toToolRetrievalStrategy(result.strategy),
     };
   }
   return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
-    recoveredWithContext: result.recoveredWithContext, unknownTerms: [], ignoredModifiers: [...result.ignoredModifiers],
+    recoveredWithContext: result.recoveredWithContext, unknownTerms: [], ignoredModifiers: [...result.ignoredModifiers], droppedTerms: [...result.droppedTerms],
     files: result.files.map((file) => ({ path: file.filePath, origin: file.origin, evidence: file.evidence, score: file.score, relations: [...file.relations], imports: [...file.imports],
       chunks: file.chunks.map((chunk) => ({ type: chunk.type, content: chunk.content,
         startLine: chunk.metadata.startLine, endLine: chunk.metadata.endLine,

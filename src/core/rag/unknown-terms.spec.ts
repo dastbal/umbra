@@ -106,13 +106,22 @@ describe('findUnknownTerms', () => {
 
     expect(assessment.strict).toEqual([]);
     expect(assessment.ignoredModifiers).toEqual(['byte']);
+    expect(assessment.droppedTerms).toEqual([]);
   });
 
-  it('keeps the same word strict when it is the only possible subject', () => {
+  it('reports one unknown term as dropped when another subject is grounded', () => {
     const assessment = assessUnknownTerms(db, 'Where are bytes handled?');
 
-    expect(assessment.strict).toEqual(['bytes']);
+    expect(assessment.strict).toEqual([]);
     expect(assessment.ignoredModifiers).toEqual([]);
+    expect(assessment.droppedTerms).toEqual(['bytes']);
+  });
+
+  it('keeps searching when a known subject is paired with one unknown subject', () => {
+    const assessment = assessUnknownTerms(db, 'Compare the retriever signature byte by byte');
+
+    expect(assessment.strict).toEqual([]);
+    expect(assessment.droppedTerms).toEqual(['compare', 'signature', 'byte']);
   });
 });
 

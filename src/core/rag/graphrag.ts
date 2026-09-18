@@ -192,6 +192,7 @@ export type GraphRagSearchResult =
       readonly clarification?: string;
       readonly recoveredWithContext: boolean;
       readonly ignoredModifiers: readonly string[];
+      readonly droppedTerms: readonly string[];
       readonly files: readonly GraphRagFileContext[];
       readonly provenance?: RetrievalProvenance;
       readonly strategy: GraphRagStrategy;
@@ -603,6 +604,7 @@ export class GraphRagService {
         ...(prepared.base.clarification === undefined ? {} : { clarification: prepared.base.clarification }),
         recoveredWithContext: prepared.base.recoveredWithContext,
         ignoredModifiers: prepared.base.ignoredModifiers,
+        droppedTerms: prepared.base.droppedTerms,
         files,
         ...(prepared.base.provenance === undefined ? {} : { provenance: prepared.base.provenance }),
         strategy,

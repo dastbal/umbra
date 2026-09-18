@@ -89,7 +89,7 @@ function publishIntegrityCheck(): PublishedTool {
 function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): PublishedTool {
   const unavailable = (message: string) => toStructuredToolResult(codebaseSearchResultSchema, {
     schemaVersion: 1, status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE', summary: 'Semantic search is unavailable.',
-    data: { query: '', recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], files: [] }, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
+    data: { query: '', recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [] }, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
     nextAction: 'Read get_index_status and retry after durable coverage is ready.',
   });
   return {
