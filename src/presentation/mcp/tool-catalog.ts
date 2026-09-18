@@ -210,7 +210,7 @@ export function buildToolCatalog(options: {
     invoke: async () => toStructuredToolResult(indexStatusResultSchema, options.readIndexStatus()),
   }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
   if (options.projectRootReady === undefined) return catalog;
-  const rooted = catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
+  const rooted = catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args: Record<string, unknown>) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
   return options.conversationService === undefined
     ? rooted
     : [...rooted, publishConversation(options.conversationService, options.readProjectRoot ?? (() => undefined))];

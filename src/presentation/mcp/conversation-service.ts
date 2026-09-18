@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto';
 import { HumanMessage } from '@langchain/core/messages';
-import { DeepAgentFactory } from '../../core/agent/deep-agent-factory';
 
 /** A compiled graph surface needed by the persistent MCP conversation adapter. */
 interface McpConversationAgent {
@@ -63,6 +62,11 @@ export class McpConversationService {
 }
 
 async function defaultAgentFactory(rootDir: string, threadId: string): Promise<McpConversationAgent> {
+  // Keep the heavy DeepAgents dependency out of the presentation module's
+  // import path. This preserves a small MCP catalog startup surface and lets
+  // the receipt contract be tested through its injected factory.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { DeepAgentFactory } = require('../../core/agent/deep-agent-factory') as typeof import('../../core/agent/deep-agent-factory');
   return DeepAgentFactory.createMcpAdvisor({ rootDir, threadId }) as Promise<McpConversationAgent>;
 }
 
