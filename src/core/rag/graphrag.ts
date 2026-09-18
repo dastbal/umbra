@@ -191,6 +191,7 @@ export type GraphRagSearchResult =
       readonly query: string;
       readonly clarification?: string;
       readonly recoveredWithContext: boolean;
+      readonly ignoredModifiers: readonly string[];
       readonly files: readonly GraphRagFileContext[];
       readonly provenance?: RetrievalProvenance;
       readonly strategy: GraphRagStrategy;
@@ -202,6 +203,7 @@ export type GraphRagSearchResult =
       readonly clarification?: string;
       readonly reason: 'unknown_terms' | 'ungrounded';
       readonly unknownTerms: readonly string[];
+      readonly ignoredModifiers: readonly string[];
       readonly provenance?: RetrievalProvenance;
       readonly strategy: GraphRagStrategy;
     };
@@ -600,6 +602,7 @@ export class GraphRagService {
         query: prepared.base.query,
         ...(prepared.base.clarification === undefined ? {} : { clarification: prepared.base.clarification }),
         recoveredWithContext: prepared.base.recoveredWithContext,
+        ignoredModifiers: prepared.base.ignoredModifiers,
         files,
         ...(prepared.base.provenance === undefined ? {} : { provenance: prepared.base.provenance }),
         strategy,
@@ -1190,6 +1193,7 @@ function parseChunkMetadata(raw: string): ChunkMetadata {
     ...(typeof record.className === 'string' ? { className: record.className } : {}),
     ...(typeof record.methodName === 'string' ? { methodName: record.methodName } : {}),
     ...(typeof record.documentation === 'string' ? { documentation: record.documentation } : {}),
+    ...(record.artifactKind === 'prisma-schema' ? { artifactKind: 'prisma-schema' as const } : {}),
   };
 }
 

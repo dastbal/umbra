@@ -1,6 +1,6 @@
 import { AgentDB } from '../state/db';
 import { cosineSimilarity } from './math';
-import { findUnknownTerms, unknownTermReport } from './unknown-terms';
+import { assessUnknownTerms, unknownTermReport } from './unknown-terms';
 import { ProcessedChunk } from '../types';
 import { writeLine } from '../observability/console-sink';
 import {
@@ -82,6 +82,8 @@ export type RetrievalContextResult =
       readonly query: string;
       readonly clarification?: string;
       readonly recoveredWithContext: boolean;
+      /** Repeated manner modifiers omitted only from the absence gate. */
+      readonly ignoredModifiers: readonly string[];
       readonly files: readonly RetrievalFileContext[];
       readonly provenance?: RetrievalProvenance;
     }
@@ -91,6 +93,8 @@ export type RetrievalContextResult =
       readonly clarification?: string;
       readonly reason: 'unknown_terms' | 'ungrounded';
       readonly unknownTerms: readonly string[];
+      /** Repeated manner modifiers omitted only from the absence gate. */
+      readonly ignoredModifiers: readonly string[];
       readonly provenance?: RetrievalProvenance;
     };
 
@@ -591,28 +595,31 @@ export class RetrieverService {
     // unknown — which would silently disable the ADR-029 alias feature for
     // exactly the vocabulary it exists to serve.
     const taught = this.retrievalMemory.knownTerms();
-    const unknown = findUnknownTerms(this.db, this.retrievalMemory.expand(query), taught);
-    if (unknown.length > 0) {
+    const initialAssessment = assessUnknownTerms(this.db, this.retrievalMemory.expand(query), taught);
+    let ignoredModifiers = initialAssessment.ignoredModifiers;
+    if (initialAssessment.strict.length > 0) {
       const clarification = context?.trim();
       // Unlike the ungrounded path below, a clarification is checked rather
       // than retried: it cannot make an absent word present, but the operator's
       // own wording may carry an alias trigger that resolves it.
-      const stillUnknown =
+      const clarifiedAssessment =
         clarification === undefined || clarification.length === 0
-          ? unknown
-          : findUnknownTerms(
+          ? initialAssessment
+          : assessUnknownTerms(
               this.db,
               this.retrievalMemory.expand(`${query}\n${clarification}`),
               taught,
             );
+      ignoredModifiers = clarifiedAssessment.ignoredModifiers;
 
-      if (stillUnknown.length > 0) {
+      if (clarifiedAssessment.strict.length > 0) {
         return {
           status: 'abstained',
           query,
           ...(clarification === undefined ? {} : { clarification }),
           reason: 'unknown_terms',
-          unknownTerms: stillUnknown,
+          unknownTerms: clarifiedAssessment.strict,
+          ignoredModifiers,
         };
       }
     }
@@ -635,6 +642,7 @@ export class RetrieverService {
         ...(clarified === undefined ? {} : { clarification: clarified }),
         reason: 'ungrounded',
         unknownTerms: [],
+        ignoredModifiers,
         ...(this.lastProvenance === undefined ? {} : { provenance: this.lastProvenance }),
       };
     }
@@ -678,6 +686,7 @@ export class RetrieverService {
       query,
       ...(clarified === undefined ? {} : { clarification: clarified }),
       recoveredWithContext,
+      ignoredModifiers,
       files: [...filesMap.values()],
       ...(this.lastProvenance === undefined ? {} : { provenance: this.lastProvenance }),
     };

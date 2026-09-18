@@ -80,6 +80,11 @@ validated a project root, its background warm-up may create that root's local
 `.umbra/` cache, protect it in `.gitignore`, and call the configured embedding
 provider; no MCP tool can select a path or request any of those writes.
 
+When a client supplies an MCP progress token, every tool call confirms it began
+and sends a liveness update every 15 seconds while it runs. The update reports
+elapsed time, never a fabricated completion percentage. Background index warm-up
+remains visible through `get_index_status` because it is not owned by a request.
+
 Decided in [ADR-024](docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
 
 ## What it publishes
@@ -290,9 +295,19 @@ diagnostics always use `stderr`, never JSON-RPC `stdout`.
 ## Monorepos and unusual layouts
 
 Umbra discovers TypeScript source from package `tsconfig.json` files and
-workspace declarations, not from a guessed root `src/`. It ignores dependency and
-build trees, indexes `.ts` and `.tsx` including classless utility and
-configuration modules, and keeps every stored path relative to the fixed root.
+workspace declarations, not from a guessed root `src/`. Under automatic
+discovery, it also finds each authoritative `prisma/schema.prisma` under the
+served root, because database constraints are executable business evidence
+rather than incidental configuration. An explicit `indexing.sources` override
+remains authoritative and replaces that automatic scope. Umbra ignores
+dependency and build trees, indexes `.ts` and `.tsx` including classless utility
+and configuration modules, and keeps every stored path relative to the fixed
+root.
+
+Prisma models are returned as labelled `prisma-schema` configuration evidence.
+Umbra does **not** infer current truth from migration SQL, arbitrary `.prisma`
+files, JSON, or YAML: those artifacts need their own authority and parser
+contract before they enter the retrieval corpus.
 
 If a repository's declared source boundary needs an explicit override, commit an
 `umbra.json` at its root:
@@ -796,9 +811,10 @@ graph TD
 
 ## How retrieval works
 
-1. **Indexing.** The indexer discovers declared TypeScript sources from the
-   served root, monorepo packages included, and records durable file, chunk,
-   vector and provider/model coverage in that root's `.umbra/` state.
+1. **Indexing.** The indexer discovers declared TypeScript sources and
+   authoritative Prisma schemas from the served root, monorepo packages
+   included, and records durable file, chunk, vector and provider/model coverage
+   in that root's `.umbra/` state.
 2. **Hybrid search.** A question is answered by fusing two rankings: SQLite FTS5
    lexical matches and vector neighbours. Umbra returns source only when there is
    independent lexical evidence, and otherwise **abstains and names the term it

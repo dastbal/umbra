@@ -18,7 +18,9 @@ const MAX_EMBEDDING_DOCUMENTATION_CHARACTERS = 512;
  * @returns Bounded metadata followed by the complete fragment content.
  */
 export function embeddingInputFor(chunk: ProcessedChunk): string {
-  const symbol = chunk.metadata.methodName === undefined
+  const symbol = chunk.metadata.artifactKind === 'prisma-schema'
+    ? `Artifact: Prisma schema${chunk.metadata.className === undefined ? '' : ` model ${chunk.metadata.className}`}`
+    : chunk.metadata.methodName === undefined
     ? `Class: ${chunk.metadata.className ?? 'unknown'}`
     : `Method: ${chunk.metadata.methodName}`;
   const documentation = chunk.metadata.documentation;

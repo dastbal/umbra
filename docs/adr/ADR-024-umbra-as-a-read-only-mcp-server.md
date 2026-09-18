@@ -1051,3 +1051,25 @@ and conflating them is what made the gate expensive.
 ## Amendment — 2026-09-14: MCP publishes validated results, not formatted internals
 
 ADR-032 moves the six read-only MCP capabilities behind shared application executions. MCP now declares an `outputSchema`, validates `structuredContent` before returning it, and supplies the identical object as JSON text for older clients. `blocked` and `error` set `isError`; empty, abstained, and partial results remain successful protocol calls with explicit domain state. The read-only and pinned-root constraints of this record are unchanged.
+
+## Amendment — 2026-09-18: Long-running calls prove they are alive
+
+When an MCP client supplies `_meta.progressToken` on a tool call, Umbra sends a
+request-bound `notifications/progress` message before executing the tool, then a
+liveness heartbeat every 15 seconds until it returns. Progress is elapsed
+seconds with no `total`, not an invented completion percentage: a semantic
+search or integrity check can be active without a reliable estimate of how much
+work remains. Clients that do not request progress receive the same tool result
+and no extra notifications.
+
+This does **not** turn the post-handshake index warm-up into a fake request.
+That work is intentionally background work with no caller token; its exact
+phase remains available through `get_index_status` and `umbra://index-status`.
+The deferred design for a client-visible warm-up wait remains separate.
+
+### Verification evidence
+
+`sdk-server.spec.ts` drives a real stdio `tools/call` with a progress token and
+asserts that the protocol notification precedes the typed result. Its companion
+case proves a call without the token emits none, preserving clients that do not
+implement progress handling.

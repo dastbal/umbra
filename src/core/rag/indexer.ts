@@ -1,5 +1,6 @@
 import { FileRegistry } from '../state/file-registry';
 import { NestChunker } from '../tools/ast/chunker';
+import { PrismaSchemaChunker } from './prisma-schema-chunker';
 import { analyzeNestGraph } from '../tools/ast/nest-graph';
 import { backfillNestGraph, replaceNestGraphForFile } from './nest-graph-store';
 import { backfillDependencyGraph } from './dependency-graph-backfill';
@@ -50,6 +51,7 @@ export interface IndexRunResult {
 export class IndexerService {
   private registry: FileRegistry;
   private chunker: NestChunker;
+  private readonly prismaChunker = new PrismaSchemaChunker();
   private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
   private static activeIndex: Promise<IndexRunResult> | undefined;
 
@@ -230,9 +232,10 @@ export class IndexerService {
       // file of an index built before this table existed. Without it the graph
       // stays empty on an up-to-date repository, because nothing re-processes
       // a file whose content has not changed.
+      const typeScriptFiles = discovery.sourceFiles.filter((file) => file.kind === 'typescript');
       const nestFiles = backfillNestGraph(
         this.db,
-        discovery.sourceFiles,
+        typeScriptFiles,
         analyzeNestGraph,
         (absolutePath) => fs.readFileSync(absolutePath, "utf-8"),
       );
@@ -246,7 +249,7 @@ export class IndexerService {
       // that reason. Costs an AST parse per file and no embeddings.
       const edgeFiles = backfillDependencyGraph(
         this.db,
-        discovery.sourceFiles,
+        typeScriptFiles,
         (relativePath: string, source: string) =>
           this.chunker.analyze(relativePath, source, 'backfill').dependencies,
         (absolutePath: string) => fs.readFileSync(absolutePath, 'utf-8'),
@@ -339,7 +342,9 @@ export class IndexerService {
     this.reportProgress(file.relativePath, position, total, 0, 'preparing');
     const content = fs.readFileSync(file.absolutePath, 'utf-8');
     const hash = crypto.createHash('md5').update(content).digest('hex');
-    const analysis = this.chunker.analyze(file.relativePath, content, hash);
+    const analysis = file.kind === 'prisma-schema'
+      ? this.prismaChunker.analyze(file.relativePath, content, hash)
+      : this.chunker.analyze(file.relativePath, content, hash);
     const chunks = splitChunksForEmbedding(
       analysis.chunks.map((chunk) => ({ ...chunk, filePath: file.relativePath } as ProcessedChunk & { filePath: string })),
     ) as Array<ProcessedChunk & { filePath: string }>;
@@ -390,7 +395,9 @@ export class IndexerService {
       // belongs to. Committed separately it could be half-applied, and a
       // binding row that outlives the file that declared it is the stale
       // confidence ADR-017 was written about.
-      replaceNestGraphForFile(this.db, file.relativePath, analyzeNestGraph(file.relativePath, content), hash);
+      if (file.kind === 'typescript') {
+        replaceNestGraphForFile(this.db, file.relativePath, analyzeNestGraph(file.relativePath, content), hash);
+      }
     });
     commit();
     this.reportProgress(file.relativePath, position, total, vectors.length, `saved ${chunks.length} chunks`);

@@ -1,5 +1,5 @@
 import { RetrieverService, SearchResult, noGroundedEvidenceReport } from './retriever';
-import { findUnknownTerms } from './unknown-terms';
+import { assessUnknownTerms } from './unknown-terms';
 
 /**
  * The unknown-term gate reads this machine's own index, so leaving it live made
@@ -11,17 +11,17 @@ import { findUnknownTerms } from './unknown-terms';
  *
  * Stubbing it is the same correction `useEmptyProject` made in
  * `embeddings.spec.ts`: a test that depends on the machine it runs on is not
- * testing what it claims to. Only `findUnknownTerms` is replaced — the reports
+ * testing what it claims to. Only `assessUnknownTerms` is replaced — the reports
  * these tests assert on stay real, so the wiring from gate to abstention is
  * still exercised end to end. The gate's own judgement belongs to
  * `unknown-terms.spec.ts`, which owns it.
  */
 jest.mock('./unknown-terms', () => ({
   ...jest.requireActual('./unknown-terms'),
-  findUnknownTerms: jest.fn(),
+  assessUnknownTerms: jest.fn(),
 }));
 
-const gate = findUnknownTerms as jest.MockedFunction<typeof findUnknownTerms>;
+const gate = assessUnknownTerms as jest.MockedFunction<typeof assessUnknownTerms>;
 
 function result(evidence: SearchResult['evidence'], filePath = 'src/core/rag/retriever.ts'): SearchResult {
   return {
@@ -53,7 +53,7 @@ describe('contextual retrieval retry', () => {
   it('runs exactly one contextual retry after an ungrounded first result', async () => {
     // Every term is known, so the gate lets the question through and what this
     // test measures is the retry itself.
-    gate.mockReturnValue([]);
+    gate.mockReturnValue({ strict: [], ignoredModifiers: [] });
 
     const retriever = new RetrieverService({
       identity: { provider: 'ollama', model: 'test', dimensions: 3, column: 'vector_ollama_json' },
@@ -82,7 +82,7 @@ describe('contextual retrieval retry', () => {
   it('does not retry when no clarification was supplied', async () => {
     // The question names something the repository never wrote. Declared here
     // rather than inherited from whatever this machine happens to have indexed.
-    gate.mockReturnValue(['saturn', 'payroll']);
+    gate.mockReturnValue({ strict: ['saturn', 'payroll'], ignoredModifiers: [] });
 
     const retriever = new RetrieverService({
       identity: { provider: 'ollama', model: 'test', dimensions: 3, column: 'vector_ollama_json' },

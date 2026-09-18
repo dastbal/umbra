@@ -1,4 +1,7 @@
 import { PassThrough, Writable } from 'stream';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { z } from 'zod';
 import { buildSdkServer } from './sdk-server';
 import { loadMcpSdk } from './sdk-loader';
@@ -7,6 +10,9 @@ import { createToolResultSchema } from '../../core/tools/tool-result';
 import { toStructuredToolResult } from './dto-mapper';
 import { log } from '../../core/tools/utils/logger';
 import { resetLogSink, setLogSink } from '../../core/observability/console-sink';
+import { pinRuntimeRoot, resetRuntimeRoot } from '../../core/config/runtime-root';
+import { buildToolCatalog } from './tool-catalog';
+import type { IndexStatusResult } from '../../core/tools';
 
 /**
  * Collects everything written to a fake stdout, line by line.
@@ -180,6 +186,51 @@ describe('MCP server built on the official SDK', () => {
     expect(called.result.content[0].text).toContain('read-only');
   });
 
+  it('reports request-bound liveness only when the caller supplies a progress token', async () => {
+    const output = await exchange(
+      [stubTool()],
+      [
+        handshake,
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'list_adrs',
+            arguments: {},
+            _meta: { progressToken: 'umbra-progress-1' },
+          },
+        },
+      ],
+    );
+
+    const messages = output.lines.map((line) => JSON.parse(line));
+    const progress = messages.find((message) => message.method === 'notifications/progress');
+    const completed = messages.find((message) => message.id === 2);
+
+    expect(progress).toMatchObject({
+      jsonrpc: '2.0',
+      params: {
+        progressToken: 'umbra-progress-1',
+        progress: 0,
+        message: 'Umbra started List architecture decisions.',
+      },
+    });
+    expect(messages.indexOf(progress)).toBeLessThan(messages.indexOf(completed));
+    expect(completed.error).toBeUndefined();
+  });
+
+  it('does not emit a progress notification without a caller token', async () => {
+    const output = await exchange(
+      [stubTool()],
+      [handshake, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_adrs', arguments: {} } }],
+    );
+
+    const messages = output.lines.map((line) => JSON.parse(line));
+
+    expect(messages.some((message) => message.method === 'notifications/progress')).toBe(false);
+  });
+
   it('advertises and validates a complete typed result through stdio', async () => {
     // This is deliberately a full Umbra result schema rather than a raw output
     // shape. The SDK must serialize it in tools/list and validate the matching
@@ -278,5 +329,57 @@ describe('MCP SDK loader', () => {
 
     expect(MCP_SDK_INSTALL_HINT).toContain('npm i @dastbal/umbra');
     expect(MCP_SDK_INSTALL_HINT).not.toContain('@modelcontextprotocol/sdk');
+  });
+});
+
+describe('MCP ADR catalog integration', () => {
+  let rootDir: string;
+
+  beforeEach(() => {
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-mcp-adrs-'));
+    fs.mkdirSync(path.join(rootDir, 'docs', 'adr'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'docs', 'adr', 'README.md'), '# Decisions\n', 'utf8');
+    fs.writeFileSync(
+      path.join(rootDir, 'docs', 'adr', 'ADR-001-boundary.md'),
+      '# ADR-001: A real boundary\n\n## Status\n\nAccepted\n\n## Context\n\nThe catalog must be discoverable through MCP.\n',
+      'utf8',
+    );
+    pinRuntimeRoot(rootDir);
+  });
+
+  afterEach(() => {
+    resetRuntimeRoot();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  it('returns an on-disk docs/adr record through a real stdio tools/call exchange', async () => {
+    const indexStatus: IndexStatusResult = {
+      schemaVersion: 1,
+      status: 'success',
+      code: 'INDEX_STATUS_READY',
+      summary: 'ready',
+      data: { lifecycle: { phase: 'ready', message: 'ready' } },
+      evidence: [],
+      diagnostics: [],
+      truncated: false,
+      retryable: false,
+    };
+    const tool = buildToolCatalog({
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      readIndexStatus: () => indexStatus,
+    }).find((candidate) => candidate.name === 'list_adrs');
+
+    const output = await exchange(
+      tool === undefined ? [] : [tool],
+      [handshake, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_adrs', arguments: {} } }],
+    );
+    const response = output.lines.map((line) => JSON.parse(line)).find((message) => message.id === 2);
+
+    expect(response.error).toBeUndefined();
+    expect(response.result.structuredContent).toMatchObject({
+      status: 'success',
+      code: 'ADR_CATALOG_READY',
+      data: { entries: [expect.objectContaining({ path: 'docs/adr/ADR-001-boundary.md' })] },
+    });
   });
 });

@@ -94,6 +94,7 @@ const retrievalProvenanceSchema = z.object({
 const retrievalChunkSchema = z.object({
   type: z.string(), content: z.string(), startLine: z.number().int(), endLine: z.number().int(),
   className: z.string().optional(), methodName: z.string().optional(),
+  artifactKind: z.literal('prisma-schema').optional(),
 });
 const graphReadinessSchema = z.object({
   ready: z.boolean(), reason: z.string(), pendingFiles: z.number().int().nonnegative(),
@@ -122,6 +123,7 @@ export const codebaseSearchDataSchema = z.object({
   query: z.string(), clarification: z.string().optional(), recoveredWithContext: z.boolean(),
   abstentionReason: z.enum(['unknown_terms', 'ungrounded']).optional(),
   unknownTerms: z.array(z.string()),
+  ignoredModifiers: z.array(z.string()),
   files: z.array(z.object({
     path: z.string(), origin: z.enum(['seed', 'graph']), evidence: z.enum(['semantic', 'lexical', 'hybrid', 'graph']),
     score: z.number(), relations: z.array(z.string()),
@@ -447,7 +449,7 @@ export async function executeCodebaseSearch(input: {
 }): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
   const emptyData: CodebaseSearchData = {
     query: input.query, ...(input.context === undefined ? {} : { clarification: input.context }),
-    recoveredWithContext: false, unknownTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
+    recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], files: [], retrieval: emptyRetrievalStrategy(),
   };
   try {
     const stamp = readIndexStamp(runtimeRoot());
@@ -569,18 +571,19 @@ function emptyGraphRagBudget(): GraphRagInvestigationData['budget'] {
 function toCodebaseSearchData(result: GraphRagSearchResult): CodebaseSearchData {
   if (result.status === 'abstained') {
     return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
-      recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], files: [],
+    recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], ignoredModifiers: [...result.ignoredModifiers], files: [],
       ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
       retrieval: toToolRetrievalStrategy(result.strategy),
     };
   }
   return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
-    recoveredWithContext: result.recoveredWithContext, unknownTerms: [],
+    recoveredWithContext: result.recoveredWithContext, unknownTerms: [], ignoredModifiers: [...result.ignoredModifiers],
     files: result.files.map((file) => ({ path: file.filePath, origin: file.origin, evidence: file.evidence, score: file.score, relations: [...file.relations], imports: [...file.imports],
       chunks: file.chunks.map((chunk) => ({ type: chunk.type, content: chunk.content,
         startLine: chunk.metadata.startLine, endLine: chunk.metadata.endLine,
         ...(chunk.metadata.className === undefined ? {} : { className: chunk.metadata.className }),
-        ...(chunk.metadata.methodName === undefined ? {} : { methodName: chunk.metadata.methodName }) })) })),
+        ...(chunk.metadata.methodName === undefined ? {} : { methodName: chunk.metadata.methodName }),
+        ...(chunk.metadata.artifactKind === undefined ? {} : { artifactKind: chunk.metadata.artifactKind }) })) })),
     ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
     retrieval: toToolRetrievalStrategy(result.strategy),
   };

@@ -139,6 +139,14 @@ export function termProbes(term: string): readonly string[] {
 /** Terms examined per query, matching the lexical index's own cap. */
 const MAX_TERMS = 12;
 
+/** Separates absent subjects from an absent repeated manner modifier such as `byte by byte`. */
+export interface UnknownTermAssessment {
+  /** Terms that still make the question unsupported by indexed evidence. */
+  readonly strict: readonly string[];
+  /** Repeated manner modifiers omitted from the absence gate, never from retrieval. */
+  readonly ignoredModifiers: readonly string[];
+}
+
 /**
  * Extracts the subject-bearing terms of a query.
  *
@@ -194,6 +202,49 @@ export function findUnknownTerms(
   };
 
   return terms.filter((term) => !termProbes(term).some(matches));
+}
+
+/**
+ * Classifies unknown terms without turning an arbitrary missing word into a soft match.
+ *
+ * A repeated phrase of the form `X by X` describes the requested granularity,
+ * not necessarily a repository feature. It is safely omitted only when at
+ * least two other subject terms are grounded. The original query is still sent
+ * to hybrid retrieval; this only prevents the pre-query absence gate from
+ * refusing a question because of an idiom.
+ *
+ * @param db - The connection owning `code_chunks_fts`.
+ * @param query - Original user wording, preserved for retrieval.
+ * @param exempt - Locally approved aliases that are known by definition.
+ * @returns Strict unknown subjects and any explicitly degraded modifiers.
+ */
+export function assessUnknownTerms(
+  db: Database.Database,
+  query: string,
+  exempt: ReadonlySet<string> = new Set(),
+): UnknownTermAssessment {
+  const unknown = findUnknownTerms(db, query, exempt);
+  const terms = subjectTerms(query).filter((term) => !exempt.has(term));
+  const knownSubjectCount = terms.filter((term) => !unknown.includes(term)).length;
+  const repeated = repeatedMannerTerms(query);
+  const ignoredModifiers = knownSubjectCount >= 2
+    ? unknown.filter((term) => repeated.has(term))
+    : [];
+  return {
+    strict: unknown.filter((term) => !ignoredModifiers.includes(term)),
+    ignoredModifiers,
+  };
+}
+
+/** Finds `byte by byte`-shaped modifiers without classifying arbitrary unknown words as optional. */
+function repeatedMannerTerms(query: string): ReadonlySet<string> {
+  const modifiers = new Set<string>();
+  const pattern = /\b([\p{L}\p{N}_]{4,})\s+by\s+\1\b/giu;
+  for (const match of query.matchAll(pattern)) {
+    const term = match[1]?.toLocaleLowerCase();
+    if (term !== undefined) modifiers.add(term);
+  }
+  return modifiers;
 }
 
 /**

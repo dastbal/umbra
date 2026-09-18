@@ -1,4 +1,4 @@
-import { McpSdk, McpServerLike } from './sdk-loader';
+import { McpSdk, McpServerLike, McpToolRequestContext } from './sdk-loader';
 import { PublishedPrompt } from './prompt-catalog';
 import { PublishedResource } from './resource-catalog';
 import { PublishedTool } from './tool-catalog';
@@ -53,6 +53,65 @@ export interface SdkServerCatalogs {
   prompts: readonly PublishedPrompt[];
 }
 
+/** Interval between honest liveness updates for a slow request. */
+const MCP_PROGRESS_HEARTBEAT_MS = 15_000;
+
+/**
+ * Runs one tool while reporting request-bound liveness when the client opted in.
+ *
+ * Progress deliberately uses elapsed seconds with no `total`: Umbra knows a
+ * request is still active, but cannot honestly predict its completion. Clients
+ * that did not supply a token receive exactly the result they did before.
+ *
+ * @param tool - Published operation being invoked.
+ * @param args - Validated-or-to-be-validated MCP arguments.
+ * @param context - SDK request scope carrying the optional progress token.
+ * @returns The unchanged tool result.
+ */
+async function invokeWithProgress(
+  tool: PublishedTool,
+  args: Record<string, unknown>,
+  context: McpToolRequestContext,
+): Promise<unknown> {
+  const progressToken = context._meta?.progressToken;
+  if (progressToken === undefined) return tool.invoke(args);
+
+  const label = tool.title ?? tool.name;
+  const startedAt = Date.now();
+  await context.sendNotification({
+    method: 'notifications/progress',
+    params: {
+      progressToken,
+      progress: 0,
+      message: `Umbra started ${label}.`,
+    },
+  });
+
+  const heartbeat = setInterval(() => {
+    const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1_000);
+    void context.sendNotification({
+      method: 'notifications/progress',
+      params: {
+        progressToken,
+        progress: elapsedSeconds,
+        message: `Umbra is still running ${label} (${elapsedSeconds}s elapsed).`,
+      },
+    }).catch((error: unknown) => {
+      // Progress is an optional side-channel. Do not turn a completed read-only
+      // operation into a false failure, but do retain the transport failure on
+      // stderr, which is safe for the MCP stdio framing.
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Umbra MCP progress notification failed: ${message}\n`);
+    });
+  }, MCP_PROGRESS_HEARTBEAT_MS);
+
+  try {
+    return await tool.invoke(args);
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
 /**
  * Registers every catalog entry on a new `McpServer`.
  *
@@ -85,14 +144,13 @@ export function buildSdkServer(sdk: McpSdk, catalogs: SdkServerCatalogs): McpSer
           openWorldHint: false,
         },
       },
-      async (args: Record<string, unknown>) => {
+      async (args: Record<string, unknown>, context: McpToolRequestContext) => {
         // `invoke` already maps refusals and failures into `isError` results, so
         // a tool that declines is reported to the client as a tool error rather
         // than as a protocol fault. Letting it throw here would surface as a
         // JSON-RPC error, and a client would see the connection misbehave
         // instead of reading the reason.
-        const result = await tool.invoke(args ?? {});
-        return result;
+        return invokeWithProgress(tool, args ?? {}, context);
       },
     );
   }
