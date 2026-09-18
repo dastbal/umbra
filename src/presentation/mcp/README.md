@@ -4,7 +4,8 @@ Umbra's third presentation adapter, beside `cli/` and `http/`. It publishes what
 Umbra knows about **one** repository to any Model Context Protocol client —
 Claude Code, Codex, Cursor, Gemini CLI — over stdio.
 
-Decided in [ADR-024](../../../docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
+Decided in [ADR-024](../../../docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md)
+and extended by [ADR-036](../../../docs/adr/ADR-036-persistent-read-only-mcp-conversations.md).
 Pluggable embeddings, which is what lets `ask_codebase` be published without a
 Google account, are [ADR-025](../../../docs/adr/ADR-025-embeddings-are-chosen-not-assumed.md).
 
@@ -36,6 +37,7 @@ keeps only its local, gitignored `.umbra/` cache and `.gitignore` rule.
 | Tool | `run_integrity_check` | free (runs `tsc --noEmit`) |
 | Tool | `ask_codebase` | embeds the query after durable vector coverage is proven |
 | Tool | `get_index_status` | free lifecycle and durable coverage evidence |
+| Tool | `continue_conversation` | configured chat provider; read-only persistent advisor |
 | Resource | `umbra://adr-index` | free |
 | Resource | `umbra://index-status` | free |
 | Prompt | one per `skills/*.md` | free |
@@ -47,9 +49,10 @@ partial index can answer.
 
 ## The five constraints this module exists to honour
 
-1. **No chat model.** Nothing here instantiates a chat model, builds a prompt,
-   or runs an agent loop. Embedding calls are limited to background index warm-up
-   and semantic retrieval.
+1. **One constrained chat-model exception.** `continue_conversation` runs only
+   the `mcp-advisor`, a persisted advisory graph with read capabilities. The
+   deterministic evidence tools remain model-free; no MCP path gains a writer,
+   shell, approval, or caller-selected root.
 2. **No write tools.** No MCP tool can write, request approval, or choose a
    filesystem path. After a trusted root is accepted, startup may create its
    local index state and protect it in `.gitignore`; that activation is not

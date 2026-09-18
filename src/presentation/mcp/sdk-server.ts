@@ -30,7 +30,9 @@ import { PublishedTool } from './tool-catalog';
  * ## What is deliberately not enabled
  *
  * No `sampling`: it would let this server spend the client's model budget on a
- * prompt nobody audited. No dynamic tool list: `sendToolListChanged` exists on
+ * prompt nobody audited. The server does declare `logging`: it is an
+ * operator-facing post-handshake liveness channel, not a model call and not a
+ * substitute for the pre-process stderr launcher signal. No dynamic tool list: `sendToolListChanged` exists on
  * the SDK server and is not called, because a list that changes under a client
  * recreates the prompt/tool drift ADR-013 documents, with an external process
  * as the cause.
@@ -122,7 +124,10 @@ async function invokeWithProgress(
 export function buildSdkServer(sdk: McpSdk, catalogs: SdkServerCatalogs): McpServerLike {
   const server = new sdk.McpServer(
     { name: 'umbra', version: catalogs.version },
-    catalogs.instructions === undefined ? undefined : { instructions: catalogs.instructions },
+    {
+      ...(catalogs.instructions === undefined ? {} : { instructions: catalogs.instructions }),
+      capabilities: { logging: {} },
+    },
   );
 
   for (const tool of catalogs.tools) {
@@ -137,7 +142,7 @@ export function buildSdkServer(sdk: McpSdk, catalogs: SdkServerCatalogs): McpSer
         // Every published tool reads; none of them writes, and that is a
         // property of the mode rather than of any one tool (ADR-024,
         // constraint 2).
-        annotations: {
+        annotations: tool.annotations ?? {
           readOnlyHint: true,
           destructiveHint: false,
           idempotentHint: true,

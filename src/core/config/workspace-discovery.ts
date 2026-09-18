@@ -28,7 +28,7 @@ const IGNORED_DIRECTORIES = new Set([
   '.umbra',
   '.claude',
 ]);
-const ADR_FILE_PATTERN = /^ADR[-_]\d{3,}[-_].+\.md$/i;
+const ADR_FILE_PATTERN = /^(?:ADR[-_])?\d{3,}[-_].+\.md$/i;
 
 /** A path whose persisted identity is relative to one pinned repository root. */
 export interface WorkspacePath {

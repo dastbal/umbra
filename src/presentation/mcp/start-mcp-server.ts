@@ -16,6 +16,7 @@ import { executeIndexStatus, formatIndexStatusForModel } from '../../core/tools/
 // (the indexer's implementation is loaded lazily; see loadIndexingModules)
 import { withProvenance } from './dto-mapper';
 import { buildPromptCatalog } from './prompt-catalog';
+import { McpConversationService } from './conversation-service';
 import {
   activateMcpProjectRoot,
   McpProjectRoot,
@@ -144,6 +145,8 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
     decorateSemanticAnswer: (text) => decorateSemanticAnswer(rootDir, text),
     projectRootReady: () => rootDir !== undefined,
     projectRootMessage: () => lifecycle.message,
+    readProjectRoot: () => rootDir,
+    conversationService: new McpConversationService(),
   });
   const server = buildSdkServer(load.sdk, {
     version: options.version,
@@ -168,6 +171,13 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
 
   // This is intentionally before provider probing and index work.
   await server.connect(new load.sdk.StdioServerTransport());
+  await server.sendLoggingMessage({
+    level: 'notice',
+    logger: 'umbra.mcp',
+    data: rootDir === undefined
+      ? 'Umbra connected and is waiting for a validated project root.'
+      : 'Umbra connected; semantic-index warm-up continues in the background.',
+  });
   report('MCP transport connected; index warm-up continues in the background.');
 
   if (rootDir !== undefined) {

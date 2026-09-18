@@ -1,6 +1,6 @@
 {
   "name": "@dastbal/umbra",
-  "version": "2.2.10",
+  "version": "2.2.11",
   "description": "Umbra is a secure autonomous engineering orchestrator for NestJS projects.",
   "author": "David Balladares",
   "license": "MIT",
@@ -18,7 +18,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "umbra": "dist/bin/cli.js"
+    "umbra": "dist/bin/launcher.js"
   },
   "files": [
     "dist",

@@ -145,6 +145,8 @@ export interface UnknownTermAssessment {
   readonly strict: readonly string[];
   /** Repeated manner modifiers omitted from the absence gate, never from retrieval. */
   readonly ignoredModifiers: readonly string[];
+  /** Unknown subject terms retained as an explicit degradation when other subjects are grounded. */
+  readonly droppedTerms: readonly string[];
 }
 
 /**
@@ -230,9 +232,11 @@ export function assessUnknownTerms(
   const ignoredModifiers = knownSubjectCount >= 2
     ? unknown.filter((term) => repeated.has(term))
     : [];
+  const unresolved = unknown.filter((term) => !ignoredModifiers.includes(term));
   return {
-    strict: unknown.filter((term) => !ignoredModifiers.includes(term)),
+    strict: knownSubjectCount === 0 ? unresolved : [],
     ignoredModifiers,
+    droppedTerms: knownSubjectCount === 0 ? [] : unresolved,
   };
 }
 

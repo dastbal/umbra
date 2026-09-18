@@ -310,6 +310,55 @@ export class DeepAgentFactory {
   }
 
   /**
+   * Creates the persistent, read-only advisor used by the MCP conversation
+   * adapter. It has a dedicated checkpoint database and never performs the
+   * factory's automatic index refresh: MCP startup owns that lifecycle.
+   *
+   * @param config - Root, model, and opaque MCP conversation thread id.
+   * @returns A compiled read-only conversational DeepAgent.
+   */
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  public static async createMcpAdvisor(
+    config: DeepAgentFactoryConfig = {},
+  ): Promise<any> {
+    const rootDir = config.rootDir ?? process.cwd();
+    const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
+    const session = resolveSessionModel(agentConfig.models.researcher, config.model);
+    const model = session.model;
+
+    await DeepAgentFactory.bootstrap(rootDir, model, undefined, false, false);
+
+    const profile: RoleProfile = {
+      id: 'mcp-advisor',
+      displayName: 'MCP Advisor',
+      description: 'Answers repository questions without changing the project.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'advisory',
+      rolePrompt: 'Answer the user with cited repository evidence. Ask one concise follow-up only when necessary.',
+      capabilities: ['read_code', 'read_adrs', 'read_dependency_graph', 'search_codebase_readonly'],
+    };
+    const tools = resolveCapabilityTools(profile.capabilities);
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'mcp', agentConfig);
+    recordSessionOverhead(systemPrompt, tools);
+
+    const agent = createDeepAgent({
+      model: DeepAgentFactory.resolveRuntimeModel(model) as any,
+      systemPrompt,
+      checkpointer: DeepAgentFactory.buildCheckpointer(rootDir, 'mcp') as any,
+      middleware: [createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+        limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
+        costOf: DeepAgentFactory.buildCostResolver(model),
+        model,
+        modelSource: session.source,
+        buildModel: (candidate) => LLMProvider.createChatModel(candidate, 0),
+        onRouted: (notice) => writeLine(notice),
+      })],
+      tools: tools as any[],
+    });
+    return registerAgentKernelTelemetry(agent, [profile]);
+  }
+
+  /**
    * Creates an Orchestrator agent with Researcher and Coder subagents.
    *
    * The Orchestrator delegates to specialized subagents via the `task` tool:
@@ -442,6 +491,7 @@ export class DeepAgentFactory {
     model: string,
     interaction?: InteractionService,
     hasSubagents = false,
+    syncIndex = true,
   ): Promise<void> {
     // 1. Setup the workspace directory
     //
@@ -549,7 +599,7 @@ export class DeepAgentFactory {
     // NOTE: RAG embeddings always use Vertex AI (text-embedding-004), even for
     // Ollama chat models. If Vertex credentials are missing, indexing is skipped
     // gracefully — the agent can still function without semantic search.
-    await DeepAgentFactory.maybeReindex(rootDir, interaction);
+    if (syncIndex) await DeepAgentFactory.maybeReindex(rootDir, interaction);
   }
 
   /**
@@ -964,14 +1014,16 @@ export class DeepAgentFactory {
    */
   private static buildCheckpointer(
     rootDir: string,
-    type: 'simple' | 'orchestrator' | 'analysis' = 'simple',
+    type: 'simple' | 'orchestrator' | 'analysis' | 'mcp' = 'simple',
   ): SqliteSaver {
     const agentDir = agentPath(rootDir);
     const dbFile = type === 'orchestrator'
       ? 'orchestrator_history.db'
       : type === 'analysis'
         ? 'analysis_history.db'
-        : 'deep_agent_history.db';
+        : type === 'mcp'
+          ? 'mcp_conversations.db'
+          : 'deep_agent_history.db';
     const dbPath = path.join(agentDir, dbFile);
     return SqliteSaver.fromConnString(dbPath);
   }
@@ -1014,7 +1066,7 @@ export class DeepAgentFactory {
    */
   private static buildSystemPrompt(
     rootDir: string,
-    type: 'simple' | 'orchestrator' | 'analysis',
+    type: 'simple' | 'orchestrator' | 'analysis' | 'mcp',
     agentConfig: AgentConfig = parseAgentConfig({}),
     evidenceManifest = '',
     advisoryRoles: readonly RoleProfile[] = [],
