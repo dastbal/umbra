@@ -10,6 +10,13 @@ a semantic index of the code, the decision records behind it, an AST-level
 dependency graph, and the NestJS wiring graph — which module binds a token and
 who injects it.
 
+> **GraphRAG for code, not just vector search.** Umbra first finds grounded
+> semantic and lexical evidence, then follows real, typed repository
+> relationships — imports, re-exports, NestJS providers, injection tokens, and
+> module bindings — under deterministic depth, node, relationship, chunk, and
+> context budgets. Every result says whether it came from a semantic seed or a
+> graph route, and why traversal stopped.
+
 **It does two things with that knowledge, and they are independent.** Pick the
 one you want; you do not need the other.
 
@@ -30,6 +37,7 @@ and it makes every agent you already use better at your codebase.
 
 **[Part 1 — MCP server](#part-1--umbra-as-an-mcp-server)**
 - [What it publishes](#what-it-publishes)
+- [GraphRAG, without a hidden agent](#graphrag-without-a-hidden-agent)
 - [Connect it, in three commands](#connect-it-in-three-commands)
 - [Semantic search without a cloud account](#semantic-search-without-a-cloud-account)
 - [Verify it](#verify-it)
@@ -72,13 +80,19 @@ validated a project root, its background warm-up may create that root's local
 `.umbra/` cache, protect it in `.gitignore`, and call the configured embedding
 provider; no MCP tool can select a path or request any of those writes.
 
+When a client supplies an MCP progress token, every tool call confirms it began
+and sends a liveness update every 15 seconds while it runs. The update reports
+elapsed time, never a fabricated completion percentage. Background index warm-up
+remains visible through `get_index_status` because it is not owned by a request.
+
 Decided in [ADR-024](docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
 
 ## What it publishes
 
 | Kind | Name | What it answers |
 |---|---|---|
-| Tool | `ask_codebase` | Semantic search in natural language, with the index's provenance and age on every answer |
+| Tool | `ask_codebase` | Grounded hybrid code search with the approved bounded GraphRAG policy, provenance, retrieval receipt, and a next read-only recommendation |
+| Tool | `investigate_graphrag` | Compare the bounded hybrid, dependency, and NestJS retrieval plans without calling a chat model, saving a trace, or changing configuration |
 | Tool | `query_dependency_graph` | *What breaks if I change this file* — inbound or outbound edges from the AST, each labelled with its kind: `import`, `re-export`, `require`, `dynamic-import` |
 | Tool | `query_nest_graph` | *Which module provides this token, and who injects it* — NestJS wiring, including modules whose providers live in a `forRoot()` rather than in the `@Module` decorator |
 | Tool | `list_adrs` | *Why* is the code shaped this way — path, title and status of every decision record, without their bodies |
@@ -99,6 +113,40 @@ that edge exists.
 selected provider has produced durable vector coverage. Until then it returns a
 retryable status directing the client to `get_index_status`; the other read-only
 tools remain available once the project root is validated.
+
+### GraphRAG, without a hidden agent
+
+Umbra's retrieval pipeline is deliberately richer than “embed a question and
+return similar text”:
+
+```text
+question
+  → hybrid retrieval: semantic vectors + lexical grounding
+  → grounded source seeds
+  → bounded typed graph traversal in SQLite
+  → selected source evidence with seed/graph provenance and a stop receipt
+  → the calling assistant reasons from that evidence
+```
+
+`ask_codebase` performs the shared hybrid lookup once. The selected local
+policy then chooses a deterministic plan — hybrid only, one-hop dependency,
+two-hop dependency, NestJS wiring, or combined — and may follow SQLite
+relationships such as imports, re-exports, providers, injections, and module
+bindings. It is GraphRAG with production guardrails: no LLM chooses the route,
+no traversal continues only because budget remains, and an unavailable or stale
+graph falls back to grounded hybrid retrieval instead of claiming that a
+relationship does not exist.
+
+The response makes the work inspectable: configured `policy`, executed `plan`,
+reached depth, visited nodes, inspected relationships, stop reason, and whether
+each selected file arrived as a semantic `seed` or through the `graph`.
+
+`investigate_graphrag(query, mode?)` is for diagnosis: it compares all eligible
+plans from the same semantic seeds and returns source-free paths, routes,
+budgets, timings, and stop receipts. It does not contain a chat model, retain
+the question, promote a policy, or write configuration. Wait until
+`get_index_status` reports `ready` before either retrieval tool; a temporary
+unavailable result during provider probing is intentional and retryable.
 
 ## Connect it, in three commands
 
@@ -224,7 +272,7 @@ It waits for a client and prints its startup to **stderr**:
 
 ```
 [umbra mcp] umbra mcp — serving /path/to/repo
-[umbra mcp] publishing 6 tools: ask_codebase, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check
+[umbra mcp] publishing 7 tools: ask_codebase, investigate_graphrag, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check
 [umbra mcp] MCP transport connected; index warm-up continues in the background.
 ```
 
@@ -247,9 +295,19 @@ diagnostics always use `stderr`, never JSON-RPC `stdout`.
 ## Monorepos and unusual layouts
 
 Umbra discovers TypeScript source from package `tsconfig.json` files and
-workspace declarations, not from a guessed root `src/`. It ignores dependency and
-build trees, indexes `.ts` and `.tsx` including classless utility and
-configuration modules, and keeps every stored path relative to the fixed root.
+workspace declarations, not from a guessed root `src/`. Under automatic
+discovery, it also finds each authoritative `prisma/schema.prisma` under the
+served root, because database constraints are executable business evidence
+rather than incidental configuration. An explicit `indexing.sources` override
+remains authoritative and replaces that automatic scope. Umbra ignores
+dependency and build trees, indexes `.ts` and `.tsx` including classless utility
+and configuration modules, and keeps every stored path relative to the fixed
+root.
+
+Prisma models are returned as labelled `prisma-schema` configuration evidence.
+Umbra does **not** infer current truth from migration SQL, arbitrary `.prisma`
+files, JSON, or YAML: those artifacts need their own authority and parser
+contract before they enter the retrieval corpus.
 
 If a repository's declared source boundary needs an explicit override, commit an
 `umbra.json` at its root:
@@ -753,9 +811,10 @@ graph TD
 
 ## How retrieval works
 
-1. **Indexing.** The indexer discovers declared TypeScript sources from the
-   served root, monorepo packages included, and records durable file, chunk,
-   vector and provider/model coverage in that root's `.umbra/` state.
+1. **Indexing.** The indexer discovers declared TypeScript sources and
+   authoritative Prisma schemas from the served root, monorepo packages
+   included, and records durable file, chunk, vector and provider/model coverage
+   in that root's `.umbra/` state.
 2. **Hybrid search.** A question is answered by fusing two rankings: SQLite FTS5
    lexical matches and vector neighbours. Umbra returns source only when there is
    independent lexical evidence, and otherwise **abstains and names the term it
@@ -819,10 +878,10 @@ Ollama, Gemini, and Claude through Vertex AI, with one reasoning vocabulary
 across all of them. Interactive `/model` switching, persistent sessions, context
 compression and self-healing recovery. A skills system that loads the right
 guide per task, and two levels of mentoring. Turn budgets bounded on tool calls,
-tokens, wall clock and cost. LangSmith tracing, opt-in. The MCP server, with six
-read-only tools, hybrid retrieval that abstains rather than guessing, an AST
-dependency graph, the NestJS wiring graph, and a retrieval quality gate that runs
-on every push with no provider.
+tokens, wall clock and cost. LangSmith tracing, opt-in. The MCP server, with
+seven read-only tools, hybrid retrieval that abstains rather than guessing,
+bounded deterministic GraphRAG, an AST dependency graph, the NestJS wiring
+graph, and a retrieval quality gate that runs on every push with no provider.
 
 **Planned.** An HTTP/streamable MCP transport, so one process can serve several
 clients. MCP elicitation, which is the prerequisite for anything in that mode

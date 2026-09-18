@@ -31,9 +31,17 @@ const IGNORED_DIRECTORIES = new Set([
 const ADR_FILE_PATTERN = /^ADR[-_]\d{3,}[-_].+\.md$/i;
 
 /** A path whose persisted identity is relative to one pinned repository root. */
-export interface WorkspaceFile {
+export interface WorkspacePath {
   readonly absolutePath: string;
   readonly relativePath: string;
+}
+
+/** Artifact classes Umbra can index without guessing at arbitrary configuration formats. */
+export type WorkspaceArtifactKind = 'typescript' | 'prisma-schema';
+
+/** One discovered source artifact together with the parser that owns it. */
+export interface WorkspaceFile extends WorkspacePath {
+  readonly kind: WorkspaceArtifactKind;
 }
 
 /** One discovered ADR directory. */
@@ -48,8 +56,8 @@ export interface AdrCatalogLocation {
 export interface WorkspaceDiscovery {
   readonly rootDir: string;
   readonly sourceFiles: readonly WorkspaceFile[];
-  readonly sourceOrigin: 'config' | 'tsconfig' | 'legacy-src';
-  readonly typeScriptProjects: readonly WorkspaceFile[];
+  readonly sourceOrigin: 'config' | 'tsconfig' | 'legacy-src' | 'prisma';
+  readonly typeScriptProjects: readonly WorkspacePath[];
   readonly adrCatalogs: readonly AdrCatalogLocation[];
 }
 
@@ -84,14 +92,16 @@ export class WorkspaceDiscoveryService {
     const config = this.readConfig();
     const typeScriptProjects = this.discoverTypeScriptProjects();
     const configuredSources = config.indexing?.sources;
-    const sourceFiles = configuredSources === undefined
+    const typeScriptSources = configuredSources === undefined
       ? this.discoverConfiguredTypeScriptFiles(typeScriptProjects)
       : this.expandConfiguredSources(configuredSources);
 
-    const legacyFiles = sourceFiles.length === 0 && configuredSources === undefined && typeScriptProjects.length === 0
+    const legacyFiles = typeScriptSources.length === 0 && configuredSources === undefined && typeScriptProjects.length === 0
       ? this.discoverLegacySrc()
       : [];
-    const finalSources = sourceFiles.length > 0 ? sourceFiles : legacyFiles;
+    const discoveredPrisma = configuredSources === undefined ? this.discoverPrismaSchemas() : [];
+    const finalTypeScript = typeScriptSources.length > 0 ? typeScriptSources : legacyFiles;
+    const finalSources = deduplicateFiles([...finalTypeScript, ...discoveredPrisma]);
 
     if (finalSources.length === 0) {
       throw new WorkspaceDiscoveryError(
@@ -104,7 +114,7 @@ export class WorkspaceDiscoveryService {
     return {
       rootDir: this.rootDir,
       sourceFiles: finalSources,
-      sourceOrigin: configuredSources !== undefined ? 'config' : sourceFiles.length > 0 ? 'tsconfig' : 'legacy-src',
+      sourceOrigin: configuredSources !== undefined ? 'config' : typeScriptSources.length > 0 ? 'tsconfig' : legacyFiles.length > 0 ? 'legacy-src' : 'prisma',
       typeScriptProjects,
       adrCatalogs: this.findAdrCatalogs(config.adr?.catalogs),
     };
@@ -135,11 +145,11 @@ export class WorkspaceDiscoveryService {
   }
 
   /** Locates all tsconfig files outside generated/dependency trees. */
-  private discoverTypeScriptProjects(): WorkspaceFile[] {
+  private discoverTypeScriptProjects(): WorkspacePath[] {
     this.readWorkspaceDeclarations();
     return this.walkFiles(this.rootDir)
       .filter((absolutePath) => path.basename(absolutePath) === 'tsconfig.json')
-      .map((absolutePath) => this.workspaceFile(absolutePath))
+      .map((absolutePath) => this.workspacePath(absolutePath))
       .sort(compareWorkspaceFiles);
   }
 
@@ -160,7 +170,7 @@ export class WorkspaceDiscoveryService {
   }
 
   /** Lets TypeScript interpret each package's include/files/rootDir contract. */
-  private discoverConfiguredTypeScriptFiles(projects: readonly WorkspaceFile[]): WorkspaceFile[] {
+  private discoverConfiguredTypeScriptFiles(projects: readonly WorkspacePath[]): WorkspaceFile[] {
     const files = new Map<string, WorkspaceFile>();
     for (const project of projects) {
       const config = ts.readConfigFile(project.absolutePath, ts.sys.readFile);
@@ -174,7 +184,7 @@ export class WorkspaceDiscoveryService {
       );
       for (const absolutePath of parsed.fileNames) {
         if (this.isIndexableSource(absolutePath)) {
-          const file = this.workspaceFile(absolutePath);
+          const file = this.workspaceFile(absolutePath, 'typescript');
           files.set(file.relativePath, file);
         }
       }
@@ -186,8 +196,8 @@ export class WorkspaceDiscoveryService {
   private expandConfiguredSources(patterns: readonly string[]): WorkspaceFile[] {
     const regexes = patterns.map((pattern) => this.globExpression(pattern));
     const files = this.walkFiles(this.rootDir)
-      .filter((absolutePath) => this.isIndexableSource(absolutePath))
-      .map((absolutePath) => this.workspaceFile(absolutePath))
+      .filter((absolutePath) => this.isIndexableArtifact(absolutePath))
+      .map((absolutePath) => this.workspaceFile(absolutePath, this.artifactKindOf(absolutePath)))
       .filter((file) => regexes.some((expression) => expression.test(file.relativePath)));
     return deduplicateFiles(files);
   }
@@ -198,7 +208,15 @@ export class WorkspaceDiscoveryService {
     if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) return [];
     return this.walkFiles(sourceDir)
       .filter((absolutePath) => this.isIndexableSource(absolutePath))
-      .map((absolutePath) => this.workspaceFile(absolutePath))
+      .map((absolutePath) => this.workspaceFile(absolutePath, 'typescript'))
+      .sort(compareWorkspaceFiles);
+  }
+
+  /** Discovers only Prisma's authoritative schema, never arbitrary `.prisma` files or migrations. */
+  private discoverPrismaSchemas(): WorkspaceFile[] {
+    return this.walkFiles(this.rootDir)
+      .filter((absolutePath) => this.isPrismaSchema(absolutePath))
+      .map((absolutePath) => this.workspaceFile(absolutePath, 'prisma-schema'))
       .sort(compareWorkspaceFiles);
   }
 
@@ -264,6 +282,22 @@ export class WorkspaceDiscoveryService {
     return !/\.(d|spec|test)\.ts$/i.test(normalized) && !/\.stories\.tsx?$/i.test(normalized);
   }
 
+  /** Allows explicit source configuration to include only the two supported artifact contracts. */
+  private isIndexableArtifact(absolutePath: string): boolean {
+    return this.isIndexableSource(absolutePath) || this.isPrismaSchema(absolutePath);
+  }
+
+  /** Prisma's current schema is authoritative; migration history is intentionally not inferred as current truth. */
+  private isPrismaSchema(absolutePath: string): boolean {
+    const normalized = this.relativePath(absolutePath).toLowerCase();
+    return normalized.endsWith('/prisma/schema.prisma') || normalized === 'prisma/schema.prisma';
+  }
+
+  /** Maps an already validated artifact path to the parser it requires. */
+  private artifactKindOf(absolutePath: string): WorkspaceArtifactKind {
+    return this.isPrismaSchema(absolutePath) ? 'prisma-schema' : 'typescript';
+  }
+
   /** Converts a deliberately small glob subset to a root-relative regex. */
   private globExpression(pattern: string): RegExp {
     const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -288,7 +322,12 @@ export class WorkspaceDiscoveryService {
   }
 
   /** Converts one on-disk path to its only persisted identity. */
-  private workspaceFile(absolutePath: string): WorkspaceFile {
+  private workspaceFile(absolutePath: string, kind: WorkspaceArtifactKind): WorkspaceFile {
+    return { ...this.workspacePath(absolutePath), kind };
+  }
+
+  /** Preserves path identity for declarations such as `tsconfig.json` that are not indexed artifacts. */
+  private workspacePath(absolutePath: string): WorkspacePath {
     return { absolutePath, relativePath: this.relativePath(absolutePath) };
   }
 
@@ -311,7 +350,7 @@ export class WorkspaceDiscoveryService {
 }
 
 /** Sorts by stable persisted identity. */
-function compareWorkspaceFiles(left: WorkspaceFile, right: WorkspaceFile): number {
+function compareWorkspaceFiles(left: WorkspacePath, right: WorkspacePath): number {
   return left.relativePath.localeCompare(right.relativePath);
 }
 

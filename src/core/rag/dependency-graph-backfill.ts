@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { GraphEdge } from '../types';
+import { ensureDependencyGraphSchema, replaceDependencyGraphForFile } from './dependency-graph-store';
 
 /**
  * Marker for the extractor generation whose output is stored.
@@ -19,7 +20,7 @@ import { GraphEdge } from '../types';
  * lazily. The graph arm reported the three new gaps on the next run, which is
  * what a per-construct recall report is for.
  */
-const EXTRACTOR_GENERATION_KEY = 'dependency-graph-extractor-v3';
+const EXTRACTOR_GENERATION_KEY = 'dependency-graph-extractor-v4';
 
 /** One discovered source file, as `WorkspaceDiscoveryService` reports it. */
 export interface BackfillCandidate {
@@ -59,6 +60,7 @@ export function backfillDependencyGraph(
   extract: (relativePath: string, source: string) => readonly GraphEdge[],
   readFile: (absolutePath: string) => string,
 ): number {
+  ensureDependencyGraphSchema(db);
   db.exec(
     `CREATE TABLE IF NOT EXISTS rag_metadata_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   );
@@ -70,20 +72,15 @@ export function backfillDependencyGraph(
   // Only files the registry already holds. A file outside it has no chunks, so
   // it is not a `source` row the graph can carry — and `dependency_graph`
   // enforces that with a foreign key onto `file_registry(path)`.
-  const indexed = new Set(
-    (db.prepare(`SELECT path FROM file_registry`).all() as { path: string }[]).map(
-      (row) => row.path,
-    ),
-  );
-
-  const deleteEdges = db.prepare(`DELETE FROM dependency_graph WHERE source = ?`);
-  const insertEdge = db.prepare(
-    `INSERT OR IGNORE INTO dependency_graph (source, target, relation) VALUES (?, ?, ?)`,
+  const indexed = new Map(
+    (db.prepare(`SELECT path, hash FROM file_registry`).all() as { path: string; hash: string }[])
+      .map((row) => [row.path, row.hash]),
   );
 
   let extracted = 0;
   for (const file of files) {
-    if (!indexed.has(file.relativePath)) continue;
+    const hash = indexed.get(file.relativePath);
+    if (hash === undefined) continue;
 
     let source: string;
     try {
@@ -97,13 +94,7 @@ export function backfillDependencyGraph(
 
     const edges = extract(file.relativePath, source);
     db.transaction(() => {
-      // Replaced rather than merged: `INSERT OR IGNORE` on a `(source, target)`
-      // primary key would keep a stale relation for a pair that now resolves
-      // differently, which is how one row ends up describing two generations.
-      deleteEdges.run(file.relativePath);
-      for (const edge of edges) {
-        insertEdge.run(edge.sourcePath, edge.targetPath, edge.relation);
-      }
+      replaceDependencyGraphForFile(db, file.relativePath, edges, hash);
     })();
     extracted += 1;
   }

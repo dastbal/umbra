@@ -40,6 +40,31 @@ export interface McpSdk {
   ) => unknown;
 }
 
+/** Opaque value supplied by an MCP client to correlate progress updates. */
+export type McpProgressToken = string | number;
+
+/**
+ * The request-scoped SDK surface a tool needs to report optional progress.
+ *
+ * Umbra does not import SDK implementation types into its presentation
+ * contracts. This small structural boundary preserves that decoupling while
+ * retaining the protocol's request correlation guarantee.
+ */
+export interface McpToolRequestContext {
+  /** Metadata supplied with the originating MCP request. */
+  readonly _meta?: { readonly progressToken?: McpProgressToken };
+  /** Sends a notification associated with the tool call currently in flight. */
+  sendNotification(notification: {
+    method: 'notifications/progress';
+    params: {
+      progressToken: McpProgressToken;
+      progress: number;
+      total?: number;
+      message?: string;
+    };
+  }): Promise<void>;
+}
+
 /**
  * The subset of `McpServer` this adapter calls.
  *
@@ -59,9 +84,10 @@ export interface McpServerLike {
       title?: string;
       description?: string;
       inputSchema?: unknown;
+      outputSchema?: unknown;
       annotations?: Record<string, unknown>;
     },
-    handler: (args: Record<string, unknown>) => Promise<unknown>,
+    handler: (args: Record<string, unknown>, context: McpToolRequestContext) => Promise<unknown>,
   ): unknown;
 
   registerResource(

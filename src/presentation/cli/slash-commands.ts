@@ -59,6 +59,8 @@ export interface SlashCommandHost {
   hasPendingSearchLearning(): boolean;
   /** Whether deep mentor mode is currently on. Used for a live hint. */
   isMentorActive(): boolean;
+  /** Runs a local GraphRAG Detective action without sending it to the chat model. */
+  runDetective(input: string): Promise<void>;
 }
 
 /**
@@ -74,10 +76,12 @@ export interface SlashCommand {
    *
    * `/help` sets this to `false`: it is the command that *opens* the picker, so
    * listing it inside itself is a loop with nothing to offer.
-   */
+  */
   inPicker: boolean;
-  /** Runs the command. */
-  run(): Promise<void> | void;
+  /** Whether trailing text is part of this command's contract. */
+  acceptsInput?: boolean;
+  /** Runs the command with its optional trailing text. */
+  run(input?: string): Promise<void> | void;
   /**
    * Optional live detail for the picker row, evaluated at open time so it can
    * reflect current state (mentor mode being on, for instance).
@@ -129,6 +133,14 @@ export function buildSlashCommands(host: SlashCommandHost): SlashCommand[] {
       run: () => host.learnSearch(),
     },
     {
+      name: '/detective',
+      description: 'Compare bounded GraphRAG plans locally; use deep, replay, or promote subcommands',
+      inPicker: true,
+      acceptsInput: true,
+      hint: () => '/detective <question> · /detective deep <question>',
+      run: (input = '') => host.runDetective(input),
+    },
+    {
       name: '/exit',
       description: 'End the session (same as Ctrl+C)',
       inPicker: true,
@@ -165,6 +177,28 @@ export function findSlashCommand(
   return commands.find((command) => command.name === normalized);
 }
 
+/** Parsed leading slash command and its free-text trailing argument. */
+export interface ParsedSlashCommand {
+  /** Registry key, normalized to lowercase. */
+  readonly name: string;
+  /** Remaining text, preserving an operator's question. */
+  readonly input: string;
+}
+
+/**
+ * Separates a registered command name from its optional trailing input.
+ *
+ * @param input - Complete trimmed terminal line.
+ * @returns Parsed command candidate, or undefined for ordinary prose.
+ */
+export function parseSlashCommand(input: string): ParsedSlashCommand | undefined {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith('/')) return undefined;
+  const separator = trimmed.search(/\s/);
+  if (separator === -1) return { name: trimmed.toLowerCase(), input: '' };
+  return { name: trimmed.slice(0, separator).toLowerCase(), input: trimmed.slice(separator).trim() };
+}
+
 /**
  * Lists the commands a partially typed input could become.
  *
@@ -178,7 +212,7 @@ export function findSlashCommand(
  * @returns The matching commands, registry order preserved.
  */
 export function completeSlashCommand(
-  commands: SlashCommand[],
+  commands: readonly SlashCommand[],
   partial: string,
 ): SlashCommand[] {
   const normalized = partial.toLowerCase();
@@ -251,7 +285,7 @@ function editDistance(a: string, b: string): number {
  * @returns The suggested commands, most likely first. Empty when nothing is close.
  */
 export function suggestSlashCommands(
-  commands: SlashCommand[],
+  commands: readonly SlashCommand[],
   input: string,
 ): SlashCommand[] {
   const normalized = input.toLowerCase();

@@ -1,345 +1,181 @@
-import {
-  askCodebaseTool,
-  integrityCheckTool,
-  listAdrsTool,
-  queryDependencyGraphTool,
-  queryNestGraphTool,
-} from '../../core/tools';
 import { z } from 'zod';
-import { McpToolDescriptor, McpToolResult } from './mcp.contracts';
-import { toErrorResult, toToolResult } from './dto-mapper';
+import {
+  adrCatalogResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
+  executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
+  executeProjectInventory, executeWorkspaceSearch,
+  executeNestGraph, integrityResultSchema, nestGraphResultSchema,
+  graphRagInvestigationResultSchema,
+  indexStatusResultSchema, type IndexStatusResult, workspaceInventoryResultSchema, workspaceSearchResultSchema,
+} from '../../core/tools';
+import { McpToolResult } from './mcp.contracts';
+import { toStructuredToolResult } from './dto-mapper';
 
-/**
- * The read-only tools Umbra publishes over MCP, and nothing else.
- *
- * ## What is deliberately absent
- *
- * `safeWriteFileTool`, `deleteFileTool`, `executeTestsTool`,
- * `executeCommandTool` and the delegation tools. Not withheld out of caution:
- * writes are **technically unavailable** in this mode. `requestApproval`
- * suspends a run by raising a LangGraph `interrupt()`, which only exists inside
- * a graph run. An MCP server has no graph, therefore no interrupt, therefore no
- * human approval channel — so nothing that writes may be exposed (ADR-024,
- * constraint 2).
- *
- * ## Why the published schema is zod, and separate from the tool's own
- *
- * The SDK takes a zod raw shape and derives the JSON Schema itself, so the
- * hand-written `inputSchema` objects this file used to carry are gone —
- * hand-maintained JSON Schema beside a zod validator is two descriptions of
- * one contract, and they drift.
- *
- * The shapes are declared here rather than taken from each Umbra tool's own
- * `schema`, and that is deliberate, not duplication for its own sake. The
- * internal schemas carry `.describe()` text written for **Umbra's own prompt**:
- * `list_adrs` tells the model to "read the selected ADR with safe_read_file",
- * a tool this server does not publish. Reusing them would leak internal
- * vocabulary into a foreign model's context, which is precisely what
- * `dto-mapper.ts` exists to prevent on the way out.
- *
- * So: one published schema per tool, in one place, in the same language the
- * SDK speaks — and the Umbra tool still validates its own input underneath,
- * which is defence in depth rather than redundancy.
- */
-
-/** A published tool: how it is advertised, and how it is invoked. */
+/** A read-only capability published to a foreign MCP client. */
 export interface PublishedTool {
-  /** Tool name, as the client calls it. */
   readonly name: string;
-  /** Description written for a foreign reader, not for Umbra's own prompt. */
+  readonly title?: string;
   readonly description: string;
-  /**
-   * Argument shape as a zod raw shape, which is what `registerTool` takes.
-   *
-   * An empty object means the tool takes no arguments — load-bearing for
-   * `run_integrity_check`, whose root must come from the pinned launch value
-   * and never from a caller (ADR-024, constraint 3).
-   */
   readonly inputSchema: z.ZodRawShape;
-  /** Runs the tool and maps its output across the DTO boundary. */
+  readonly outputSchema?: z.ZodType;
   readonly invoke: (args: Record<string, unknown>) => Promise<McpToolResult>;
+  readonly rootUnavailable?: (message: string) => McpToolResult;
 }
 
 /** Current availability of semantic retrieval without invoking a provider. */
-export interface SemanticSearchReadiness {
-  /** Whether an `ask_codebase` call can retrieve from durable vector coverage. */
-  readonly ready: boolean;
-  /** Operator-facing state that tells a client whether a retry is useful. */
-  readonly message: string;
+export interface SemanticSearchReadiness { readonly ready: boolean; readonly message: string; }
+
+function diagnostic(message: string, code: string) {
+  return [{ severity: 'error' as const, code, message }] as const;
 }
 
-/**
- * Minimal structural view of a LangChain tool, so this catalog does not depend
- * on the framework's concrete types.
- */
-interface InvokableTool {
-  invoke: (input: unknown) => Promise<unknown>;
-}
-
-/**
- * Calls an Umbra tool and normalises whatever it returns to a string.
- *
- * Every published tool returns a string today. The coercion is here so a tool
- * that starts returning something structured surfaces as readable text rather
- * than as `[object Object]` in a foreign model's context.
- *
- * @param tool - The LangChain tool to invoke.
- * @param args - Validated arguments.
- * @returns The tool's output as a string.
- */
-async function runTool(tool: unknown, args: Record<string, unknown>): Promise<string> {
-  const output = await (tool as InvokableTool).invoke(args);
-  return typeof output === 'string' ? output : JSON.stringify(output, null, 2);
-}
-
-/**
- * Builds the `list_adrs` publication.
- *
- * @returns The published tool.
- */
 function publishListAdrs(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(adrCatalogResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'ADR_CATALOG_ERROR', summary: 'The ADR catalog is unavailable.',
+    data: { catalogStatus: 'cached', generatedAt: '', availableModules: [], entries: [] }, evidence: [],
+    diagnostics: diagnostic(message, 'ADR_CATALOG_ERROR'), truncated: false, retryable: false,
+  });
   return {
-    name: 'list_adrs',
-    description:
-      'Lists this repository\'s Architectural Decision Records — path, title, status and a compact ' +
-      'summary — without returning their bodies. Use it to find out *why* the code is shaped the way ' +
-      'it is before reading source. Read the full record yourself from the path it returns.',
-    inputSchema: {
-      refresh: z
-        .boolean()
-        .optional()
-        .describe('Rebuild the cached catalog instead of reading it.'),
-      module: z.string().min(1).optional().describe('Optional discovered ADR module to list.'),
-    },
-    invoke: async (args) => {
-      const refresh = args.refresh === true;
-      const module = typeof args.module === 'string' ? args.module : undefined;
-      return toToolResult(await runTool(listAdrsTool, { refresh, module }));
-    },
+    name: 'list_adrs', title: 'List architecture decisions',
+    description: 'Lists repository ADR metadata and optional module matches. Returns no ADR bodies.',
+    inputSchema: { refresh: z.boolean().optional().describe('Rebuild the cached catalog.'), module: z.string().min(1).optional().describe('Optional discovered ADR module.') },
+    outputSchema: adrCatalogResultSchema,
+    invoke: async (args) => toStructuredToolResult(adrCatalogResultSchema, executeListAdrs({ refresh: args.refresh === true, ...(typeof args.module === 'string' ? { module: args.module } : {}) })),
+    rootUnavailable: failure,
   };
 }
 
-/**
- * Builds the `query_dependency_graph` publication.
- *
- * @returns The published tool.
- */
 function publishDependencyGraph(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(dependencyGraphResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'DEPENDENCY_GRAPH_ERROR', summary: 'The dependency graph is unavailable.',
+    data: { filePath: '', direction: 'outbound', relations: [] }, evidence: [], diagnostics: diagnostic(message, 'DEPENDENCY_GRAPH_ERROR'), truncated: false, retryable: false,
+  });
   return {
-    name: 'query_dependency_graph',
-    description:
-      'Queries the AST-level dependency graph for one TypeScript file: which files it imports ' +
-      '(outbound), or which files import it (inbound). Answers "what breaks if I change this?" ' +
-      'without reading the whole tree.',
-    inputSchema: {
-      filePath: z
-        .string()
-        .min(1)
-        .describe('Repository-relative path to a .ts file, e.g. src/core/rag/retriever.ts'),
-      direction: z
-        .enum(['inbound', 'outbound'])
-        .describe('inbound = files that import this one; outbound = files this one imports.'),
-    },
-    invoke: async (args) => {
-      const filePath = typeof args.filePath === 'string' ? args.filePath : undefined;
-      const direction = args.direction;
-
-      if (filePath === undefined || filePath.trim().length === 0) {
-        return toErrorResult('filePath is required and must be a non-empty string.');
-      }
-      if (direction !== 'inbound' && direction !== 'outbound') {
-        return toErrorResult('direction is required and must be "inbound" or "outbound".');
-      }
-
-      return toToolResult(await runTool(queryDependencyGraphTool, { filePath, direction }));
-    },
+    name: 'query_dependency_graph', title: 'Query file dependencies',
+    description: 'Finds inbound or outbound TypeScript file dependencies in the authorized project.',
+    inputSchema: { filePath: z.string().min(1).describe('Repository-relative TypeScript file path.'), direction: z.enum(['inbound', 'outbound']).describe('Direction of dependency traversal.') },
+    outputSchema: dependencyGraphResultSchema,
+    invoke: async (args) => { const input = z.object({ filePath: z.string().min(1), direction: z.enum(['inbound', 'outbound']) }).parse(args); return toStructuredToolResult(dependencyGraphResultSchema, executeDependencyGraph(input)); },
+    rootUnavailable: failure,
   };
 }
 
-/**
- * Builds the `query_nest_graph` publication.
- *
- * Published beside `query_dependency_graph` rather than folded into it. That
- * tool's schema is a file path and a direction, because a file import relates
- * two files. Nest wiring relates a module to a token, and the token is often a
- * string constant belonging to no file — so one schema carrying both would need
- * a `filePath` that is sometimes not a path.
- *
- * @returns The published tool.
- */
 function publishNestGraph(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(nestGraphResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'NEST_GRAPH_ERROR', summary: 'The NestJS graph is unavailable.',
+    data: { name: '', normalizedName: '', direction: 'module', bindings: [], injections: [] }, evidence: [], diagnostics: diagnostic(message, 'NEST_GRAPH_ERROR'), truncated: false, retryable: false,
+  });
   return {
-    name: 'query_nest_graph',
-    description:
-      'Answers NestJS dependency-injection questions a file-import graph cannot: which module ' +
-      'provides an injection token, which classes inject it, and what one module binds. Works ' +
-      'for string tokens, and for modules whose wiring lives in forRoot() rather than in the ' +
-      '@Module decorator.',
-    inputSchema: {
-      name: z
-        .string()
-        .min(1)
-        .describe('An injection token (AI_AGENT) or a module class name (UsersModule).'),
-      direction: z
-        .enum(['provides', 'injects', 'module'])
-        .describe(
-          'provides = modules that bind this token; injects = classes that ask for it; ' +
-            'module = everything the named module binds.',
-        ),
-    },
-    invoke: async (args) => {
-      const name = typeof args.name === 'string' ? args.name.trim() : '';
-      const direction = args.direction;
-
-      if (name.length === 0) {
-        return toErrorResult('name is required and must be a non-empty string.');
-      }
-      if (direction !== 'provides' && direction !== 'injects' && direction !== 'module') {
-        return toErrorResult('direction is required and must be "provides", "injects" or "module".');
-      }
-
-      return toToolResult(await runTool(queryNestGraphTool, { name, direction }));
-    },
+    name: 'query_nest_graph', title: 'Query NestJS wiring',
+    description: 'Finds providers, injection consumers, or module bindings in the authorized project.',
+    inputSchema: { name: z.string().trim().min(1).describe('Injection token or module class name.'), direction: z.enum(['provides', 'injects', 'module']).describe('Wiring relationship to inspect.') },
+    outputSchema: nestGraphResultSchema,
+    invoke: async (args) => { const input = z.object({ name: z.string().trim().min(1), direction: z.enum(['provides', 'injects', 'module']) }).parse(args); return toStructuredToolResult(nestGraphResultSchema, executeNestGraph(input)); },
+    rootUnavailable: failure,
   };
 }
 
-/**
- * Builds the `run_integrity_check` publication.
- *
- * The empty schema is load-bearing, not an oversight: the tool derives its root
- * from the root pinned at launch and **must not** accept one from a caller.
- * Taking a path here would reopen the traversal surface ADR-011 closed and hand
- * it to a remote client (ADR-024, constraint 3).
- *
- * @returns The published tool.
- */
 function publishIntegrityCheck(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(integrityResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'INTEGRITY_BLOCKED', summary: 'The integrity check is blocked.', data: { projects: [] }, evidence: [], diagnostics: diagnostic(message, 'INTEGRITY_BLOCKED'), truncated: false, retryable: false,
+  });
   return {
-    name: 'run_integrity_check',
-    description:
-      'Runs the TypeScript compiler in no-emit mode over the repository this server was launched ' +
-      'against, and reports type errors. Takes no arguments: the directory is fixed at launch and ' +
-      'cannot be chosen by the caller.',
-    inputSchema: {},
-    invoke: async () => toToolResult(await runTool(integrityCheckTool, {})),
+    name: 'run_integrity_check', title: 'Run TypeScript integrity check',
+    description: 'Runs TypeScript no-emit checks. The project root is fixed by the server and cannot be supplied.',
+    inputSchema: {}, outputSchema: integrityResultSchema,
+    invoke: async () => toStructuredToolResult(integrityResultSchema, await executeIntegrityCheck()), rootUnavailable: failure,
   };
 }
 
-/**
- * Builds the `ask_codebase` publication.
- *
- * Always published in the stable catalog. Until durable coverage is ready, its
- * handler returns a typed retryable status rather than querying partial data.
- *
- * @param decorate - Adds index provenance to a successful answer.
- * @returns The published tool.
- */
-function publishAskCodebase(
-  decorate: (text: string) => string,
-  readReadiness: () => SemanticSearchReadiness,
-): PublishedTool {
+function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): PublishedTool {
+  const unavailable = (message: string) => toStructuredToolResult(codebaseSearchResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE', summary: 'Semantic search is unavailable.',
+    data: { query: '', recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], files: [] }, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
+    nextAction: 'Read get_index_status and retry after durable coverage is ready.',
+  });
   return {
-    name: 'ask_codebase',
-    description:
-      'Semantic search over this repository, returning the most relevant code with each file\'s ' +
-      'imports and structural skeleton. Ask in natural language ("where is the webhook signature ' +
-      'verified?") rather than by keyword. Every answer states which embedding index produced it.',
+    name: 'ask_codebase', title: 'Search the codebase',
+    description: 'Searches indexed code with the approved deterministic hybrid/graph policy and returns paths, ranges, snippets, provenance, and a next read-only recommendation. Scores are ranking signals, not confidence probabilities.',
+    inputSchema: { query: z.string().min(1).describe('Original natural-language code question.'), context: z.string().max(2000).optional().describe('Optional one-time clarification.') },
+    outputSchema: codebaseSearchResultSchema,
+    invoke: async (args) => { const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional() }).parse(args); const readiness = readReadiness(); if (!readiness.ready) return unavailable(readiness.message); return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(input)).result); },
+    rootUnavailable: unavailable,
+  };
+}
+
+/** Publishes a metadata-only map of the pinned workspace's safe artifact types. */
+function publishProjectInventory(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(workspaceInventoryResultSchema, {
+    schemaVersion: 1, status: 'error', code: 'WORKSPACE_INVENTORY_ERROR', summary: 'The workspace inventory is unavailable.',
+    data: { filesByType: {}, excludedByReason: {} }, evidence: [], diagnostics: diagnostic(message, 'WORKSPACE_INVENTORY_ERROR'), truncated: false, retryable: false,
+  });
+  return {
+    name: 'inspect_project', title: 'Inspect project artifact types',
+    description: 'Maps safe project artifact types and exclusions without reading content or requiring an index.',
+    inputSchema: {}, outputSchema: workspaceInventoryResultSchema,
+    invoke: async () => toStructuredToolResult(workspaceInventoryResultSchema, executeProjectInventory()), rootUnavailable: failure,
+  };
+}
+
+/** Publishes bounded literal workspace search without requiring semantic-index coverage. */
+function publishWorkspaceSearch(): PublishedTool {
+  const failure = (message: string) => toStructuredToolResult(workspaceSearchResultSchema, {
+    schemaVersion: 1, status: 'blocked', code: 'WORKSPACE_SEARCH_ERROR', summary: 'The workspace search is blocked.',
+    data: { query: '', scannedFiles: 0, matches: [], excludedByReason: {} }, evidence: [], diagnostics: diagnostic(message, 'WORKSPACE_SEARCH_ERROR'), truncated: false, retryable: false,
+  });
+  return {
+    name: 'search_workspace', title: 'Search workspace literally',
+    description: 'Finds exact literal text in safe project artifacts, including files outside the semantic index. Results are live matches, not semantic ranking.',
     inputSchema: {
-      query: z
-        .string()
-        .min(1)
-        .describe('A question about logic or functionality, in natural language.'),
-      context: z
-        .string()
-        .max(2000)
-        .optional()
-        .describe('Optional clarification to retry once after the original query lacks evidence.'),
+      query: z.string().trim().min(1).max(500).describe('Exact literal text to find.'),
+      path: z.string().min(1).optional().describe('Optional repository-relative file or directory.'),
+      maxMatches: z.number().int().min(1).max(100).optional().describe('Maximum matches to return; defaults to 100.'),
     },
+    outputSchema: workspaceSearchResultSchema,
     invoke: async (args) => {
-      const query = typeof args.query === 'string' ? args.query : undefined;
-      const context = typeof args.context === 'string' ? args.context : undefined;
-      if (query === undefined || query.trim().length === 0) {
-        return toErrorResult('query is required and must be a non-empty string.');
-      }
-
-      const readiness = readReadiness();
-      if (!readiness.ready) {
-        return toErrorResult(
-          `Semantic search is not ready: ${readiness.message}. ` +
-            'Read get_index_status and retry when durable vector coverage is available.',
-        );
-      }
-
-      const raw = await runTool(askCodebaseTool, { query, context });
-      const mapped = toToolResult(raw);
-
-      if (mapped.isError === true) return mapped;
-
-      return {
-        content: [{ type: 'text', text: decorate(mapped.content[0]?.text ?? '') }],
-      };
+      const input = z.object({ query: z.string().trim().min(1).max(500), path: z.string().min(1).optional(), maxMatches: z.number().int().min(1).max(100).optional() }).parse(args);
+      return toStructuredToolResult(workspaceSearchResultSchema, executeWorkspaceSearch(input));
     },
+    rootUnavailable: failure,
   };
 }
 
-/** Publishes durable index coverage and live background-index state. */
-function publishIndexStatus(readIndexStatus: () => string): PublishedTool {
+/** Publishes source-free GraphRAG plan comparison without granting any local configuration write. */
+function publishGraphRagInvestigation(readReadiness: () => SemanticSearchReadiness): PublishedTool {
+  const unavailable = (message: string) => toStructuredToolResult(graphRagInvestigationResultSchema, {
+    schemaVersion: 1, status: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', summary: 'GraphRAG comparison is unavailable.',
+    data: { runId: '', persisted: false, mode: 'standard', indexFingerprint: '', budget: { maxSeeds: 0, maxDepth: 0, maxNodes: 0, maxRelations: 0, maxChunks: 0, maxEstimatedTokens: 0 }, plans: [] },
+    evidence: [], diagnostics: diagnostic(message, 'GRAPHRAG_INVESTIGATION_ERROR'), truncated: false, retryable: true,
+  });
   return {
-    name: 'get_index_status',
-    description:
-      'Reports the current project-index lifecycle and durable vector coverage without calling an ' +
-      'embedding provider. Use it before retrying semantic search while indexing is in progress.',
-    inputSchema: {},
-    invoke: async () => ({ content: [{ type: 'text', text: readIndexStatus() }] }),
+    name: 'investigate_graphrag', title: 'Compare GraphRAG retrieval plans',
+    description: 'Compares deterministic bounded hybrid, dependency, and NestJS retrieval plans from one shared semantic seed lookup. Returns source-free paths, graph routes, budgets, timing, stop receipts, and recommendations; it does not persist a Detective trace, call a chat model, or change configuration.',
+    inputSchema: {
+      query: z.string().min(1).describe('Original natural-language code question.'),
+      mode: z.enum(['standard', 'deep']).optional().describe('Use deep only for a bounded local experiment.'),
+    },
+    outputSchema: graphRagInvestigationResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ query: z.string().min(1), mode: z.enum(['standard', 'deep']).optional() }).parse(args);
+      const readiness = readReadiness();
+      if (!readiness.ready) return unavailable(readiness.message);
+      return toStructuredToolResult(graphRagInvestigationResultSchema, await executeGraphRagInvestigation(input));
+    },
+    rootUnavailable: unavailable,
   };
 }
 
-/**
- * Assembles the published catalog.
- *
- * ## Why `ask_codebase` stays visible while indexing
- *
- * The catalog is fixed before the MCP handshake. `ask_codebase` therefore
- * exposes a typed, retryable availability result while its background index is
- * starting, rather than withholding the capability until a client has already
- * cached its tool list. It invokes retrieval only after the supplied readiness
- * boundary confirms durable coverage.
- *
- * @param options - Whether semantic search can answer, and how to stamp it.
- * @returns The tools to publish, in advertisement order.
- */
+/** Assembles the stable MCP catalog. */
 export function buildToolCatalog(options: {
   semanticSearchReadiness: () => SemanticSearchReadiness;
-  readIndexStatus: () => string;
+  readIndexStatus: () => IndexStatusResult;
   decorateSemanticAnswer?: (text: string) => string;
-  /** Whether a validated repository root is available for root-bound tools. */
   projectRootReady?: () => boolean;
-  /** Recovery hint when the client has not supplied a valid root yet. */
   projectRootMessage?: () => string;
 }): PublishedTool[] {
-  const catalog = [
-    publishAskCodebase(options.decorateSemanticAnswer ?? ((text) => text), options.semanticSearchReadiness),
-    publishIndexStatus(options.readIndexStatus),
-    publishListAdrs(),
-    publishDependencyGraph(),
-    publishNestGraph(),
-    publishIntegrityCheck(),
-  ];
+  const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), publishWorkspaceSearch(), publishProjectInventory(), publishGraphRagInvestigation(options.semanticSearchReadiness), {
+    name: 'get_index_status', title: 'Get index status', description: 'Reports live lifecycle, persisted provenance, and durable coverage as separate fields without invoking an embedding provider.', inputSchema: {}, outputSchema: indexStatusResultSchema,
+    invoke: async () => toStructuredToolResult(indexStatusResultSchema, options.readIndexStatus()),
+  }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
   if (options.projectRootReady === undefined) return catalog;
-
-  return catalog.map((tool) => {
-    if (tool.name === 'get_index_status') return tool;
-    return {
-      ...tool,
-      invoke: async (args) => {
-        if (!options.projectRootReady?.()) {
-          return toErrorResult(
-            options.projectRootMessage?.() ??
-              'Umbra has not received one validated project root. Open one project and reconnect.',
-          );
-        }
-        return tool.invoke(args);
-      },
-    };
-  });
+  return catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
 }

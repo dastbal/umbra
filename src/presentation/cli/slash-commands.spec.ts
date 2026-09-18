@@ -14,6 +14,7 @@ import {
   looksLikeSlashCommand,
   suggestSlashCommands,
   buildSlashCompleter,
+  parseSlashCommand,
   SlashCommandHost,
 } from './slash-commands';
 
@@ -41,6 +42,7 @@ function makeHost(mentorActive = false): HostSpy {
     learnSearch:       () => { spy.calls.push('learnSearch'); },
     hasPendingSearchLearning: () => false,
     isMentorActive:    () => spy.mentorActive,
+    runDetective: async () => { spy.calls.push('runDetective'); },
   };
   return spy;
 }
@@ -111,9 +113,10 @@ describe('findSlashCommand', () => {
     await findSlashCommand(commands, '/help')!.run();
     await findSlashCommand(commands, '/exit')!.run();
     await findSlashCommand(commands, '/learn-search')!.run();
+    await findSlashCommand(commands, '/detective')!.run('what injects AgentService');
 
     expect(spy.calls).toEqual([
-      'switchModel', 'toggleMentor', 'openCommandPicker', 'exitSession', 'learnSearch',
+      'switchModel', 'toggleMentor', 'openCommandPicker', 'exitSession', 'learnSearch', 'runDetective',
     ]);
   });
 
@@ -135,6 +138,18 @@ describe('findSlashCommand', () => {
     const commands = buildSlashCommands(makeHost().host);
 
     expect(findSlashCommand(commands, '/modle')).toBeUndefined();
+  });
+});
+
+describe('parseSlashCommand', () => {
+  it('preserves a Detective question after its command name', () => {
+    expect(parseSlashCommand('/detective deep what injects AgentService')).toEqual({
+      name: '/detective', input: 'deep what injects AgentService',
+    });
+  });
+
+  it('does not treat ordinary prose as a command', () => {
+    expect(parseSlashCommand('explain /detective')).toBeUndefined();
   });
 });
 
@@ -268,7 +283,7 @@ describe('buildSlashCompleter', () => {
       },
     ];
 
-    expect(buildSlashCompleter(commands)('/de')[0]).toEqual(['/deploy']);
+    expect(buildSlashCompleter(commands)('/de')[0]).toEqual(['/detective', '/deploy']);
   });
 });
 

@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { ensureLexicalIndex } from './lexical-index';
-import { findUnknownTerms, subjectTerms, unknownTermReport } from './unknown-terms';
+import { assessUnknownTerms, findUnknownTerms, subjectTerms, unknownTermReport } from './unknown-terms';
 
 /** A minimal `code_chunks` plus its FTS mirror, standing in for a real index. */
 function indexWith(contents: readonly { path: string; content: string }[]): Database.Database {
@@ -96,6 +96,23 @@ describe('findUnknownTerms', () => {
   it('does not let a quote in the query become FTS syntax', () => {
     expect(() => findUnknownTerms(db, 'where is "kafka" OR retriever')).not.toThrow();
     expect(findUnknownTerms(db, 'where is "kafka" OR retriever')).toContain('kafka');
+  });
+
+  it('degrades a repeated manner modifier without hiding a missing subject', () => {
+    const assessment = assessUnknownTerms(
+      db,
+      'How is the retriever query handled byte by byte?',
+    );
+
+    expect(assessment.strict).toEqual([]);
+    expect(assessment.ignoredModifiers).toEqual(['byte']);
+  });
+
+  it('keeps the same word strict when it is the only possible subject', () => {
+    const assessment = assessUnknownTerms(db, 'Where are bytes handled?');
+
+    expect(assessment.strict).toEqual(['bytes']);
+    expect(assessment.ignoredModifiers).toEqual([]);
   });
 });
 

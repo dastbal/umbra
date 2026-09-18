@@ -2,8 +2,9 @@
   "mcpServers": {
     "umbra": {
       "type": "stdio",
-      "command": "umbra",
+      "command": "node",
       "args": [
+        "C:\\Users\\BLUELABEL-PROGRAMMER\\Documents\\london\\London\\nestjs-ai-agent-lib\\dist\\bin\\cli.js",
         "mcp",
         "--root",
         "C:\\Users\\BLUELABEL-PROGRAMMER\\Documents\\london\\London\\nestjs-ai-agent-lib"

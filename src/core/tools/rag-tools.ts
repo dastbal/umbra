@@ -6,36 +6,68 @@ import { IndexerService } from "../rag/indexer";
 import { log } from "./utils/logger";
 import { readIndexStamp } from '../rag/index-stamp';
 import { runtimeRoot } from '../config/runtime-root';
+import {
+  executeCodebaseSearch,
+  executeProjectInventory,
+  executeWorkspaceSearch,
+  formatProjectInventoryForModel,
+  formatWorkspaceSearchForModel,
+} from './read-only-executions';
 
 export const askCodebaseTool = tool(
   async ({ query, context }) => {
-    clearPendingRetrievalAlias();
     log.debug(`ask_codebase called with query: "${query}"`);
-    try {
-      const stamp = readIndexStamp(runtimeRoot());
-      if (stamp?.status === 'empty') {
-        return `❌ Code index unavailable: ${stamp.diagnostic ?? 'No indexable source files were discovered.'}`;
-      }
-      log.tool(`Querying codebase: "${query}"`);
-      const retriever = new RetrieverService();
-      const report = await retriever.getContextForLLM(query, context);
-      const candidate = retriever.learningCandidate;
-      if (candidate !== undefined) stageRetrievalAlias(candidate);
-      return report;
-    } catch (error: any) {
-      log.error(`Error during codebase query "${query}": ${error.message}`);
-      return `❌ Error querying codebase: ${error.message}`;
-    }
+    log.tool(`Querying codebase: "${query}"`);
+    const { result, modelContent } = await executeCodebaseSearch({ query, context });
+    if (result.status === 'error') log.error(`Error during codebase query "${query}": ${result.diagnostics[0].message}`);
+    return [modelContent, result] as const;
   },
   {
     name: "ask_codebase",
-    description: "Hybrid code search with dependency context. After an earlier abstention, send the original query plus context once; only repository evidence is returned.",
+    description: "Deterministic hybrid and bounded-graph code search. After an earlier abstention, send the original query plus context once; only repository evidence is returned.",
     schema: z.object({
       query: z.string().describe("Query describing logic or functionality."),
       context: z.string().max(2000).optional().describe(
         "Optional clarification from the operator after an earlier search lacked evidence.",
       ),
     }),
+    responseFormat: 'content_and_artifact',
+  },
+);
+
+/** Maps the safe artifact types present in the pinned project without reading their content. */
+export const inspectProjectTool = tool(
+  async () => {
+    const result = executeProjectInventory();
+    return [formatProjectInventoryForModel(result), result] as const;
+  },
+  {
+    name: 'inspect_project',
+    description: 'Maps safe project artifact types and exclusions without reading file content or requiring an index.',
+    schema: z.object({}),
+    responseFormat: 'content_and_artifact',
+  },
+);
+
+/** Finds exact literal text in safe project artifacts, including files outside the semantic index. */
+export const searchWorkspaceTool = tool(
+  async ({ query, path, maxMatches }) => {
+    const result = executeWorkspaceSearch({
+      query,
+      ...(path === undefined ? {} : { path }),
+      ...(maxMatches === undefined ? {} : { maxMatches }),
+    });
+    return [formatWorkspaceSearchForModel(result), result] as const;
+  },
+  {
+    name: 'search_workspace',
+    description: 'Searches safe workspace text for an exact literal. Use for known symbols, keys, or phrases that may be outside the semantic index. Returns live matches, not semantic ranking.',
+    schema: z.object({
+      query: z.string().trim().min(1).max(500).describe('Exact literal text to find.'),
+      path: z.string().min(1).optional().describe('Optional repository-relative file or directory to search.'),
+      maxMatches: z.number().int().min(1).max(100).optional().describe('Maximum matches to return; defaults to 100.'),
+    }),
+    responseFormat: 'content_and_artifact',
   },
 );
 

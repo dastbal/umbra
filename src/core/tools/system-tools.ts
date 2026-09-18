@@ -3,7 +3,7 @@ import { z } from "zod";
 import * as fs from 'fs';
 import * as path from 'path';
 import { log } from "./utils/logger";
-import { buildAdrIndex, formatAdrIndexForModule } from "./adr-index";
+import { executeListAdrs, formatAdrCatalogForModel } from './read-only-executions';
 import { AgentSecurityPolicy, resolveWorkspacePath } from '../security';
 import { runtimeRoot } from '../config/runtime-root';
 
@@ -41,14 +41,9 @@ export const listFilesTool = tool(
  */
 export const listAdrsTool = tool(
   async ({ refresh, module }) => {
-    try {
-      const index = buildAdrIndex(runtimeRoot(), refresh);
-      log.sys(`ADR catalog ${index.status}: ${index.entries.length} decisions`);
-      return formatAdrIndexForModule(index, module);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      return `❌ Error indexing ADR files: ${message}`;
-    }
+    const result = executeListAdrs({ refresh, module }, runtimeRoot());
+    log.sys(`ADR catalog ${result.data.catalogStatus}: ${result.data.entries.length} decisions`);
+    return [formatAdrCatalogForModel(result), result] as const;
   },
   {
     name: "list_adrs",
@@ -59,6 +54,7 @@ export const listAdrsTool = tool(
       refresh: z.boolean().optional().default(false).describe("Rebuild the local ADR catalog."),
       module: z.string().min(1).optional().describe('Optional discovered ADR module to list.'),
     }),
+    responseFormat: 'content_and_artifact',
   },
 );
 

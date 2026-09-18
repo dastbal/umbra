@@ -82,11 +82,31 @@ export function buildPromptCatalog(): PublishedPrompt[] {
     return [];
   }
 
-  return entries
+  const legacyPrompts = entries
     .filter((entry) => entry.endsWith('.md'))
     .sort()
     .map((entry) => buildPrompt(path.join(skillsDir, entry), entry))
     .filter((prompt): prompt is PublishedPrompt => prompt !== undefined);
+
+  const canonicalPath = locateCanonicalToolUsageSkill();
+  const canonical = canonicalPath === undefined
+    ? undefined
+    : buildPrompt(canonicalPath, 'umbra-tool-usage.md');
+  return canonical === undefined ? legacyPrompts : [...legacyPrompts, canonical]
+    .sort((left, right) => left.descriptor.name.localeCompare(right.descriptor.name));
+}
+
+/** Locates the canonical assistant guide in both checkout and installed package layouts. */
+function locateCanonicalToolUsageSkill(): string | undefined {
+  let current = __dirname;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const candidate = path.join(current, '.agents', 'skills', 'umbra-tool-usage', 'SKILL.md');
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return undefined;
 }
 
 /**

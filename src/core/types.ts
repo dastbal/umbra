@@ -54,6 +54,8 @@ export interface ChunkMetadata {
   fragmentIndex?: number;
   /** Number of stored fragments produced from the original source unit. */
   fragmentCount?: number;
+  /** Non-TypeScript artifact that supplied this evidence, when applicable. */
+  artifactKind?: 'prisma-schema';
 }
 
 /**

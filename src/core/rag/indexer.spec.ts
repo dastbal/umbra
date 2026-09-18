@@ -76,6 +76,30 @@ describe('IndexerService durable file outcomes', () => {
     expect(readIndexStamp(rootDir)).toMatchObject({ status: 'complete', coveredFiles: 1 });
   });
 
+  it('commits Prisma constraints as labelled configuration evidence', async () => {
+    fs.mkdirSync(path.join(rootDir, 'prisma'));
+    fs.writeFileSync(path.join(rootDir, 'prisma', 'schema.prisma'), [
+      'model Payment {',
+      '  idempotencyKey String? @unique',
+      '  amount Decimal @db.Decimal(10, 2)',
+      '}',
+    ].join('\n'), 'utf8');
+    const indexer = new IndexerService(successfulEmbeddings());
+
+    const result = await indexer.indexProject();
+    const db = new Database(path.join(rootDir, '.umbra', 'memory.db'), { readonly: true });
+    const chunk = db.prepare(
+      "SELECT chunk_type AS type, content, metadata FROM code_chunks WHERE file_path = 'prisma/schema.prisma'",
+    ).get() as { type: string; content: string; metadata: string };
+    db.close();
+
+    expect(result).toMatchObject({ status: 'complete', filesIndexed: 2 });
+    expect(chunk.type).toBe('config');
+    expect(chunk.content).toContain('idempotencyKey String? @unique');
+    expect(JSON.parse(chunk.metadata)).toMatchObject({ className: 'Payment', artifactKind: 'prisma-schema' });
+    expect(readIndexStamp(rootDir)).toMatchObject({ status: 'complete', coveredFiles: 2 });
+  });
+
   it('persists an explicit skipped outcome for intentionally empty source', async () => {
     fs.writeFileSync(path.join(rootDir, 'src', 'sample.ts'), ' \n\t', 'utf8');
     const indexer = new IndexerService(successfulEmbeddings());

@@ -9,10 +9,12 @@ import {
   integrityCheckTool,
   listAdrsTool,
   listFilesTool,
+  inspectProjectTool,
   queryDependencyGraphTool,
   refreshIndexTool,
   safeReadFileTool,
   safeWriteFileTool,
+  searchWorkspaceTool,
 } from '../tools';
 
 /** Public compatibility version for role libraries built against Umbra's agent kernel. */
@@ -119,7 +121,7 @@ export const CAPABILITY_REGISTRY: Readonly<Record<AgentCapability, CapabilityDef
   search_codebase: {
     id: 'search_codebase',
     risk: 'read',
-    tools: () => [askCodebaseTool, refreshIndexTool],
+    tools: () => [askCodebaseTool, inspectProjectTool, searchWorkspaceTool, refreshIndexTool],
   },
   /**
    * The AST dependency graph, which had no capability at all.

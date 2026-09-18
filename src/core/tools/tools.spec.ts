@@ -39,6 +39,7 @@ const mockFs = fs as jest.Mocked<typeof fs>;
 // run. `rethrowIfSuspension` stays real, because whether a suspension escapes a
 // tool's catch block is exactly what one of these tests verifies.
 const mockRequestApproval = jest.fn();
+const mockExecuteIntegrityCheck = jest.fn();
 jest.mock("./utils/approval", () => ({
   ...jest.requireActual("./utils/approval"),
   requestApproval: (...args: unknown[]) => mockRequestApproval(...args),
@@ -51,9 +52,28 @@ jest.mock("../rag/indexer", () => ({
   })),
 }));
 jest.mock("../rag/retriever", () => ({
+  formatRetrievalContextForLLM: jest.fn().mockReturnValue("Mocked context"),
   RetrieverService: jest.fn().mockImplementation(() => ({
+    getContext: jest.fn().mockResolvedValue({
+      status: 'success', query: 'what is X', clarification: undefined, recoveredWithContext: false,
+      files: [{ filePath: 'src/mock.ts', imports: [], evidence: 'semantic', chunks: [{
+        type: 'function', content: 'Mocked context', metadata: { startLine: 1, endLine: 1 },
+      }] }],
+    }),
     getContextForLLM: jest.fn().mockResolvedValue("Mocked context"),
   })),
+}));
+jest.mock('./read-only-executions', () => ({
+  executeCodebaseSearch: jest.fn().mockResolvedValue({
+    result: { status: 'success', diagnostics: [] },
+    modelContent: 'Mocked context',
+  }),
+  executeProjectInventory: jest.fn(),
+  executeWorkspaceSearch: jest.fn(),
+  formatProjectInventoryForModel: jest.fn(),
+  formatWorkspaceSearchForModel: jest.fn(),
+  executeIntegrityCheck: (...args: unknown[]) => mockExecuteIntegrityCheck(...args),
+  formatIntegrityForModel: jest.fn().mockReturnValue('TypeScript integrity check PASSED.'),
 }));
 
 describe("Tools Unit Tests", () => {
@@ -61,6 +81,7 @@ describe("Tools Unit Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockExecuteIntegrityCheck.mockResolvedValue({ status: 'success', diagnostics: [] });
     jest.spyOn(process, "cwd").mockReturnValue(rootDir);
     mockFs.realpathSync.mockImplementation((candidate) => String(candidate));
     mockFs.statSync.mockReturnValue({ isDirectory: () => true } as fs.Stats);
@@ -282,7 +303,7 @@ describe("Tools Unit Tests", () => {
   describe("askCodebaseTool", () => {
     it("should use RetrieverService", async () => {
       const res = await askCodebaseTool.invoke({ query: "what is X" });
-      expect(res).toBe("Mocked context");
+      expect(res).toContain("Mocked context");
     });
   });
 
@@ -297,11 +318,7 @@ describe("Tools Unit Tests", () => {
         typeScriptProjects: [{ absolutePath: path.join(rootDir, 'tsconfig.json'), relativePath: 'tsconfig.json' }],
       });
       const res = await integrityCheckTool.invoke({});
-      expect(mockExecFile).toHaveBeenCalledWith(
-        process.execPath,
-        expect.arrayContaining([expect.stringContaining("typescript"), "--noEmit"]),
-        expect.any(Object),
-      );
+      expect(mockExecuteIntegrityCheck).toHaveBeenCalledWith(rootDir);
       expect(res).toContain("PASSED");
     });
   });

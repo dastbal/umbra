@@ -1,8 +1,10 @@
 import { FileRegistry } from '../state/file-registry';
 import { NestChunker } from '../tools/ast/chunker';
+import { PrismaSchemaChunker } from './prisma-schema-chunker';
 import { analyzeNestGraph } from '../tools/ast/nest-graph';
 import { backfillNestGraph, replaceNestGraphForFile } from './nest-graph-store';
 import { backfillDependencyGraph } from './dependency-graph-backfill';
+import { replaceDependencyGraphForFile } from './dependency-graph-store';
 import { AgentDB } from '../state/db';
 import { runtimeRoot } from '../config/runtime-root';
 import {
@@ -49,6 +51,7 @@ export interface IndexRunResult {
 export class IndexerService {
   private registry: FileRegistry;
   private chunker: NestChunker;
+  private readonly prismaChunker = new PrismaSchemaChunker();
   private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
   private static activeIndex: Promise<IndexRunResult> | undefined;
 
@@ -229,9 +232,10 @@ export class IndexerService {
       // file of an index built before this table existed. Without it the graph
       // stays empty on an up-to-date repository, because nothing re-processes
       // a file whose content has not changed.
+      const typeScriptFiles = discovery.sourceFiles.filter((file) => file.kind === 'typescript');
       const nestFiles = backfillNestGraph(
         this.db,
-        discovery.sourceFiles,
+        typeScriptFiles,
         analyzeNestGraph,
         (absolutePath) => fs.readFileSync(absolutePath, "utf-8"),
       );
@@ -245,7 +249,7 @@ export class IndexerService {
       // that reason. Costs an AST parse per file and no embeddings.
       const edgeFiles = backfillDependencyGraph(
         this.db,
-        discovery.sourceFiles,
+        typeScriptFiles,
         (relativePath: string, source: string) =>
           this.chunker.analyze(relativePath, source, 'backfill').dependencies,
         (absolutePath: string) => fs.readFileSync(absolutePath, 'utf-8'),
@@ -338,7 +342,9 @@ export class IndexerService {
     this.reportProgress(file.relativePath, position, total, 0, 'preparing');
     const content = fs.readFileSync(file.absolutePath, 'utf-8');
     const hash = crypto.createHash('md5').update(content).digest('hex');
-    const analysis = this.chunker.analyze(file.relativePath, content, hash);
+    const analysis = file.kind === 'prisma-schema'
+      ? this.prismaChunker.analyze(file.relativePath, content, hash)
+      : this.chunker.analyze(file.relativePath, content, hash);
     const chunks = splitChunksForEmbedding(
       analysis.chunks.map((chunk) => ({ ...chunk, filePath: file.relativePath } as ProcessedChunk & { filePath: string })),
     ) as Array<ProcessedChunk & { filePath: string }>;
@@ -375,7 +381,6 @@ export class IndexerService {
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(chunk_id, provider, model) DO UPDATE SET dimensions = excluded.dimensions, vector = excluded.vector
     `);
-    const insertEdge = this.db.prepare(`INSERT OR IGNORE INTO dependency_graph (source, target, relation) VALUES (?, ?, ?)`);
     const commit = this.db.transaction(() => {
       replaceFile.run(file.relativePath, hash, Date.now(), analysis.skeleton === null ? null : JSON.stringify(analysis.skeleton));
       for (let index = 0; index < chunks.length; index += 1) {
@@ -384,13 +389,15 @@ export class IndexerService {
         insertChunk.run(chunk.id, chunk.filePath, chunk.type, chunk.content, JSON.stringify(chunk.metadata));
         insertVector.run(chunk.id, identity.provider, identity.model, vector.length, encodeVector(vector));
       }
-      for (const edge of analysis.dependencies) insertEdge.run(edge.sourcePath, edge.targetPath, edge.relation);
+      replaceDependencyGraphForFile(this.db, file.relativePath, analysis.dependencies, hash);
 
       // Nest wiring is replaced inside the same transaction as the chunks it
       // belongs to. Committed separately it could be half-applied, and a
       // binding row that outlives the file that declared it is the stale
       // confidence ADR-017 was written about.
-      replaceNestGraphForFile(this.db, file.relativePath, analyzeNestGraph(file.relativePath, content), hash);
+      if (file.kind === 'typescript') {
+        replaceNestGraphForFile(this.db, file.relativePath, analyzeNestGraph(file.relativePath, content), hash);
+      }
     });
     commit();
     this.reportProgress(file.relativePath, position, total, vectors.length, `saved ${chunks.length} chunks`);

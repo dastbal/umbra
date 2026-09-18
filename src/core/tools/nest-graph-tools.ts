@@ -26,6 +26,7 @@ import {
   normalizeToken,
 } from '../rag/nest-graph-store';
 import { log } from './utils/logger';
+import { executeNestGraph, formatNestGraphForModel } from './read-only-executions';
 
 /** What the caller wants to know about a name. */
 export type NestGraphDirection = 'provides' | 'injects' | 'module';
@@ -142,17 +143,9 @@ function renderModule(module: string): string {
 export const queryNestGraphTool = tool(
   async ({ name, direction }) => {
     log.debug(`query_nest_graph called for: ${name} [${direction}]`);
-    try {
-      if (direction === 'provides') return renderProviders(name);
-      if (direction === 'injects') return renderConsumers(name);
-      return renderModule(name);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.error(`Failed to query the Nest graph: ${message}`);
-      // Never swallowed: a caller that cannot tell "no such token" from "the
-      // query failed" will report the first when it saw the second.
-      return `❌ Error querying the NestJS graph: ${message}`;
-    }
+    const result = executeNestGraph({ name, direction });
+    if (result.status === 'error') log.error(`Failed to query the Nest graph: ${result.diagnostics[0].message}`);
+    return [formatNestGraphForModel(result), result] as const;
   },
   {
     name: 'query_nest_graph',
@@ -173,5 +166,6 @@ export const queryNestGraphTool = tool(
             'module = everything the named module binds.',
         ),
     }),
+    responseFormat: 'content_and_artifact',
   },
 );

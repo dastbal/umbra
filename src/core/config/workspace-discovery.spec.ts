@@ -65,6 +65,24 @@ describe('WorkspaceDiscoveryService', () => {
     expect(result.sourceFiles.map((file) => file.relativePath)).toEqual(['custom/visible.ts']);
   });
 
+  it('discovers the authoritative Prisma schema beside TypeScript, not arbitrary configuration files', () => {
+    write('tsconfig.json', JSON.stringify({ include: ['src/**/*.ts'] }));
+    write('src/payment.ts', 'export const payment = true;');
+    write('prisma/schema.prisma', [
+      'model Payment {',
+      '  idempotencyKey String? @unique',
+      '}',
+    ].join('\n'));
+    write('config/runtime.json', '{"unrelated":true}');
+
+    const result = new WorkspaceDiscoveryService(rootDir).discover();
+
+    expect(result.sourceFiles.map((file) => [file.relativePath, file.kind])).toEqual([
+      ['prisma/schema.prisma', 'prisma-schema'],
+      ['src/payment.ts', 'typescript'],
+    ]);
+  });
+
   it('fails with an actionable diagnostic instead of assuming an embedding problem', () => {
     expect(() => new WorkspaceDiscoveryService(rootDir).discover()).toThrow(WorkspaceDiscoveryError);
     expect(() => new WorkspaceDiscoveryService(rootDir).discover()).toThrow('No indexable source files');

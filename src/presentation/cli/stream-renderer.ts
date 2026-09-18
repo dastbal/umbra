@@ -30,11 +30,14 @@ import {
   type ThinkingPhase,
 } from './theme';
 import { MarkdownRenderer } from './markdown-renderer';
+import { isToolResult, type ToolResult } from '../../core/tools/tool-result';
 
 /** Internal state for a tool call currently in progress. */
 interface ActiveTool {
   /** Tool name */
   name: string;
+  /** LangChain execution identifier, used to match concurrent completions. */
+  runId?: string;
   /** Display string (icon + name) */
   label: string;
   /** Wait-state phrase shown next to the spinner (e.g. "Reading the file") */
@@ -260,7 +263,7 @@ export class StreamRenderer {
    * @param toolName - The tool being called (e.g., "safe_read_file").
    * @param input - The raw input object passed to the tool.
    */
-  public showToolStart(toolName: string, input: unknown): void {
+  public showToolStart(toolName: string, input: unknown, runId?: string): void {
     // Stop the wait indicator before drawing a box over its line
     this.clearThinking();
     if (this.isStreaming || this.hasStreamedContent) {
@@ -307,7 +310,7 @@ export class StreamRenderer {
       process.stdout.write(`${box.vertical}  ${phrase}...\n`);
     }
 
-    this.activeTool = { name: toolName, label, phrase, startedAt, frame, interval };
+    this.activeTool = { name: toolName, ...(runId === undefined ? {} : { runId }), label, phrase, startedAt, frame, interval };
     this.toolCallCount++;
   }
 
@@ -316,9 +319,9 @@ export class StreamRenderer {
    *
    * @param toolName - The tool that just finished.
    */
-  public showToolEnd(toolName: string): void {
-    if (!this.activeTool || this.activeTool.name !== toolName) {
-      this.clearActiveTool();
+  public showToolEnd(toolName: string, artifact?: unknown, runId?: string): void {
+    if (!this.activeTool || this.activeTool.name !== toolName ||
+      (runId !== undefined && this.activeTool.runId !== undefined && this.activeTool.runId !== runId)) {
       return;
     }
 
@@ -326,8 +329,12 @@ export class StreamRenderer {
     if (interval) clearInterval(interval);
 
     const elapsed = formatDuration(Date.now() - startedAt);
-    const doneIcon = colors.accent('✓');
-    const doneLine = `${doneIcon}  ${colors.muted(`done in ${elapsed}`)}`;
+    const result: ToolResult<string, unknown> | undefined = isToolResult(artifact) ? artifact : undefined;
+    const failed = result?.status === 'error' || result?.status === 'blocked';
+    const doneIcon = failed ? colors.danger('✗') : colors.accent('✓');
+    const doneLine = result === undefined
+      ? `${doneIcon}  ${colors.muted(`done in ${elapsed}`)}`
+      : `${doneIcon}  ${colors.muted(`${result.summary} · ${elapsed}`)}`;
 
     // Erase the spinner line by its real width before closing the box
     this.clearLine();
