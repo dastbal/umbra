@@ -887,43 +887,49 @@ export class DeepAgentFactory {
    * Resetting the named thread prevents the invalid tool-only history from being
    * combined with a later human message.
    *
+   * ## Why the saver does this and not raw SQL
+   *
+   * This used to open its own `better-sqlite3` handle and delete from
+   * `checkpoint_writes`, `checkpoints` and `checkpoint_blobs`, under a comment
+   * saying `SqliteSaver` exposed no delete API. Two of those three tables have
+   * never existed — the schema is `checkpoints` and `writes` — so those
+   * statements threw into an empty `catch` and the `writes` rows of a corrupted
+   * thread were **never** removed, which is precisely the half that holds an
+   * interrupted tool call. The installed saver does expose `deleteThread`, and
+   * it covers both tables in one transaction.
+   *
+   * The probe before it does two jobs: `deleteThread` is the one method on this
+   * saver that does not call `setup()` first, so it needs the tables to exist;
+   * and the tuple is what tells the caller whether anything was there at all —
+   * the boolean the old `changes > 0` produced.
+   *
    * @param rootDir - Project root directory (where `.umbra/` lives).
    * @param threadId - The LangGraph thread ID of the corrupted session.
    * @param agentType - Which DB file to look in.
    * @returns true if a checkpoint was cleared, false if none was found.
    */
-  public static clearCorruptedCheckpoint(
+  public static async clearCorruptedCheckpoint(
     rootDir: string,
     threadId: string,
     agentType: 'simple' | 'orchestrator' = 'simple',
-  ): boolean {
+  ): Promise<boolean> {
     const dbFile = agentType === 'orchestrator' ? 'orchestrator_history.db' : 'deep_agent_history.db';
     const dbPath = agentPath(rootDir, dbFile);
 
     if (!fs.existsSync(dbPath)) return false;
 
+    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, agentType);
     try {
-      // Use better-sqlite3 directly — SqliteSaver doesn't expose delete APIs
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath);
+      const existing = await checkpointer.getTuple({ configurable: { thread_id: threadId } });
+      await checkpointer.deleteThread(threadId);
 
-      let cleared = false;
-
-      // Delete from all checkpoint tables for this thread
-      for (const table of ['checkpoint_writes', 'checkpoints', 'checkpoint_blobs']) {
-        try {
-          const info = db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
-          if ((info as any).changes > 0) cleared = true;
-        } catch {
-          // Table might not exist in older schema versions — skip
-        }
-      }
-
-      db.close();
-      return cleared;
+      return existing !== undefined;
     } catch {
       return false;
+    } finally {
+      // Closed even when the delete throws. The previous implementation leaked
+      // its handle on any throw before `db.close()`.
+      try { checkpointer.db.close(); } catch { /* already closed */ }
     }
   }
 
