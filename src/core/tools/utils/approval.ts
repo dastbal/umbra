@@ -1,4 +1,5 @@
 import { interrupt, isGraphInterrupt } from '@langchain/langgraph';
+import { fingerprintInterrupt } from './interrupt-fingerprint';
 import { log } from './logger';
 
 /** A single action put in front of a human, mirroring LangChain's `ActionRequest`. */
@@ -6,6 +7,13 @@ interface ApprovalActionRequest {
   name: string;
   args: Record<string, unknown>;
   description?: string;
+  /**
+   * Identifies *which* action a decision answers.
+   *
+   * Not part of LangChain's `ActionRequest`: it is the tie this gate needs and
+   * the runtime does not provide. See {@link fingerprintInterrupt}.
+   */
+  actionId: string;
 }
 
 /** The reviewer policy for one action, mirroring LangChain's `ReviewConfig`. */
@@ -22,7 +30,12 @@ interface ApprovalRequest {
 
 /** The reviewer's answer, mirroring LangChain's `HITLResponse`. */
 interface ApprovalResponse {
-  decisions?: Array<{ type?: 'approve' | 'edit' | 'reject'; message?: string }>;
+  decisions?: Array<{
+    type?: 'approve' | 'edit' | 'reject';
+    message?: string;
+    /** Echoes the {@link ApprovalActionRequest.actionId} this decision answers. */
+    actionId?: string;
+  }>;
 }
 
 /**
@@ -44,18 +57,27 @@ interface ApprovalResponse {
  * Outside a checkpointed graph run (unit tests, embedded library use) there is
  * nobody to ask, so the request is refused rather than silently allowed.
  *
+ * ## An answer must say what it answers
+ * The decision list used to be read positionally — `decisions[0]` — with nothing
+ * binding that entry to this tool or these arguments. Inside one task LangGraph
+ * matches resume values by index, so an answer given to an earlier question
+ * would satisfy a later one and authorize an action the operator never saw.
+ * Every request now carries an `actionId` the decision must echo, and a decision
+ * that does not match this action is **not an approval**.
+ *
  * @param toolName - The tool requesting authorization.
  * @param args - The arguments shown to the operator.
  * @param reason - The policy reason explaining why approval is required.
- * @returns `true` only when a human explicitly approved.
+ * @returns `true` only when a human explicitly approved *this* action.
  */
 export function requestApproval(
   toolName: string,
   args: Record<string, unknown>,
   reason: string,
 ): boolean {
+  const actionId = fingerprintInterrupt('approval', { name: toolName, args });
   const request: ApprovalRequest = {
-    actionRequests: [{ name: toolName, args, description: reason }],
+    actionRequests: [{ name: toolName, args, description: reason, actionId }],
     reviewConfigs: [{ actionName: toolName, allowedDecisions: ['approve', 'reject'] }],
   };
 
@@ -71,7 +93,19 @@ export function requestApproval(
     return false;
   }
 
-  return response?.decisions?.[0]?.type === 'approve';
+  const decision = response?.decisions?.find((entry) => entry?.actionId === actionId);
+  if (decision === undefined) {
+    // An answer arrived, but not for this action. Approving on it would grant a
+    // permission the operator gave to something else — the exact confusion the
+    // fingerprint exists to prevent. Refuse, and say so: silence here would look
+    // identical to a rejection the operator actually made.
+    if (response?.decisions !== undefined && response.decisions.length > 0) {
+      log.error(`Approval for ${toolName} answered a different action; treating it as refused.`);
+    }
+    return false;
+  }
+
+  return decision.type === 'approve';
 }
 
 /**

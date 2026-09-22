@@ -14,12 +14,19 @@ jest.mock('@langchain/langgraph', () => ({
   // nested subagent graph, which this project had wrongly believed impossible.
   interrupt: (request: unknown) => {
     interruptCalls.push(request);
+    // The CLI echoes the question id back, which is what ties an answer to the
+    // question it answers. A reply that already names one is left alone, so a
+    // test can send a mismatched id on purpose.
+    if (echoQuestionId && interruptReply !== undefined && (interruptReply as any).questionId === undefined) {
+      return { ...(interruptReply as object), questionId: (request as any).questionId };
+    }
     return interruptReply;
   },
 }));
 
 const interruptCalls: unknown[] = [];
 let interruptReply: unknown;
+let echoQuestionId = true;
 
 const mandate: Mandate = {
   userRequest: 'puede preguntarle a un subagente como esta please',
@@ -51,6 +58,7 @@ describe('ask_delegator', () => {
     resetDelegationRegistry();
     delete process.env['UMBRA_SUBAGENT_QUESTIONS'];
     interruptCalls.length = 0;
+    echoQuestionId = true;
     interruptReply = { answer: 'solo el contenido, no el cargador' };
   });
 
@@ -80,6 +88,26 @@ describe('ask_delegator', () => {
 
     expect(interruptCalls).toHaveLength(1);
     expect(answer).toBe('solo el contenido, no el cargador');
+  });
+
+  // Within one task LangGraph hands resume values out by position, so a delegate
+  // that asks twice can be handed the answer to the other question. Recording it
+  // would put words in the operator's mouth.
+  it('records an unknown when the answer names a different question', async () => {
+    interruptReply = { answer: 'solo el contenido, no el cargador', questionId: 'a-different-question' };
+    openDelegation();
+
+    const answer = await ask('Which TypeScript compiler version does the build target?');
+
+    expect(answer).toContain('The operator did not answer');
+    expect(answer).not.toContain('solo el contenido');
+  });
+
+  it('names the question it is asking, so the answer can be matched to it', async () => {
+    openDelegation();
+    await ask('Which TypeScript compiler version does the build target?');
+
+    expect((interruptCalls[0] as { questionId?: unknown }).questionId).toEqual(expect.any(String));
   });
 
   it('marks the question as a question, never as an approval to act', async () => {

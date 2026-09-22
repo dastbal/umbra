@@ -29,8 +29,15 @@ import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
 import { isInteractive, selectOutcome, type SelectChoice } from './interactive-select';
 import { askText } from './prompts';
+import { answerSuspension, type SuspensionPrompt } from './hitl-prompt';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
-import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
+import {
+  buildResumePayload,
+  canCorrelateResume,
+  readPendingInterrupts,
+  type AnsweredInterrupt,
+  type PendingInterrupt,
+} from './pending-interrupts';
 import { describeErrorOrigin } from './error-origin';
 import { readVisibleText } from '../../core/llm/visible-text';
 import { diagnoseOffline } from './offline-diagnosis'; import { toolExecutionError } from './tool-event-result';
@@ -673,92 +680,43 @@ export class ChatSession {
     }
   }
 
-  private async handleHITL(interrupts: unknown[]): Promise<void> {
-    const interrupt = (interrupts as any[])[0]?.value;
-    if (!interrupt) return;
+  private async handleHITL(interrupts: PendingInterrupt[]): Promise<void> {
+    const pending = interrupts.filter((entry) => entry?.value !== undefined);
+    if (pending.length === 0) return;
 
-    // A question from a delegate is not an approval request. Without this
-    // branch it would render as one — see handleDelegateQuestion.
-    if (interrupt.kind === DELEGATE_QUESTION_KIND) {
-      await this.handleDelegateQuestion(interrupt);
-      return;
+    // Every suspension is answered, not just the first. Two writes gated in one
+    // assistant message are two tasks with two interrupts, and rendering `[0]`
+    // alone left the operator authorizing an action they were never shown.
+    //
+    // Whether they can be correlated is asked before the operator is prompted:
+    // a set that cannot be answered one by one is not worth three questions and
+    // two discarded answers. The ids are read fresh every round — an interrupt
+    // id is `XXH3(checkpoint_ns)` for this run, never a name to cache.
+    const toAnswer = canCorrelateResume(pending.map((entry) => entry.id)) ? pending : [pending[0]!];
+
+    const answered: AnsweredInterrupt[] = [];
+    for (const entry of toAnswer) {
+      answered.push({ id: entry.id, answer: await answerSuspension(entry.value, this.suspensionPrompt()) });
     }
 
-    const actionRequests: any[] = interrupt.actionRequests ?? [];
-    const reviewConfigs: any[]  = interrupt.reviewConfigs ?? [];
-    const decisions: any[] = [];
-
-    for (let i = 0; i < actionRequests.length; i++) {
-      const action = actionRequests[i];
-      this.renderer.showHITLRequest(action.name, action.args);
-
-      const allowed: string[] = reviewConfigs[i]?.allowedDecisions ?? ['approve', 'reject'];
-      const decision = await this.askDecision(allowed);
-
-      if (decision.type === 'approve') {
-        process.stdout.write(colors.accent('  ✓ Approved\n'));
-      } else if (decision.type === 'edit') {
-        process.stdout.write(colors.warning('  ✎ Sent back with feedback\n'));
-      } else {
-        process.stdout.write(colors.danger('  ✗ Rejected\n'));
-      }
-      decisions.push(decision);
-    }
-
-    // Resume the agent with decisions (streaming continues from resumed state)
-    await this.resumeAgent({ decisions });
+    await this.resumeAgent(buildResumePayload(answered));
   }
 
   /**
-   * Renders a subagent question and resumes the run with the answer.
+   * Wires the screen and the operator into {@link answerSuspension}.
    *
-   * A question is not an approval, and before this branch existed every
-   * interrupt was read as one — `actionRequests` plus `reviewConfigs`. Without
-   * the discriminator a delegate asking what "improve the skills" meant would
-   * have rendered as an authorization to perform an action, which is a worse
-   * outcome than not having the feature.
+   * Rendering a suspension lives in its own module; this session owns the run
+   * it belongs to. The split is what keeps `chat-session.ts` under the ceiling
+   * ADR-031 set for it.
    *
-   * Cancelling is deliberately not an answer. Escape on the security gate means
-   * reject; here it means the operator declined to answer, and the delegate is
-   * told exactly that so it records an unknown instead of inventing a reply.
-   *
-   * @param request - The question raised by a delegate.
+   * @returns The prompt surface the HITL module asks for.
    */
-  private async handleDelegateQuestion(request: {
-    question: string;
-    options?: string[];
-  }): Promise<void> {
-    this.renderer.clearThinking();
-    process.stdout.write(`\n  ${colors.accent('?')} ${chalk.bold('A subagent is asking:')}\n`);
-    process.stdout.write(`  ${request.question}\n\n`);
-
-    const answer = await this.readAnswer(request.options);
-
-    if (answer === undefined) {
-      process.stdout.write(colors.muted('  — not answered; the subagent will record it as unknown\n'));
-    }
-
-    await this.resumeAgent({ answer });
-  }
-
-  /**
-   * Collects the operator answer, as a menu when choices were offered.
-   *
-   * @param options - Choices supplied by the delegate, when it supplied any.
-   * @returns The answer, or `undefined` when the operator did not give one.
-   */
-  private async readAnswer(options?: string[]): Promise<string | undefined> {
-    if (options && options.length > 0 && isInteractive()) {
-      const outcome = await selectOutcome<string>({
-        title: 'Answer',
-        choices: options.map((option): SelectChoice<string> => ({ label: option, value: option })),
-      });
-      return outcome.status === 'selected' ? outcome.value : undefined;
-    }
-
-    const typed = await askText({ prompt: '  Your answer (empty to skip): ' });
-    const trimmed = typed?.trim();
-    return trimmed === undefined || trimmed === '' ? undefined : trimmed;
+  private suspensionPrompt(): SuspensionPrompt {
+    return {
+      showAction: (name, args) => this.renderer.showHITLRequest(name, args),
+      clearThinking: () => this.renderer.clearThinking(),
+      askDecision: (allowed) => this.askDecision(allowed),
+    };
   }
 
   /**
