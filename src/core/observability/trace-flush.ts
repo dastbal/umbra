@@ -1,4 +1,4 @@
-import { Client } from 'langsmith';
+import { awaitAllCallbacks } from '@langchain/core/callbacks/promises';
 
 /** How long to wait for pending LangSmith uploads before giving up. */
 const DEFAULT_FLUSH_TIMEOUT_MS = 2000;
@@ -66,6 +66,20 @@ export function isTracingEnabled(): boolean {
  * ones missing from the project: the CLI died before their batch went out, and
  * the sessions worth debugging were the ones with no trace to read.
  *
+ * ## Why not `new Client().awaitPendingTraceBatches()`
+ *
+ * That is what this did, and it waited on nothing. A LangSmith client's queue is
+ * per instance, while the tracer posts through the module singleton
+ * (`getDefaultLangChainClientSingleton`, `tracers/tracer_langchain.js`) — so a
+ * freshly constructed client has an empty queue by definition, and the flush
+ * returned immediately while the real batch was still in flight. ADR-013 records
+ * that this made observability survive process exit, and its own verification
+ * evidence admits it was never proven end to end. It was never proven because it
+ * did not work.
+ *
+ * `awaitAllCallbacks` waits on both halves that matter: the background callback
+ * queue a tracer enqueues into, and that singleton's pending batches.
+ *
  * Never throws and never blocks past `timeoutMs`: losing a trace is a worse
  * outcome than exiting, but a hung observability backend must not hold the
  * terminal.
@@ -80,9 +94,8 @@ export async function flushPendingTraces(
 
   let timer: NodeJS.Timeout | undefined;
   try {
-    const client = new Client();
     await Promise.race([
-      client.awaitPendingTraceBatches(),
+      awaitAllCallbacks(),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
       }),
