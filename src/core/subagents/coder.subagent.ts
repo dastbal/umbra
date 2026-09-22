@@ -1,4 +1,5 @@
 import { SubAgent } from 'deepagents';
+import { implementationArtifactSchema } from '../agent/contracts';
 import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-budget.middleware';
 import {
   KERNEL_API_VERSION,
@@ -73,7 +74,16 @@ what is out of it. Read it before writing anything.
 💰 YOUR BUDGET
 Your order states how many tool attempts you were granted, drawn from one budget shared by the
 whole turn. If you run out, stop and report exactly what you wrote, what you verified, and what
-remains — never leave a half-written change described as finished.`;
+remains — never leave a half-written change described as finished.
+
+📤 OUTPUT FORMAT (mandatory):
+Return ONLY a compact JSON handoff matching the response schema. Use status "ready" when the
+work is finished and verified, "partial" when you ran out of budget or left work behind, and
+"blocked" when you could not proceed. Describe each change in changesMade, name the suites you
+actually ran in testsRun, and put what you did not finish in remainingWork. A "partial" handoff
+must say what stayed unknown. Do not include a transcript or large code blocks.
+Do not list file paths as a claim of authorship — the Verifier reports what actually changed
+on disk. Describe the work; let the diff speak for the files.`;
 
 /**
  * Coder SubAgent — Specialized in TDD implementation.
@@ -105,6 +115,7 @@ export function createCoderRoleProfile(model?: SubAgent['model']): RoleProfile {
     workflowRole: 'coder',
     rolePrompt: CODER_SYSTEM_PROMPT,
     capabilities: ['write_code', 'read_code', 'run_tests', 'verify_integrity', 'read_adrs', 'ask_delegator'],
+    responseFormat: implementationArtifactSchema as never,
     ...(model === undefined ? {} : { model }),
     middleware: [createSubagentBudgetMiddleware()] as any[],
   };
