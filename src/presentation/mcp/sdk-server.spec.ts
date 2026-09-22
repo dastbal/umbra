@@ -367,7 +367,7 @@ describe('MCP ADR catalog integration', () => {
       retryable: false,
     };
     const tool = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
       readIndexStatus: () => indexStatus,
     }).find((candidate) => candidate.name === 'list_adrs');
 

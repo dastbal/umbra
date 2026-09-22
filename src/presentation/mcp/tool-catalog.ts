@@ -53,7 +53,20 @@ function publishConversation(service: McpConversationService, rootDir: () => str
 }
 
 /** Current availability of semantic retrieval without invoking a provider. */
-export interface SemanticSearchReadiness { readonly ready: boolean; readonly message: string; }
+export interface SemanticSearchReadiness {
+  readonly ready: boolean;
+  readonly message: string;
+  /**
+   * Whether asking again later is the right response.
+   *
+   * True only while the index is still warming. A refusal that will not change
+   * on its own — no root, a failed warm-up, an index that cannot serve — is not
+   * retryable and must keep saying so, because {@link isToolResultError} turns a
+   * `blocked` result into an MCP `isError`, and a LangChain-JS client throws a
+   * `ToolException` on that instead of letting the model read `nextAction`.
+   */
+  readonly retryable: boolean;
+}
 
 function diagnostic(message: string, code: string) {
   return [{ severity: 'error' as const, code, message }] as const;
@@ -67,6 +80,15 @@ function publishListAdrs(): PublishedTool {
   });
   return {
     name: 'list_adrs', title: 'List architecture decisions',
+    // Not read-only, and saying otherwise was the problem. A cache miss makes
+    // `buildAdrIndex` write `.umbra/adr-index.json` — with or without `refresh`,
+    // which is why removing that argument would not have made this true.
+    // `readOnlyHint` is exactly the assertion a client uses to skip its own
+    // approval gate, so publishing it here claimed something the tool does not
+    // honour. The alternative — compute without persisting over MCP — keeps the
+    // claim but spends the cache ADR-003/004 exist to keep, on the startup path
+    // ADR-024 already records as painful. Declaring the truth costs one prompt.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description: 'Lists repository ADR metadata and optional module matches. Returns no ADR bodies.',
     inputSchema: { refresh: z.boolean().optional().describe('Rebuild the cached catalog.'), module: z.string().min(1).optional().describe('Optional discovered ADR module.') },
     outputSchema: adrCatalogResultSchema,
@@ -118,17 +140,30 @@ function publishIntegrityCheck(): PublishedTool {
 }
 
 function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): PublishedTool {
-  const unavailable = (message: string) => toStructuredToolResult(codebaseSearchResultSchema, {
-    schemaVersion: 1, status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE', summary: 'Semantic search is unavailable.',
-    data: { query: '', recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [] }, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
-    nextAction: 'Read get_index_status and retry after durable coverage is ready.',
-  });
+  const emptyData = { query: '', recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [] };
+  // A warming index is an abstention, not a transport failure. Reported as
+  // `blocked` it became `isError: true`, and a LangChain-JS client raises a
+  // `ToolException` on that without ever handing the model the `nextAction` —
+  // destroying this server's own recovery instruction on the single most common
+  // first contact, a cold start. A refusal that will not change on its own stays
+  // `blocked`, because there it is the truth.
+  const unavailable = (message: string, retryable = false) => toStructuredToolResult(codebaseSearchResultSchema, retryable
+    ? {
+      schemaVersion: 1, status: 'abstained', code: 'CODEBASE_INDEX_UNAVAILABLE', summary: 'Semantic search is not ready yet.',
+      data: emptyData, evidence: [], diagnostics: [], truncated: false, retryable: true,
+      nextAction: 'Read get_index_status and retry after durable coverage is ready.',
+    }
+    : {
+      schemaVersion: 1, status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE', summary: 'Semantic search is unavailable.',
+      data: emptyData, evidence: [], diagnostics: diagnostic(message, 'CODEBASE_INDEX_UNAVAILABLE'), truncated: false, retryable: false,
+      nextAction: 'Read get_index_status and retry after durable coverage is ready.',
+    });
   return {
     name: 'ask_codebase', title: 'Search the codebase',
     description: 'Searches indexed code with the approved deterministic hybrid/graph policy and returns paths, ranges, snippets, provenance, and a next read-only recommendation. Scores are ranking signals, not confidence probabilities.',
     inputSchema: { query: z.string().min(1).describe('Original natural-language code question.'), context: z.string().max(2000).optional().describe('Optional one-time clarification.') },
     outputSchema: codebaseSearchResultSchema,
-    invoke: async (args) => { const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional() }).parse(args); const readiness = readReadiness(); if (!readiness.ready) return unavailable(readiness.message); return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(input)).result); },
+    invoke: async (args) => { const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional() }).parse(args); const readiness = readReadiness(); if (!readiness.ready) return unavailable(readiness.message, readiness.retryable); return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(input)).result); },
     rootUnavailable: unavailable,
   };
 }
@@ -172,11 +207,21 @@ function publishWorkspaceSearch(): PublishedTool {
 
 /** Publishes source-free GraphRAG plan comparison without granting any local configuration write. */
 function publishGraphRagInvestigation(readReadiness: () => SemanticSearchReadiness): PublishedTool {
-  const unavailable = (message: string) => toStructuredToolResult(graphRagInvestigationResultSchema, {
-    schemaVersion: 1, status: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', summary: 'GraphRAG comparison is unavailable.',
-    data: { runId: '', persisted: false, mode: 'standard', indexFingerprint: '', budget: { maxSeeds: 0, maxDepth: 0, maxNodes: 0, maxRelations: 0, maxChunks: 0, maxEstimatedTokens: 0 }, plans: [] },
-    evidence: [], diagnostics: diagnostic(message, 'GRAPHRAG_INVESTIGATION_ERROR'), truncated: false, retryable: true,
-  });
+  const emptyData = { runId: '', persisted: false, mode: 'standard' as const, indexFingerprint: '', budget: { maxSeeds: 0, maxDepth: 0, maxNodes: 0, maxRelations: 0, maxChunks: 0, maxEstimatedTokens: 0 }, plans: [] };
+  // Same rule as `ask_codebase`: a warming index abstains and says come back; a
+  // refusal that will not change on its own is an error. This previously
+  // declared `retryable: true` on an `error`, which is a contradiction the
+  // client cannot act on — the error is raised before the flag is ever read.
+  const unavailable = (message: string, retryable = false) => toStructuredToolResult(graphRagInvestigationResultSchema, retryable
+    ? {
+      schemaVersion: 1, status: 'abstained', code: 'GRAPHRAG_INVESTIGATION_ERROR', summary: 'GraphRAG comparison is not ready yet.',
+      data: emptyData, evidence: [], diagnostics: [], truncated: false, retryable: true,
+      nextAction: 'Read get_index_status and retry after durable coverage is ready.',
+    }
+    : {
+      schemaVersion: 1, status: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', summary: 'GraphRAG comparison is unavailable.',
+      data: emptyData, evidence: [], diagnostics: diagnostic(message, 'GRAPHRAG_INVESTIGATION_ERROR'), truncated: false, retryable: false,
+    });
   return {
     name: 'investigate_graphrag', title: 'Compare GraphRAG retrieval plans',
     description: 'Compares deterministic bounded hybrid, dependency, and NestJS retrieval plans from one shared semantic seed lookup. Returns source-free paths, graph routes, budgets, timing, stop receipts, and recommendations; it does not persist a Detective trace, call a chat model, or change configuration.',
@@ -188,7 +233,7 @@ function publishGraphRagInvestigation(readReadiness: () => SemanticSearchReadine
     invoke: async (args) => {
       const input = z.object({ query: z.string().min(1), mode: z.enum(['standard', 'deep']).optional() }).parse(args);
       const readiness = readReadiness();
-      if (!readiness.ready) return unavailable(readiness.message);
+      if (!readiness.ready) return unavailable(readiness.message, readiness.retryable);
       return toStructuredToolResult(graphRagInvestigationResultSchema, await executeGraphRagInvestigation(input));
     },
     rootUnavailable: unavailable,

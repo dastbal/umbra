@@ -29,7 +29,7 @@ Pass the user's original question unchanged as the primary query. If the first s
 - `success`: usable evidence was produced.
 - `partial`: usable evidence exists with stated limitations. Mention those limitations.
 - `empty`: the operation completed and found nothing. Do not treat this as a failure.
-- `abstained`: Umbra lacks enough grounded evidence for a supported answer. Clarify once when the result recommends it; otherwise inspect source by another available route.
+- `abstained`: Umbra lacks enough grounded evidence for a supported answer *yet*. Two causes, and `nextAction` names which: the question found no grounding in the index, or the index is still warming. Clarify once when the result recommends it; when `retryable` is true, reading `get_index_status` and asking again is the supported route.
 - `blocked`: an explicit prerequisite or authorization boundary prevented execution. Follow `nextAction` when present; do not retry automatically.
 - `error`: execution failed. Report the diagnostic and do not present it as an answer.
 

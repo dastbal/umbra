@@ -331,16 +331,31 @@ async function warmIndexInBackground(
   }
 }
 
+/**
+ * Phases in which the refusal is temporary and asking again is the right move.
+ *
+ * Everything else — `failed`, `unavailable`, `skipped`, or a `ready` phase whose
+ * index still cannot serve — needs an operator, not another call.
+ */
+const WARMING_PHASES: ReadonlySet<McpIndexPhase> = new Set<McpIndexPhase>([
+  'awaiting-root', 'starting', 'probing', 'indexing',
+]);
+
 /** Builds the availability response used by the stable semantic-search tool. */
 function semanticSearchReadiness(
   rootDir: string | undefined,
   lifecycle: McpIndexLifecycle,
 ): SemanticSearchReadiness {
-  if (rootDir === undefined) return { ready: false, message: lifecycle.message };
-  if (lifecycle.phase !== 'ready') return { ready: false, message: lifecycle.message };
+  // Whether the caller should come back is decided per phase, never by one
+  // predicate over "is it unavailable" — a warming index and a failed warm-up
+  // are both unavailable, and only one of them is worth retrying.
+  const retryable = WARMING_PHASES.has(lifecycle.phase);
+
+  if (rootDir === undefined) return { ready: false, message: lifecycle.message, retryable };
+  if (lifecycle.phase !== 'ready') return { ready: false, message: lifecycle.message, retryable };
 
   const stamp = readIndexStamp(rootDir);
-  if (stamp === undefined) return { ready: false, message: 'No durable index stamp exists yet.' };
+  if (stamp === undefined) return { ready: false, message: 'No durable index stamp exists yet.', retryable: false };
 
   // Serveability, not integrity. This runs on every `ask_codebase` call, and the
   // full inspection cost 202 ms of a 293 ms round trip to re-derive facts about
@@ -356,9 +371,10 @@ function semanticSearchReadiness(
     model: stamp.model,
   });
   return serveability.serveable
-    ? { ready: true, message: lifecycle.message }
+    ? { ready: true, message: lifecycle.message, retryable: false }
     : {
       ready: false,
+      retryable: false,
       message:
         `${serveability.reason ?? 'The index cannot serve a search.'} ` +
         'Read get_index_status, or run umbra doctor --index.',
