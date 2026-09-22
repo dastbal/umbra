@@ -1073,3 +1073,62 @@ The deferred design for a client-visible warm-up wait remains separate.
 asserts that the protocol notification precedes the typed result. Its companion
 case proves a call without the token emits none, preserving clients that do not
 implement progress handling.
+
+---
+
+## Amendment — 2026-09-21: a warming index was reported as a transport failure, and one tool claimed a read-only it does not honour
+
+Two claims this record makes about the published surface were not true of the
+code, and both are visible to a foreign client rather than to us.
+
+### The recovery instruction never reached the model
+
+Amendments 12 and 16 both state that `ask_codebase` returns a retryable result
+directing the caller to `get_index_status`. The catalog did the opposite:
+`publishAskCodebase` in `src/presentation/mcp/tool-catalog.ts` returned
+`status: 'blocked'` with `retryable: false`, and `isToolResultError` in
+`src/core/tools/tool-result.ts` turns `blocked` into MCP `isError: true`.
+
+`@langchain/mcp-adapters` raises a `ToolException` on `isError` and — unlike the
+Python client — does not hand the failure back to the model. So on the single
+most common first contact, a cold start, this server destroyed its own recovery
+sentence for the client family it is built for.
+
+The refusal is now decided per lifecycle phase rather than by one predicate over
+*is it unavailable*: `SemanticSearchReadiness` carries a `retryable` flag,
+`semanticSearchReadiness` in `src/presentation/mcp/start-mcp-server.ts` sets it
+only for `WARMING_PHASES` (`awaiting-root`, `starting`, `probing`, `indexing`),
+and a warming index answers `abstained` with `retryable: true` and its
+`nextAction` intact. A refusal that will not change on its own — a failed
+warm-up, an index that cannot serve — stays `blocked`, because there it is the
+truth. `investigate_graphrag` carried the same defect in a worse form: it
+declared `retryable: true` on an `error`, a combination the client can never act
+on because the exception is raised before the flag is read.
+
+`.agents/skills/umbra-tool-usage/SKILL.md` told conforming clients the wrong
+thing too — *`blocked` … do not retry automatically* was the only guidance for a
+state that is now an abstention — and is corrected in the same commit.
+
+### `list_adrs` published a read-only hint it does not honour
+
+Amendment 14 draws the line at *bootstrap actions are not MCP tool
+capabilities*. `list_adrs` reaches `buildAdrIndex` in
+`src/core/tools/adr-index.ts`, which on a cache miss calls `fs.mkdirSync` and
+`fs.writeFileSync` on `.umbra/adr-index.json`. That is a write reached through a
+published tool, and `readOnlyHint` is exactly the assertion a client uses to skip
+its own approval gate.
+
+The `refresh` argument is not the cause and removing it would not have fixed
+anything: a cold or stale cache writes on a plain `list_adrs({})` too. The tool
+now declares its own annotations — `readOnlyHint: false`, `destructiveHint:
+false`, `idempotentHint: true`, `openWorldHint: false` — through the
+`PublishedTool.annotations` field that already existed and only
+`continue_conversation` was using.
+
+The alternative was to compute without persisting over MCP, which keeps the
+read-only claim intact. It was not taken: it spends the cache ADR-003 and ADR-004
+exist to keep, on the startup path this record already documents as painful.
+Declaring the truth costs one approval prompt for a metadata listing. **The
+server's read-only nature is unchanged** — no tool writes to the consumer's
+source, and none became writable. What changed is that the published metadata now
+matches what the tool does.

@@ -256,3 +256,34 @@ positive consequences above are reasoned and tested, not measured.
   and nothing else.
 - `src/core/agent/task-classifier.ts` — the vocabulary, now an optimization.
 - `src/core/agent/deep-agent-factory.ts` — `createOrchestrator`.
+
+---
+
+## Amendment — 2026-09-21: the schema was the order, and the writer had no schema
+
+This record's first decision is that a malformed delegation cannot be written,
+because the tool schema **is** the order. That held for the order going out. It
+did not hold for the artifact coming back.
+
+`researchArtifactSchema` and `verificationArtifactSchema` in
+`src/core/agent/contracts.ts` gave two of the three roles a validated return. The
+Coder had none, and `CODER_SYSTEM_PROMPT` asked for a prose report. So the one
+role that *writes* was the one role whose result nobody could validate — and
+section 4's books could not balance on the side that matters most, because
+`classifyDelegationOutcome` counts only a status it recognises and prose carries
+none.
+
+`implementationArtifactSchema` closes it. The load-bearing detail is not the
+schema but its vocabulary: it reuses `['ready','blocked','partial']`, the states
+`DECIDED_STATUSES` in `src/core/agent/delegation/delegation-outcome.ts` already
+decides on. A truer-sounding reading — `implemented`, `done` — would parse,
+validate, and change nothing, because the outcome would fall through to
+`infrastructure-failure` exactly as prose did. `contracts.spec.ts` pins that
+coupling rather than leaving it to be rediscovered by whoever next edits the
+enum.
+
+The schema deliberately does **not** ask the writer to list the files it wrote.
+The Verifier reports `changedFiles` from what is actually on disk; asking the
+writer to declare them too invites it to claim a write it never made, which is
+the failure the FILE CREATION LAW exists to prevent. A test asserts the field is
+absent, so its absence reads as a decision rather than an oversight.

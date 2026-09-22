@@ -383,3 +383,43 @@ The rule this record established is unchanged and is what makes the new exclusio
 safe: the prompt names only tools the mode declares, and a contract test now
 fails if the orchestrator prompt orders a `task` call — which it immediately did
 for four route instructions.
+
+---
+
+## Amendment — 2026-09-21: the flush awaited a queue that was empty by construction
+
+This record states that flushing pending traces makes observability survive
+process exit, and its own Verification Evidence admits the property was never
+proven end to end. It was never proven because it did not hold.
+
+`flushPendingTraces` in `src/core/observability/trace-flush.ts` constructed
+`new Client()` and awaited *that instance's* `awaitPendingTraceBatches()`. A
+LangSmith client's pending-batch state is per instance — `_pendingDrains` is
+defined on `this` in `langsmith/dist/client.js` — while the tracer posts through
+the module singleton, `getDefaultLangChainClientSingleton()` in
+`@langchain/core/dist/tracers/tracer_langchain.js`. A freshly constructed client
+has an empty queue by definition, so the flush returned immediately while the
+real batch was still in flight, and the runs worth debugging were exactly the
+ones missing from the project.
+
+It now awaits `awaitAllCallbacks()` from `@langchain/core/callbacks/promises`,
+which settles both halves that matter: the background callback queue a tracer
+enqueues into (`queue.onIdle()`) and that singleton's pending batches. Everything
+else this record decided is kept — the `isTracingEnabled` gate, the 2 s bound,
+the catch that swallows a failed flush, and the rule that this path prints
+nothing.
+
+The visible consequence is real and intended: Ctrl+C can now genuinely wait up to
+the bound, because there is now something to wait for. This record's own ordering
+— the farewell is printed before the wait — already absorbs it.
+
+Note for a future reader: the comment near `DeepAgentFactory` claiming
+`deepagents` vendors its own copy of `@langchain/core` is false. There is exactly
+one `@langchain/core` in this tree, which is why this fix reaches the singleton
+the tracer uses. Had it been true, it would not.
+
+### Verification evidence
+
+`npx jest --runInBand src/core/observability/trace-flush.spec.ts` — 8 passed. The
+suite's mock target moved from the `langsmith` module to the callback barrier,
+which is the point: mocking the client was mocking the wrong object.
