@@ -185,11 +185,39 @@ if (cases.length === 0) {
   process.exit(2);
 }
 
-/** Pulls the paths Umbra reported, in rank order, from one `ask_codebase` answer. */
-function extractPaths(text) {
-  return [...text.matchAll(/\*\*FILE:\*\*\s*([^\r\n]+)/g)].map((match) =>
-    match[1].trim().replaceAll('\\', '/'),
-  );
+/**
+ * Reads the typed payload of one MCP tool result.
+ *
+ * Since 2026-09-14 every tool returns a typed result (ADR-024), and the text
+ * block is its JSON rather than a report. This runner kept matching the old
+ * report — `state: ready`, `**FILE:**`, `[embeddings: …]` — so from then on it
+ * waited its full fifteen minutes on an index that was ready, and could not have
+ * scored an answer if it had not. Found on 2026-09-23, re-measuring the gate.
+ *
+ * @param result - The `result` of a `tools/call` response.
+ * @returns The typed payload, or `undefined` when there is none.
+ */
+function typedPayload(result) {
+  if (result?.structuredContent !== undefined) return result.structuredContent;
+  try {
+    return JSON.parse(result?.content?.map((content) => content.text).join('\n') ?? '');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pulls the paths hybrid retrieval returned, in rank order, from one answer.
+ *
+ * Only seeds. The corpus labels what hybrid retrieval should find, and the
+ * scorer counts a hit anywhere in the list, so the files the dependency graph
+ * adds after the seeds would raise the hit rate without retrieval finding
+ * anything. The graph has its own benchmark, `npm run bench:graph`.
+ */
+function extractPaths(payload) {
+  return (payload?.data?.files ?? [])
+    .filter((file) => file.origin === 'seed')
+    .map((file) => file.path.replaceAll('\\', '/'));
 }
 
 /**
@@ -198,9 +226,14 @@ function extractPaths(text) {
  * Without it a misconfigured launch silently benchmarks the other provider's
  * vectors and reports the result under the wrong name — the exact failure
  * ADR-025 made unrepresentable in storage and which remains representable here.
+ *
+ * An abstention on unknown terms carries no provenance, and correctly: it is
+ * decided before any embedding call, so there is no provider to prove.
  */
-function provesActiveProvider(text, provider) {
-  return text.includes(`[embeddings: ${provider}/`) || text.includes(`queried with ${provider}/`);
+function provesActiveProvider(payload, provider) {
+  const provenance = payload?.data?.provenance;
+  if (provenance === undefined) return payload?.data?.abstentionReason === 'unknown_terms';
+  return provenance.provider === provider;
 }
 
 function startServer(provider) {
@@ -281,10 +314,11 @@ async function waitForIndex(server, provider) {
       arguments: {},
     });
     lastStatus = response.result?.content?.map((content) => content.text).join('\n') ?? lastStatus;
+    const phase = typedPayload(response.result)?.data?.lifecycle?.phase;
 
-    if (/^state:\s*ready\b/m.test(lastStatus)) return lastStatus;
+    if (phase === 'ready') return lastStatus;
 
-    if (/^state:\s*skipped\b/m.test(lastStatus)) {
+    if (phase === 'skipped') {
       throw new Error(
         `${provider}: the index has no durable vector coverage and warm-up was skipped. ` +
           `Re-run with --index, or build it once with \`umbra index --embeddings ${provider}\`.\n\n${lastStatus}`,
@@ -295,7 +329,7 @@ async function waitForIndex(server, provider) {
     // for it helps nobody. One poll of tolerance covers a blip under load —
     // which is exactly how this was first observed, with the benchmark and the
     // jest suite competing for the same local daemon.
-    if (/^state:\s*unavailable\b/m.test(lastStatus)) {
+    if (phase === 'unavailable') {
       unavailablePolls += 1;
       if (unavailablePolls > 1) {
         throw new Error(`${provider}: the embedding provider is unavailable.\n\n${lastStatus}`);
@@ -375,13 +409,14 @@ async function runProvider(provider) {
           `${provider}: ask_codebase returned an error for corpus id ${item.id}: ${text.trim()}`,
         );
       }
-      if (!provesActiveProvider(text, provider)) {
+      const payload = typedPayload(result);
+      if (!provesActiveProvider(payload, provider)) {
         throw new Error(
           `${provider}: the answer for corpus id ${item.id} does not name the active provider.`,
         );
       }
 
-      outcomes.push(scoreCase(item, extractPaths(text), elapsedMs));
+      outcomes.push(scoreCase(item, extractPaths(payload), elapsedMs));
     }
 
     return {
