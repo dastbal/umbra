@@ -310,3 +310,73 @@ Verification on 2026-09-18: focused lexical, hybrid-ranking, retriever,
 GraphRAG, AST-chunker, integrity, MCP-catalog, and SDK-server Jest suites passed (87 tests), and strict
 TypeScript compilation passed. No provider benchmark was run, so no new quality
 metric is claimed.
+
+## Amendment — 2026-09-23 · A grounded subject was allowed to excuse an absent one, and 2.2.11 shipped it
+
+`09154c1` (*fix(retrieval): preserve partial query evidence*, 2026-09-18) changed
+`assessUnknownTerms` so that an unknown term became a `droppedTerms` entry, and
+retrieval went on, whenever **any** other subject term was grounded. No record
+was amended with it. It answered the two false abstentions on the gate fixture,
+and it answered every nonexistent-feature case as well: a question about a
+missing integration almost always pairs the missing name with grounded words, so
+"another subject is known" is true of nearly every negative, and the grounding
+check that runs next is the one the 2026-09-08 amendment measured answering all
+of them. CI has been red on `retrieval-gate.spec.ts` since, and
+`@dastbal/umbra@2.2.11` was published with it.
+
+This is the change the 2026-09-10 amendment was written to prevent. It recorded
+that reading the gate as *"a hard AND, one absent word aborts the query"* is an
+accurate description of the mechanism and the wrong conclusion about it.
+
+### Measured on the live calibration split, on one index
+
+`npm run bench:retrieval -- --providers ollama`, both runs on the same index of
+186 files, the only difference being `unknown-terms.ts`:
+
+| | 2.2.11 rule | This amendment |
+| --- | --- | --- |
+| Correct abstention | **0.1** | **0.9** — 9 of 9 provable negatives |
+| False abstention | 0 | 0.022 — `lexical-index`, the `synchronized` case recorded on 2026-09-08 |
+| Hit@4 / MRR | 0.778 / 0.533 | 0.756 / 0.522 — that one case, nothing else moved |
+
+The tenth negative, `negative-graphql`, is reported as rotted by the runner: its
+subject is now written in `src/core/config/workspace-evidence.ts` and
+`src/core/tools/read-only-executions.ts`, so no absence rule can catch it. It
+needs a new subject; that is corpus work, left to a separate change.
+
+On the gate fixture: correct abstention 0 → 1, false abstention 0 → 0.067, MRR
+0.722 → 0.733.
+
+### What changed
+
+1. **The rule is strict again.** Any unknown subject term abstains, except the
+   `X by X` modifier ADR-034 defines. `droppedTerms` stays in the published MCP
+   schema, always empty.
+2. **The false abstention that was a defect is fixed where it lived.** One of
+   the two fixture false abstentions was morphology, not vocabulary: the fixture
+   writes `verified` and `verifies`, never `verify`, and English spells a final
+   consonant-plus-`y` as `i` before `-es` and `-ed`. `termProbes` now also probes
+   the root before that letter as a prefix (`alternationRoot`), in both
+   directions, and only when the root is at least four letters. This is the
+   third morphology class in this record, after inflection and derivation, and
+   the only one of the three that is inflection.
+3. **The other stays a false abstention, by design.** `synchronized` against a
+   repository that writes `sync` is a real vocabulary gap. The index cannot tell
+   it from a missing feature; both are absent. ADR-029's approved alias is the
+   remedy that does not reopen the gate.
+
+### The benchmark runner had been blind since 2026-09-14
+
+`scripts/bench-retrieval.mjs` still matched the text report the MCP tools
+returned before they became typed (ADR-024): `state: ready`, `**FILE:**`,
+`[embeddings: …]`. Against every binary since, it waited its full fifteen
+minutes on a ready index and could not have scored an answer. It now reads
+`structuredContent`, scores only `seed` files — the scorer counts a hit anywhere
+in the list, so graph additions would raise the hit rate without retrieval
+finding anything — and accepts a missing provenance only on an unknown-term
+abstention, which makes no embedding call. That is why no calibration report
+exists between 2026-09-10 and today, and why nothing local caught this.
+
+Reports: `docs/benchmarks/results/2026-09-23-ollama-calibration-7291393-dirty-published-rule.json`
+and `…-fixed-rule.json`. Both are marked dirty because both ran on the repaired
+runner.
