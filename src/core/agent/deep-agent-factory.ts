@@ -345,15 +345,7 @@ export class DeepAgentFactory {
 
     await DeepAgentFactory.bootstrap(rootDir, model, undefined, false, false);
 
-    const profile: RoleProfile = {
-      id: 'mcp-advisor',
-      displayName: 'MCP Advisor',
-      description: 'Answers repository questions without changing the project.',
-      kernelApiVersion: KERNEL_API_VERSION,
-      workflowRole: 'advisory',
-      rolePrompt: 'Answer the user with cited repository evidence. Ask one concise follow-up only when necessary.',
-      capabilities: ['read_code', 'read_adrs', 'read_dependency_graph', 'search_codebase_readonly'],
-    };
+    const profile = DeepAgentFactory.createMcpAdvisorRoleProfile();
     const tools = resolveCapabilityTools(profile.capabilities);
     const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'mcp', agentConfig);
     recordSessionOverhead(systemPrompt, tools);
@@ -652,6 +644,25 @@ export class DeepAgentFactory {
         'run_tests',
         'verify_integrity',
       ],
+    };
+  }
+
+  /**
+   * The MCP advisor's role profile: read-only, and nothing it can delegate to.
+   *
+   * Extracted from `createMcpAdvisor` so the prompt-tool contract can hold its
+   * prompt to the tools this profile resolves, as it already does for the deep
+   * agent and the Supervisor.
+   */
+  private static createMcpAdvisorRoleProfile(): RoleProfile {
+    return {
+      id: 'mcp-advisor',
+      displayName: 'MCP Advisor',
+      description: 'Answers repository questions without changing the project.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'advisory',
+      rolePrompt: 'Answer the user with cited repository evidence. Ask one concise follow-up only when necessary.',
+      capabilities: ['read_code', 'read_adrs', 'read_dependency_graph', 'search_codebase_readonly'],
     };
   }
 
@@ -1263,6 +1274,36 @@ This mode intentionally does not use semantic RAG so broad audits remain stable,
 low-cost, and bounded; do not invent evidence that is absent from the manifest.
 
 ${evidenceManifest}`;
+    }
+
+    if (type === 'mcp') {
+      // The advisor behind the published `continue_conversation` tool. It had no
+      // branch here and fell through to the orchestrator's prompt, which told a
+      // read-only advisor that it coordinates a researcher, a coder and a
+      // verifier through `delegate` and plans with `write_todos` — none of which
+      // it holds. `policy` is left out on purpose: every line of it is about
+      // delegating or writing, and this advisor does neither.
+      //
+      // The tool list is derived from the advisor's own profile rather than
+      // typed, so this prompt cannot name a tool the advisor was never given.
+      const advisorTools = resolveCapabilityTools(DeepAgentFactory.createMcpAdvisorRoleProfile().capabilities)
+        .map((tool) => `\`${(tool as { name: string }).name}\``)
+        .join(', ');
+
+      return base + `
+
+🎯 YOUR ROLE: READ-ONLY REPOSITORY ADVISOR
+You answer questions about this repository for a client connected over MCP. You
+cannot change the project and there is no one to delegate to: every answer comes
+from what your tools show you.
+
+Your tools: ${advisorTools}.
+
+- Cite a real relative path for every claim you make about the code.
+- When the repository cannot settle a question, say what is missing instead of
+  guessing. Ask one concise follow-up only when the answer genuinely depends on it.
+- Never describe a change as made, a test as run, or a file as written. You can
+  read; you cannot act.`;
     }
 
     const advisoryCatalog = advisoryRoles.length === 0

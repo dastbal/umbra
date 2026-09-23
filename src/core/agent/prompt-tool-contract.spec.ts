@@ -298,3 +298,45 @@ describe('the orchestrator prompt only names tools its profile grants', () => {
       .toBeGreaterThan(2);
   });
 });
+
+/**
+ * The advisor behind the published `continue_conversation` tool.
+ *
+ * It resolves four read-only capabilities and has nothing to delegate to, yet
+ * `buildSystemPrompt` had no branch for it: `'mcp'` fell through to the
+ * orchestrator's prompt, which tells it that it coordinates a researcher, a
+ * coder and a verifier through `delegate` and plans with `write_todos`. No test
+ * covered this prompt, so a foreign client's advisor was instructed to call
+ * tools it does not hold on every conversation turn.
+ */
+describe('the MCP advisor prompt only names tools its profile grants', () => {
+  const internals = DeepAgentFactory as unknown as {
+    buildSystemPrompt(rootDir: string, type: 'mcp'): string;
+    createMcpAdvisorRoleProfile(): { capabilities: readonly AgentCapability[] };
+  };
+
+  const advisorDeclares = (): string[] =>
+    resolveCapabilityTools(internals.createMcpAdvisorRoleProfile().capabilities)
+      .map((one) => (one as { name: string }).name);
+
+  it('advertises nothing the advisor cannot call', () => {
+    const declared = advisorDeclares();
+    const prompt = internals.buildSystemPrompt('C:\project', 'mcp');
+    const undeclared = toolsNamedIn(prompt)
+      .filter((name) => !forbiddenInPrompt(prompt, name))
+      .filter((name) => !declared.includes(name));
+
+    expect(undeclared).toEqual([]);
+  });
+
+  it('is not told that it orchestrates subagents it does not have', () => {
+    const prompt = internals.buildSystemPrompt('C:\project', 'mcp');
+
+    expect(prompt).not.toContain('ROLE: ORCHESTRATOR');
+    expect(prompt).not.toMatch(/delegate`? with subagent/);
+  });
+
+  it('names enough tools that the check cannot pass vacuously', () => {
+    expect(toolsNamedIn(internals.buildSystemPrompt('C:\project', 'mcp')).length).toBeGreaterThan(0);
+  });
+});
