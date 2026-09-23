@@ -175,6 +175,11 @@ const believed = believedCount.system + believedCount.toolSchemas;
  * recovered is an anecdote with a schema, and a dirty tree is recorded rather
  * than refused, so a mid-change run is never mistaken for its commit.
  *
+ * Dirtiness ignores the results directory. Running the two arms back to back
+ * otherwise stamps the second one dirty because of the report the first one
+ * wrote — a stamp counting its own output as a code change, which says the code
+ * differed when it did not. Any change outside that directory still counts.
+ *
  * @returns Short SHA and whether the tree had uncommitted changes.
  */
 function codeVersion() {
@@ -183,7 +188,10 @@ function codeVersion() {
       .execSync(command, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
       .trim();
   try {
-    return { commit: run('git rev-parse --short HEAD'), dirty: run('git status --porcelain').length > 0 };
+    return {
+      commit: run('git rev-parse --short HEAD'),
+      dirty: run('git status --porcelain -- . ":(exclude)docs/benchmarks/results"').length > 0,
+    };
   } catch {
     return { commit: 'unknown', dirty: false };
   }
