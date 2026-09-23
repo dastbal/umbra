@@ -229,6 +229,8 @@ describe('retrieval quality gate', () => {
 
     // Measured 2026-09-09 at 0e06612: hit 0.867, false abstention 0.133,
     // correct abstention 1.0. Floors sit below with room for a tie-break.
+    // Re-measured 2026-09-23 after the y/i probe (ADR-028): false abstention
+    // 0.067, MRR 0.733. The floors are unchanged on purpose.
     expect(summary.hitRate).toBeGreaterThanOrEqual(0.75);
     expect(summary.falseAbstentionRate).toBeLessThanOrEqual(0.2);
 

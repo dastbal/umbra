@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { ensureLexicalIndex } from './lexical-index';
-import { assessUnknownTerms, findUnknownTerms, subjectTerms, unknownTermReport } from './unknown-terms';
+import { assessUnknownTerms, findUnknownTerms, subjectTerms, termProbes, unknownTermReport } from './unknown-terms';
 
 /** A minimal `code_chunks` plus its FTS mirror, standing in for a real index. */
 function indexWith(contents: readonly { path: string; content: string }[]): Database.Database {
@@ -109,19 +109,62 @@ describe('findUnknownTerms', () => {
     expect(assessment.droppedTerms).toEqual([]);
   });
 
-  it('reports one unknown term as dropped when another subject is grounded', () => {
+  it('keeps the same word strict when it is the only possible subject', () => {
     const assessment = assessUnknownTerms(db, 'Where are bytes handled?');
 
-    expect(assessment.strict).toEqual([]);
+    expect(assessment.strict).toEqual(['bytes']);
     expect(assessment.ignoredModifiers).toEqual([]);
-    expect(assessment.droppedTerms).toEqual(['bytes']);
+    expect(assessment.droppedTerms).toEqual([]);
   });
 
-  it('keeps searching when a known subject is paired with one unknown subject', () => {
+  // The shape of every nonexistent-feature question: the absent name arrives
+  // with grounded words around it. Excusing it because they are grounded is
+  // what shipped in 2.2.11 and answered all ten gate negatives.
+  it('keeps an unknown subject strict however many other subjects are grounded', () => {
+    const assessment = assessUnknownTerms(db, 'Where does Umbra expose a Prometheus metrics endpoint?');
+
+    expect(assessment.strict).toContain('prometheus');
+    expect(assessment.droppedTerms).toEqual([]);
+  });
+
+  it('does not let one grounded subject excuse the unknown ones beside it', () => {
     const assessment = assessUnknownTerms(db, 'Compare the retriever signature byte by byte');
 
-    expect(assessment.strict).toEqual([]);
-    expect(assessment.droppedTerms).toEqual(['compare', 'signature', 'byte']);
+    expect(assessment.strict).toEqual(['compare', 'signature', 'byte']);
+    expect(assessment.droppedTerms).toEqual([]);
+  });
+});
+
+describe('termProbes', () => {
+  it('reaches every spelling of a word whose y becomes i under inflection', () => {
+    const db = indexWith([
+      { path: 'src/probe.ts', content: 'export function probe(): void {} // verified when the provider verifies' },
+      { path: 'src/query.ts', content: 'export class Query {} // one query per request' },
+    ]);
+
+    // The base form the code never wrote, against the inflections it did.
+    expect(findUnknownTerms(db, 'Where does the provider verify?')).toEqual([]);
+    // The inflection the code never wrote, against the base form it did.
+    expect(findUnknownTerms(db, 'Where are queries built?')).not.toContain('queries');
+    db.close();
+  });
+
+  it('probes the shared root only after a consonant', () => {
+    expect(termProbes('verify')).toEqual(['"verify"', '"verif"*']);
+    expect(termProbes('queries')).toEqual(['"queries"', '"queri"*', '"quer"*']);
+    // `deploy` keeps its y in `deployed`; there is no other spelling to reach.
+    expect(termProbes('deploy')).toEqual(['"deploy"']);
+  });
+
+  it('keeps the exact probe when the root would be too short to mean anything', () => {
+    // `den*` would find `dense` and call an absent word present.
+    expect(termProbes('deny')).toEqual(['"deny"']);
+  });
+
+  it('leaves the other inflections as they were', () => {
+    expect(termProbes('handled')).toEqual(['"handled"', '"handl"*']);
+    expect(termProbes('uses')).toEqual(['"uses"', '"use"*']);
+    expect(termProbes('retriever')).toEqual(['"retriever"']);
   });
 });
 
