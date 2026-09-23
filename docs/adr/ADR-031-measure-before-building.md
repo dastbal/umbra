@@ -879,3 +879,26 @@ tree: the deep agent in both arms, the MCP advisor and the orchestrator.
 `todoListMiddleware({ toolDescription })` as the factory installs it: the model
 is bound with the compact description, other tools are untouched, and two
 writes leave only the second list.
+
+---
+
+## Amendment — 2026-09-23 (third) · The guard phase 2 built is retired
+
+Phase 2 counted the prompt before the call so that
+`ContextCompressor.isOverBudget` could decide when `ChatSession` compressed,
+reading the overhead `recordSessionOverhead` recorded at construction. Both
+amendments of this date measured how much of the real request that guard could
+not see.
+
+It no longer exists. ADR-037 replaces the decision it made with
+`contextEditingMiddleware`, which counts the request it edits inside the model
+call — the assembled system prompt and the real messages, which is exactly what
+this record's blind-spot finding asked for. `isOverBudget` and `estimateTokens`
+were removed with `ChatSession#checkAndCompressContext`, their only caller.
+
+What remains of phase 2 is `recordSessionOverhead` and its registry, which no
+production code reads any more; `bench:floor` reports it as its "believed"
+figure. Retiring both is recorded in `docs/deferred-work.md`. Phase 2's other
+purpose — counting a request before paying for it, for routing and refusal —
+is not affected by this and still stands as this record describes it.
+

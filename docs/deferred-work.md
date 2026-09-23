@@ -2321,6 +2321,19 @@ a known under-count with an over-count that looks authoritative.
 > The exclusion-list route stays the fix for whatever deepagents contributes
 > next.
 
+> **Amendment — 2026-09-23, superseded.** The guard this entry is about no
+> longer exists. ADR-037 replaced `ContextCompressor.isOverBudget` with
+> context editing, which counts the real request inside the model call, and
+> `isOverBudget` and `estimateTokens` were removed with their only caller. So the
+> plan above is moot. What is left is smaller: `recordSessionOverhead` still
+> records into a registry nothing in production reads, and `bench:floor` still
+> reports it as "what the budget guard sees" — a guard that is gone. Retire the
+> registry and the three `recordSessionOverhead` calls in `DeepAgentFactory`, and
+> relabel or drop the bench's "believed" figure in the same change.
+>
+> Adjacent, and found at the same time: `ContextCompressor.compress`, which
+> `/model` still uses to hand a summary to a new agent, has never had a test.
+
 ---
 
 ## A CLI ignore pattern replaces the config's, and the suite runs twice
