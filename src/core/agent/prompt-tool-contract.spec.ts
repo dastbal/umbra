@@ -175,6 +175,21 @@ describe('the deep prompt only names tools the model can actually call', () => {
 describe('a subagent prompt only names tools that subagent declares', () => {
   const SUBAGENTS = [researcherSubAgent, coderSubAgent, verifierSubAgent];
 
+  /**
+   * A delegate's instructions as text.
+   *
+   * deepagents 1.14 widened `SubAgent.systemPrompt` to `string | SystemMessage`.
+   * Umbra builds a string today, but reading `.text` keeps the check honest if a
+   * profile ever supplies a structured message. An absent prompt is a failure,
+   * not an empty string: a delegate with no instructions names no tools, and the
+   * check would pass vacuously on exactly the case it should catch.
+   */
+  function promptText(subagent: (typeof SUBAGENTS)[number]): string {
+    const prompt = subagent.systemPrompt;
+    if (prompt === undefined) throw new Error(`${subagent.name} has no system prompt`);
+    return typeof prompt === 'string' ? prompt : prompt.text;
+  }
+
 
   it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
     'the %s prompt advertises nothing it cannot call',
@@ -190,9 +205,10 @@ describe('a subagent prompt only names tools that subagent declares', () => {
       // neither of them has. A contract test that assumes its answer protects
       // nothing.
       const declared = declaredToolNames(subagent);
-      const undeclared = toolsNamedIn(subagent.systemPrompt)
+      const prompt = promptText(subagent);
+      const undeclared = toolsNamedIn(prompt)
         .filter((name) => !declared.includes(name))
-        .filter((name) => !forbiddenInPrompt(subagent.systemPrompt, name));
+        .filter((name) => !forbiddenInPrompt(prompt, name));
 
       expect(undeclared).toEqual([]);
     },
@@ -204,7 +220,7 @@ describe('a subagent prompt only names tools that subagent declares', () => {
       const declared = (subagent.tools ?? []).map((tool) => (tool as { name: string }).name);
 
       expect(declared).toContain('ask_delegator');
-      expect(subagent.systemPrompt).toContain('ask_delegator');
+      expect(promptText(subagent)).toContain('ask_delegator');
     },
   );
 
