@@ -423,3 +423,52 @@ the tracer uses. Had it been true, it would not.
 `npx jest --runInBand src/core/observability/trace-flush.spec.ts` — 8 passed. The
 suite's mock target moved from the `langsmith` module to the callback barrier,
 which is the point: mocking the client was mocking the wrong object.
+
+---
+
+## Amendment — 2026-09-23: the delegate contract assumed the tool it should have checked
+
+This record's contract test stops a prompt naming a tool its model cannot call.
+For the deep prompt it worked. For the delegates it could not, because it
+supplied its own answer.
+
+The delegate block of `src/core/agent/prompt-tool-contract.spec.ts` built each
+delegate's declared set as its tools **plus `write_todos`**, under the comment
+*deepagents contributes the todo list to every subagent*. It does not. Umbra's
+delegates are compiled by `compile` in
+`src/core/agent/delegation/subagent-registry.ts` with plain `createAgent`, which
+installs no todo middleware. Compiled and listed, neither delegate holds the
+tool:
+
+- Coder — `safe_write_file, safe_read_file, list_files, run_tests,
+  run_integrity_check, list_adrs, ask_delegator`
+- Researcher — `ask_codebase, inspect_project, search_workspace,
+  refresh_project_index, safe_read_file, list_files, list_adrs, ask_delegator`
+
+Yet step 1 of the Coder's mandatory protocol was *Call write_todos with the
+complete implementation steps*, the Researcher's was *Call write_todos with your
+investigation steps*, and the Researcher's tool list advertised it. Both were
+told, as their first instruction, to call a tool they do not have. The test
+passed because it declared the tool it was meant to be checking.
+
+It also misled a review. An external audit of 2026-09-16, verified by two
+adversarial passes, planned around delegates that *had* `write_todos` — it read
+the prompts and believed them. A prompt is an assertion about a tool; the
+compiled agent is the fact.
+
+### What changed
+
+- The delegate test now reads `declaredToolNames` — the compiled delegate's
+  tools, nothing added by assumption. It was run first and failed for the Coder
+  and the Researcher, which is the reason it exists; the Verifier, whose prompt
+  never named the tool, passed.
+- `CODER_SYSTEM_PROMPT` and `RESEARCHER_SYSTEM_PROMPT` keep the discipline and
+  drop the tool: list the steps before writing, state the investigation before
+  calling anything, never count a step done without disk confirmation.
+
+The Coder and the Researcher were therefore **not** given `write_todos`. They
+have run without it since they were written, so whatever they achieve they
+achieve without it; adding it would add cost for a benefit no measurement
+supports. `UNBUDGETED_TOOLS` in `subagent-budget.middleware.ts` still exempts
+`write_todos` from the attempt count — correct should a delegate ever receive it,
+and unreachable until one does.

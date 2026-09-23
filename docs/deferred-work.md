@@ -2255,3 +2255,86 @@ class, explicit labelling, and a consumer fixture that tests stale history.
    work required; it may not alter `umbra.json` or indexing policy.
 3. Require an operator decision, a new ADR or amendment, a parser, a labelled
    result contract, and a benchmark fixture before activating one class.
+
+---
+
+## The budget guard should see the floor it guards
+
+> Deferred 2026-09-23 after `npm run bench:floor` measured the per-turn floor at
+> the provider boundary. The larger half — `write_todos` — was compacted the same
+> day (ADR-031, 2026-09-23 amendment). This is the half that was not.
+
+### The idea
+
+Make `sessionOverhead()` hold what the provider actually receives, so
+`ContextCompressor#isOverBudget` decides with the real floor instead of the
+prompt Umbra happened to build.
+
+### What is actually missing
+
+`recordSessionOverhead` runs at construction, before deepagents concatenates
+its own prompt blocks. On `gemini-2.5-flash-lite` the guard holds 3,307 tokens
+against a measured floor of 4,880: **1,573 unseen, 32.2% of the floor**. Before
+`write_todos` was compacted the gap was 54%.
+
+The obvious fix is wrong in the other direction. Recording from a
+`wrapModelCall` hook reads the system prompt correctly — nothing after Umbra's
+hooks adds text — but every Umbra hook runs **before** deepagents'
+`_ToolExclusionMiddleware`, which is pushed last. The tool list a hook sees is
+the pre-exclusion list, seven builtins (`ls`, `read_file`, `write_file`,
+`edit_file`, `glob`, `grep`, `task`) larger than what is sent. It would replace
+a known under-count with an over-count that looks authoritative.
+
+### The mechanism to reuse
+
+- The system half: `request.systemMessage` in any Umbra `wrapModelCall`, which
+  `createCompactTodoToolMiddleware` already runs first in all four root agents.
+- The tool half: the exclusions each harness profile registers.
+  `registerGeminiHarnessProfile`, `registerAnthropicHarnessProfile` and the
+  Ollama branch of `DeepAgentFactory#bootstrap` compute those lists and discard
+  them. Returning them is the missing piece.
+- The check: `npm run bench:floor` already reports `measured` against
+  `believed`. A fix is done when `unseen` is near zero on every provider, not
+  when a unit test passes.
+
+### Plan
+
+1. Return the excluded tool names from each harness-profile registration.
+2. Record overhead from the first model call: system from `request.systemMessage`,
+   tools from `request.tools` minus the registered exclusions.
+3. Run `npm run bench:floor` per provider and require `unseen` within a stated
+   tolerance before calling it closed; commit the reports.
+
+---
+
+## A CLI ignore pattern replaces the config's, and the suite runs twice
+
+> Deferred 2026-09-23. Found while verifying the same change: a unit run
+> reported 225 suites instead of 112.
+
+### The idea
+
+Make `npm run test:unit` exclude what `jest.config.ts` excludes, so a run with a
+git worktree present counts this checkout's suites once.
+
+### What is actually missing
+
+`test:unit` passes `--testPathIgnorePatterns=integration|e2e|contract`. On the
+CLI that flag **replaces** the config's `testPathIgnorePatterns` rather than
+adding to it, which silently drops `/node_modules/`, `/dist/` and `/\.claude/`.
+With a worktree under `.claude/worktrees/` — which every parallel Claude session
+creates — the unit run executes that checkout's specs too. The config's own
+comment describes exactly this symptom; the script reintroduces it.
+
+### The mechanism to reuse
+
+The three config patterns, restated inside the CLI value, restore them. The
+unescaped pipe in that value is also why the script breaks on Windows, so both
+defects are fixed by the same edit.
+
+### Plan
+
+1. Move the category split out of the CLI flag — for example a `projects` or a
+   dedicated config for unit runs — so no script has to restate the ignores.
+2. Assert the suite count in CI, so a doubling is a failure rather than a
+   surprise.
