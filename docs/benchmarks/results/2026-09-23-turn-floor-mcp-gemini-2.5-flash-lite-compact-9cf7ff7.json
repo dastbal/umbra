@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-23T19:55:49.058Z",
+  "commit": "9cf7ff7",
+  "dirtyWorkingTree": false,
+  "model": "gemini-2.5-flash-lite",
+  "agent": "mcp",
+  "arm": "compact",
+  "counter": {
+    "method": "bpe",
+    "encoding": "cl100k_base",
+    "source": "encoder"
+  },
+  "measured": {
+    "system": 2076,
+    "tools": 530,
+    "total": 2606,
+    "systemChars": 8594
+  },
+  "believed": {
+    "system": 1956,
+    "tools": 628,
+    "total": 2584
+  },
+  "unseen": {
+    "tokens": 22,
+    "shareOfFloor": 0.00844205679201842
+  },
+  "tools": [
+    {
+      "name": "search_workspace",
+      "tokens": 130
+    },
+    {
+      "name": "list_adrs",
+      "tokens": 101
+    },
+    {
+      "name": "ask_codebase",
+      "tokens": 92
+    },
+    {
+      "name": "query_dependency_graph",
+      "tokens": 68
+    },
+    {
+      "name": "safe_read_file",
+      "tokens": 62
+    },
+    {
+      "name": "list_files",
+      "tokens": 42
+    },
+    {
+      "name": "inspect_project",
+      "tokens": 35
+    }
+  ]
+}
