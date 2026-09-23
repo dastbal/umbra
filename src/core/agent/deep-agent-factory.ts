@@ -71,9 +71,19 @@ import {
   type RoleProfile,
 } from './agent-kernel';
 
-/** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
+/**
+ * Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools.
+ *
+ * `delete` arrived with deepagents 1.14: "Permanently removes the file or
+ * directory... recursively... This cannot be undone". Against the default
+ * `StateBackend` it only removes a virtual file, which is its own defect — the
+ * model is told a real file is gone when it is not. Against a real
+ * `FilesystemBackend` it would delete recursively without passing through
+ * `AgentSecurityPolicy`. Umbra's `delete_file` is the guarded replacement, the
+ * same relationship every other entry here has with its tool.
+ */
 const REPLACED_BUILTIN_TOOLS = [
-  'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file',
+  'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'delete',
 ] as const;
 
 // ── Architecture Decision Records ──────────────────────────────────────────────
