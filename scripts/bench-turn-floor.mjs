@@ -30,16 +30,28 @@
  * that difference was 54% of the floor. A number that large under a guard is
  * the guard measuring something other than what it guards.
  *
+ * ## Two arms, so the saving can be re-derived rather than remembered
+ *
+ * `compact` - the shipped agent: `write_todos` shows the model
+ *             `COMPACT_WRITE_TODOS_DESCRIPTION`.
+ * `library` - the control. The same agent, the same middleware stack, with that
+ *             description set to the one the installed `todoListMiddleware`
+ *             ships. Only the text differs, so the difference between the arms
+ *             is the compaction and nothing else — on this commit, this
+ *             provider and this library version, not on the day it was written.
+ *
  * No network call is made and no credential is needed. Index sync is skipped:
  * it has no bearing on the floor and would touch the embedding provider.
  *
  * Usage:
  *   node scripts/bench-turn-floor.mjs
+ *   node scripts/bench-turn-floor.mjs --arm library
  *   node scripts/bench-turn-floor.mjs --model gemini-2.5-pro --output report.json
  */
 import childProcess from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -53,11 +65,16 @@ function valueAfter(args, flag) {
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('Usage: node scripts/bench-turn-floor.mjs [--model <id>] [--output <file>]');
+  console.log('Usage: node scripts/bench-turn-floor.mjs [--arm compact|library] [--model <id>] [--output <file>]');
   process.exit(0);
 }
 
 const model = valueAfter(args, '--model') ?? 'gemini-2.5-flash-lite';
+const arm = valueAfter(args, '--arm') ?? 'compact';
+if (!['compact', 'library'].includes(arm)) {
+  console.error('Benchmark blocked: unknown arm ' + arm + '. Use compact or library.');
+  process.exit(2);
+}
 
 for (const [label, target] of [
   ['compiled agent factory', path.join(repoRoot, 'dist/core/agent/deep-agent-factory.js')],
@@ -82,6 +99,17 @@ process.env.GOOGLE_CLOUD_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'bench-tu
 
 // Irrelevant to the floor, and it would reach the embedding provider.
 DeepAgentFactory.maybeReindex = async () => undefined;
+
+// The control arm. The middleware reads this export at call time, and the
+// factory resolves the middleware at call time, so setting it here changes the
+// description the model sees and nothing else. The text is read from the
+// installed library, not copied, so the control tracks the library.
+if (arm === 'library') {
+  const require = createRequire(import.meta.url);
+  const compact = require(path.join(repoRoot, 'dist/core/agent/compact-todo-tool.middleware.js'));
+  const { todoListMiddleware } = require('langchain');
+  compact.COMPACT_WRITE_TODOS_DESCRIPTION = todoListMiddleware().tools[0].description;
+}
 
 const captured = [];
 const realCreate = LLMProvider.createChatModel.bind(LLMProvider);
@@ -168,6 +196,7 @@ const report = {
   commit: code.commit,
   dirtyWorkingTree: code.dirty,
   model,
+  arm,
   counter: counter.identity,
   measured: { system: systemTokens, tools: toolTokens, total: measured, systemChars: system.length },
   believed: { system: believedCount.system, tools: believedCount.toolSchemas, total: believed },
@@ -179,13 +208,13 @@ const stamp = code.commit + (code.dirty ? '-dirty' : '');
 const defaultOutput = path.join(
   repoRoot,
   'docs/benchmarks/results',
-  new Date().toISOString().slice(0, 10) + '-turn-floor-' + model + '-' + stamp + '.json',
+  new Date().toISOString().slice(0, 10) + '-turn-floor-' + model + '-' + arm + '-' + stamp + '.json',
 );
 const outputPath = path.resolve(valueAfter(args, '--output') ?? defaultOutput);
 fs.writeFileSync(outputPath, JSON.stringify(report, null, 2) + '\n');
 
 const pct = (share) => (share * 100).toFixed(1) + '%';
-console.log('turn floor - ' + model + ' (' + counter.identity.encoding + ')');
+console.log('turn floor - ' + model + ', arm ' + arm + ' (' + counter.identity.encoding + ')');
 console.log('  measured at the boundary  ' + measured + ' tokens  (system ' + systemTokens + ' + ' + tools.length + ' tools ' + toolTokens + ')');
 console.log('  what the budget guard sees ' + believed + ' tokens');
 console.log('  unseen by the guard        ' + (measured - believed) + ' tokens  (' + pct(report.unseen.shareOfFloor) + ' of the floor)');
