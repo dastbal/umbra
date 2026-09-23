@@ -43,8 +43,17 @@
  * No network call is made and no credential is needed. Index sync is skipped:
  * it has no bearing on the floor and would touch the embedding provider.
  *
+ * ## Which agent
+ *
+ * `--agent deep` (default) is `DeepAgentFactory.create`. `--agent mcp` is the
+ * advisor behind the published `continue_conversation` tool — the floor a
+ * foreign client pays on every conversation turn. `--agent orchestrator` is the
+ * Supervisor. Each resolves its own profile, prompt and middleware, so each has
+ * its own floor.
+ *
  * Usage:
  *   node scripts/bench-turn-floor.mjs
+ *   node scripts/bench-turn-floor.mjs --agent mcp
  *   node scripts/bench-turn-floor.mjs --arm library
  *   node scripts/bench-turn-floor.mjs --model gemini-2.5-pro --output report.json
  */
@@ -65,12 +74,18 @@ function valueAfter(args, flag) {
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('Usage: node scripts/bench-turn-floor.mjs [--arm compact|library] [--model <id>] [--output <file>]');
+  console.log('Usage: node scripts/bench-turn-floor.mjs [--agent deep|mcp|orchestrator] [--arm compact|library] [--model <id>] [--output <file>]');
   process.exit(0);
 }
 
 const model = valueAfter(args, '--model') ?? 'gemini-2.5-flash-lite';
 const arm = valueAfter(args, '--arm') ?? 'compact';
+const agentKind = valueAfter(args, '--agent') ?? 'deep';
+const BUILDERS = { deep: 'create', mcp: 'createMcpAdvisor', orchestrator: 'createOrchestrator' };
+if (!(agentKind in BUILDERS)) {
+  console.error('Benchmark blocked: unknown agent ' + agentKind + '. Use deep, mcp or orchestrator.');
+  process.exit(2);
+}
 if (!['compact', 'library'].includes(arm)) {
   console.error('Benchmark blocked: unknown arm ' + arm + '. Use compact or library.');
   process.exit(2);
@@ -123,7 +138,7 @@ LLMProvider.createChatModel = (...createArgs) => {
 };
 
 const threadId = 'bench-turn-floor-' + process.pid;
-const agent = await DeepAgentFactory.create({ model, threadId, rootDir: repoRoot });
+const agent = await DeepAgentFactory[BUILDERS[agentKind]]({ model, threadId, rootDir: repoRoot });
 try {
   await agent.invoke(
     { messages: [{ role: 'user', content: 'What does the retrieval module do?' }] },
@@ -204,6 +219,7 @@ const report = {
   commit: code.commit,
   dirtyWorkingTree: code.dirty,
   model,
+  agent: agentKind,
   arm,
   counter: counter.identity,
   measured: { system: systemTokens, tools: toolTokens, total: measured, systemChars: system.length },
@@ -216,13 +232,13 @@ const stamp = code.commit + (code.dirty ? '-dirty' : '');
 const defaultOutput = path.join(
   repoRoot,
   'docs/benchmarks/results',
-  new Date().toISOString().slice(0, 10) + '-turn-floor-' + model + '-' + arm + '-' + stamp + '.json',
+  new Date().toISOString().slice(0, 10) + '-turn-floor-' + (agentKind === 'deep' ? '' : agentKind + '-') + model + '-' + arm + '-' + stamp + '.json',
 );
 const outputPath = path.resolve(valueAfter(args, '--output') ?? defaultOutput);
 fs.writeFileSync(outputPath, JSON.stringify(report, null, 2) + '\n');
 
 const pct = (share) => (share * 100).toFixed(1) + '%';
-console.log('turn floor - ' + model + ', arm ' + arm + ' (' + counter.identity.encoding + ')');
+console.log('turn floor - ' + agentKind + ', ' + model + ', arm ' + arm + ' (' + counter.identity.encoding + ')');
 console.log('  measured at the boundary  ' + measured + ' tokens  (system ' + systemTokens + ' + ' + tools.length + ' tools ' + toolTokens + ')');
 console.log('  what the budget guard sees ' + believed + ' tokens');
 console.log('  unseen by the guard        ' + (measured - believed) + ' tokens  (' + pct(report.unseen.shareOfFloor) + ' of the floor)');
