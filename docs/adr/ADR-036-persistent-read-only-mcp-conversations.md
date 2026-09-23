@@ -84,3 +84,30 @@ and does not spend a client's model budget.
 - `src/core/agent/deep-agent-factory.ts` — dedicated advisory graph and SQLite
   checkpoint.
 - `src/core/agent/agent-kernel.ts` — read-only search capability split.
+
+---
+
+## Amendment — 2026-09-23: the advisor was instructed as an orchestrator
+
+This record gives the MCP advisor a dedicated read-only checkpoint and a
+read-only profile. Its prompt was not read-only. `buildSystemPrompt` had no
+`mcp` branch, so the advisor received the orchestrator's prompt — a role that
+delegates to a researcher, a coder and a verifier through `delegate` and plans
+with `write_todos`, none of which the advisor holds. The profile's own
+`rolePrompt`, "Answer the user with cited repository evidence", never reached
+the model.
+
+The advisor now has its own branch: the shared base block and a read-only
+advisor section. The orchestration policy block is left out, because every line
+of it — role models, delegation depth, the single writer, automatic safe edits,
+subagent handoffs — is about delegating or writing, and this advisor does
+neither. The tools it is told about are derived from
+`createMcpAdvisorRoleProfile` when the prompt is built. It carries no todo list,
+since it never plans.
+
+Measured with `npm run bench:floor -- --agent mcp`: 2,606 tokens per turn,
+exactly its seven tools. It had not been measured before, so there is no
+earlier figure to compare it with.
+
+The case is held by `prompt-tool-contract.spec.ts`; see ADR-013's amendment of
+the same date for how it was found.

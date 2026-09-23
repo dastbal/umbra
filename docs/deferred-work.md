@@ -2305,6 +2305,22 @@ a known under-count with an over-count that looks authoritative.
 3. Run `npm run bench:floor` per provider and require `unseen` within a stated
    tolerance before calling it closed; commit the reports.
 
+
+> **Amendment — 2026-09-23, after the LangChain upgrade.** The numbers above are
+> deepagents 1.10.2. On 1.14 the deep agent's floor is 3,827 and the guard sees
+> 3,299 of it: **528 unseen, 13.8%**. The orchestrator is at 12.4% and the MCP
+> advisor at 0.8%. The gap shrank for a reason unrelated to closing it: 1.14
+> concatenates less into the system prompt.
+>
+> What is left is almost exactly the todo list — the compact `write_todos` and
+> its system block — and that changes the plan. Umbra now installs
+> `todoListMiddleware` itself in `DeepAgentFactory`, so it knows that cost at
+> construction. Adding the tool and its prompt block to what
+> `recordSessionOverhead` records closes most of the remaining gap without the
+> pre-exclusion problem above, which only ever applied to tools deepagents adds.
+> The exclusion-list route stays the fix for whatever deepagents contributes
+> next.
+
 ---
 
 ## A CLI ignore pattern replaces the config's, and the suite runs twice
@@ -2338,3 +2354,42 @@ defects are fixed by the same edit.
    dedicated config for unit runs — so no script has to restate the ignores.
 2. Assert the suite count in CI, so a doubling is a failure rather than a
    surprise.
+
+---
+
+## `request.systemPrompt` is deprecated, and two middlewares still write it
+
+> Deferred 2026-09-23. Found while verifying the LangChain upgrade.
+
+### The idea
+
+Move the two Umbra middlewares that read or write the system prompt from
+`request.systemPrompt` to `request.systemMessage`.
+
+### What is actually missing
+
+`subagent-budget.middleware.ts` appends its exhausted-budget instruction by
+setting `request.systemPrompt`, and `iteration-budget.middleware.ts` reads it
+to count the prompt. The field is `@deprecated` in langchain. It works today:
+`AgentNode` in langchain 1.5.12 detects a changed `systemPrompt` and builds a
+new `SystemMessage` from it, so the instruction still reaches the model —
+verified in the installed source.
+
+The day the field is removed, the instruction stops reaching the model with no
+error, because setting an unknown property on a request object is silent. That
+is the same shape as every defect this upgrade surfaced: correct types, wrong
+runtime.
+
+### The mechanism to reuse
+
+`request.systemMessage` is the field `AgentNode` treats as authoritative, and
+langchain 1.5.12 already refuses a request that changes both — so the migration
+must replace the `systemPrompt` write, never add a `systemMessage` one beside
+it.
+
+### Plan
+
+1. Rewrite both middlewares against `systemMessage`.
+2. Add a real-`createAgent` spec, in the style of
+   `compact-todo-tool.middleware.spec.ts`, asserting the exhausted instruction
+   is in what the model is bound with — which no current test checks.

@@ -472,3 +472,50 @@ achieve without it; adding it would add cost for a benefit no measurement
 supports. `UNBUDGETED_TOOLS` in `subagent-budget.middleware.ts` still exempts
 `write_todos` from the attempt count — correct should a delegate ever receive it,
 and unreachable until one does.
+
+---
+
+## Amendment — 2026-09-23 (second): a builtin nobody declared, and a prompt nobody checked
+
+Two more cases of the defect this record exists to prevent, both surfaced by
+upgrading deepagents to 1.14 and measuring the real agent.
+
+### `delete` reached every provider
+
+deepagents 1.14 contributes a `delete` tool — "Permanently removes the file or
+directory... recursively... This cannot be undone" — and it was not in
+`REPLACED_BUILTIN_TOOLS` in `src/core/agent/deep-agent-factory.ts`, so the
+harness profiles of all three providers let it through.
+
+Umbra passes no `backend`, so deepagents' default `StateBackend` applies and the
+tool removes only a virtual file. That is its own defect: the model is told a
+real file is gone when it is not. `SafeFilesystemBackend` extends the real
+`FilesystemBackend` and is used only inside Umbra's own tools; were it ever
+passed as the agent's `backend`, `delete` would remove directories recursively
+without passing through `AgentSecurityPolicy`. It is now excluded alongside the
+other builtins Umbra replaces — `delete_file` is the guarded replacement.
+
+No type check and no unit test saw it: every test that builds a deep agent
+mocks `deepagents`. It surfaced as a tool name in `npm run bench:floor`.
+
+### The MCP advisor's prompt was the orchestrator's
+
+`DeepAgentFactory#buildSystemPrompt` had branches for `simple` and `analysis`,
+and everything else fell through to the orchestrator's prompt — `mcp`
+included. The read-only advisor behind the published `continue_conversation`
+tool resolves seven read tools and has nothing to delegate to, and on every
+conversation turn it was told that it coordinates a researcher, a coder and a
+verifier through `delegate` and plans with `write_todos`.
+
+`prompt-tool-contract.spec.ts` now covers the `mcp` prompt against the tools
+`createMcpAdvisorRoleProfile` resolves. It was run first and failed for the
+right reasons — it named `refresh_project_index`, `run_integrity_check` and
+`write_todos`, and called itself ORCHESTRATOR. A second assertion checks the
+delegation instruction directly, because `delegate` lives in
+`src/core/agent/delegation/` and is not in the vocabulary the first check
+recognises; without it the advisor could still read "delegate to the coder"
+and pass.
+
+The prompt's own tool list is derived from the advisor's profile when the
+prompt is built, so it cannot drift from what the advisor holds. The decision
+itself is recorded in ADR-036.

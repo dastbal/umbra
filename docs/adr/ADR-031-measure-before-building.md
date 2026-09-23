@@ -808,3 +808,74 @@ wrong in the other direction would be worse than one known to be low.
   leave only the second list, which is the claim the description makes.
 - Full unit suite 1,068 passed. The one failure is `retrieval-gate.spec.ts`,
   which predates this change and touches none of its modules.
+
+---
+
+## Amendment — 2026-09-23 (second) · The upgrade moved the floor, and made the native option possible
+
+The first amendment of this date compacted `write_todos` by setting the
+description on the tool deepagents registered, because deepagents 1.10.2
+installed `todoListMiddleware()` on every deep agent with no options and the
+two simpler routes did not survive it. Part of that is no longer true, and it
+is corrected here rather than removed.
+
+### What deepagents 1.14 changed
+
+The LangChain family was upgraded the same day (deepagents 1.10.2 → 1.14.0,
+langchain 1.4.4 → 1.5.12, `@langchain/core` 1.1.48 → 1.2.12). In 1.14,
+`todoListMiddleware()` is no longer part of the default stack: it is
+`extraMiddleware` on a few built-in harness profiles. Measured with
+`npm run bench:floor` on the same configuration, the deep agent on 1.14
+carried no `write_todos` at all — while its prompt still planned with it.
+
+It also shrank what deepagents concatenates into the system prompt: 3,904
+tokens on 1.10.2, 2,851 on 1.14.
+
+### What changed in Umbra
+
+`DeepAgentFactory` installs `todoListMiddleware({ toolDescription:
+COMPACT_WRITE_TODOS_DESCRIPTION })` itself, in the two agents whose prompts plan
+with the tool — deep and the orchestrator. With no library default left to
+replace, the native option is the whole mechanism, and the middleware that set
+the description in place is removed. `COMPACT_WRITE_TODOS_DESCRIPTION` stays in
+`src/core/agent/compact-todo-tool.middleware.ts`, whose TSDoc keeps the history
+of the two refused routes.
+
+The analysis agent, whose prompt forbids the tool, and the MCP advisor, which
+never plans, now carry no todo list at all rather than a compacted one.
+
+### The floor, decomposed
+
+The control arm is what lets the two causes be separated:
+
+| Deep agent | Tokens per turn |
+|---|---|
+| deepagents 1.10.2, library description (morning of 2026-09-23) | 7,239 |
+| deepagents 1.14, library description | 6,186 — **the upgrade alone: −1,053** |
+| deepagents 1.14, compact description | 3,827 — **the compaction: −2,359** |
+
+The compaction saves exactly 2,359 tokens on both library versions, so its
+effect is independent of the upgrade.
+
+`bench:floor` now takes `--agent`. The other two root agents, measured for the
+first time:
+
+| Agent | Floor | Tools | Unseen by the guard |
+|---|---|---|---|
+| deep | 3,827 | 12 | 528 (13.8%) |
+| MCP advisor | 2,606 | 7 | 22 (0.8%) |
+| orchestrator | 4,519 | 11 | 560 (12.4%) |
+
+The blind spot recorded in the first amendment is smaller than it was, for a
+reason unrelated to fixing it: deepagents 1.14 concatenates less. What remains
+on the deep agent and the orchestrator is the todo list Umbra now installs,
+which `recordSessionOverhead` still cannot see. The deferred entry is updated.
+
+### Verification evidence
+
+Reports under `docs/benchmarks/results/`, all stamped `9cf7ff7` with a clean
+tree: the deep agent in both arms, the MCP advisor and the orchestrator.
+`compact-todo-tool.middleware.spec.ts` drives a real `createAgent` with
+`todoListMiddleware({ toolDescription })` as the factory installs it: the model
+is bound with the compact description, other tools are untouched, and two
+writes leave only the second list.

@@ -1132,3 +1132,23 @@ Declaring the truth costs one approval prompt for a metadata listing. **The
 server's read-only nature is unchanged** — no tool writes to the consumer's
 source, and none became writable. What changed is that the published metadata now
 matches what the tool does.
+
+---
+
+## Amendment — 2026-09-23: the SDK pin was considered and held
+
+When the LangChain family was upgraded, `@modelcontextprotocol/sdk` had a patch
+release available: 1.30.0 → 1.30.1. It was **not** taken.
+
+This record made the SDK a pinned production dependency after amendment 6
+verified that it loads from CommonJS through its dual `exports` map —
+amendment 1 had rejected it on the opposite belief. A version change can alter
+exactly that layout, and `src/core/config/mcp-config.spec.ts` fails on any pin
+other than 1.30.0 so that a bump is always a decision rather than a side effect.
+The trial upgrade tripped that guard, which is what it is for.
+
+Nothing in 1.30.1 was needed. An exact pin that a test guards and a record
+explains is a decision that needs a reason to reopen, and "a newer version
+exists" is not one. When there is a reason, the check to repeat is amendment
+6's: `node -e "require('@modelcontextprotocol/sdk/server/mcp.js')"` from the
+compiled output, then the handshake timing.
