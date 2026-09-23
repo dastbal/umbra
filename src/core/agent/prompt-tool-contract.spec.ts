@@ -33,7 +33,8 @@ const DEEPAGENTS_TOOL_NAMES = [
 const VOCABULARY = [...new Set([...OWN_TOOL_NAMES, ...DEEPAGENTS_TOOL_NAMES])];
 
 /**
- * What `DeepAgentFactory.create()` declares, plus deepagents' own `write_todos`.
+ * What `DeepAgentFactory.create()` declares, plus the `write_todos` it installs
+ * itself — deepagents stopped installing the todo list by default in 1.14.
  *
  * Membership is stated here; the names come from the tool objects. If a tool is
  * added to `create()` and not added here, this test reports a name the prompt
@@ -266,7 +267,7 @@ describe('the orchestrator prompt only names tools its profile grants', () => {
     createSupervisorRoleProfile(): { capabilities: readonly AgentCapability[] };
   };
 
-  /** Tool names the Supervisor's own capabilities resolve to, plus the harness todo list. */
+  /** Tool names the Supervisor's own capabilities resolve to, plus the todo list the factory installs. */
   const supervisorDeclares = (): string[] => [
     ...resolveCapabilityTools(internals.createSupervisorRoleProfile().capabilities, {
       delegateTool: { name: 'delegate' } as never,

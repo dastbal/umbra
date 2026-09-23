@@ -37,7 +37,8 @@ import { writeLine } from '../observability/console-sink';
 import { OllamaChatAdapter, resolveOllamaBaseUrl } from '../llm/ollama-adapter';
 import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
-import { createCompactTodoToolMiddleware } from './compact-todo-tool.middleware';
+import { todoListMiddleware } from 'langchain';
+import { COMPACT_WRITE_TODOS_DESCRIPTION } from './compact-todo-tool.middleware';
 import { buildSubagentGraphs } from './delegation/subagent-registry';
 import { createDelegateTool } from './delegation/delegate.tool';
 import { buildReadbackGraphs } from './delegation/readback';
@@ -259,7 +260,12 @@ export class DeepAgentFactory {
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      middleware: [createCompactTodoToolMiddleware(), createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+      middleware: [
+        // deepagents 1.14 stopped installing the todo list by default; this
+        // prompt plans with it, so Umbra installs it — natively, with the
+        // compact description, since there is no default left to replace.
+        todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION }),
+        createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
         model,
@@ -311,10 +317,6 @@ export class DeepAgentFactory {
       systemPrompt,
       responseFormat: groundedAnalysisSchema as any, // ADR-002: dual Zod package boundary
       checkpointer: checkpointer as any, // ADR-002
-      // This prompt forbids write_todos and passes no tools, yet deepagents still
-      // installs its todo middleware. Compacting the description is the part of
-      // that cost this mode can shed without editing the library's system block.
-      middleware: [createCompactTodoToolMiddleware()],
       // Analysis is intentionally manifest-only: small models otherwise keep
       // rereading files already represented in the bounded evidence, consuming
       // turns and polluting the one-shot context. Regular deep/orchestrator
@@ -360,7 +362,7 @@ export class DeepAgentFactory {
       model: DeepAgentFactory.resolveRuntimeModel(model) as any,
       systemPrompt,
       checkpointer: DeepAgentFactory.buildCheckpointer(rootDir, 'mcp') as any,
-      middleware: [createCompactTodoToolMiddleware(), createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+      middleware: [createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
         model,
@@ -470,7 +472,7 @@ export class DeepAgentFactory {
       // orchestrated one out — the same omission ADR-008 made, which is how a
       // greeting came to cost /usr/bin/bash.0729.
       middleware: [
-        createCompactTodoToolMiddleware(),
+        todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION }),
         createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
           limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
           costOf: DeepAgentFactory.buildCostResolver(model),

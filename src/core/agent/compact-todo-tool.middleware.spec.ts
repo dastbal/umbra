@@ -6,20 +6,17 @@ import {
   todoListMiddleware,
   tool,
 } from 'langchain';
-import {
-  COMPACT_WRITE_TODOS_DESCRIPTION,
-  createCompactTodoToolMiddleware,
-} from './compact-todo-tool.middleware';
+import { COMPACT_WRITE_TODOS_DESCRIPTION } from './compact-todo-tool.middleware';
 
 /**
  * These drive a real `createAgent`, not a mock.
  *
- * The first version of this middleware cloned the tool, passed `tsc`, and was
- * refused by `AgentNode` at the first model call. Every unit test in this
- * repository mocks `deepagents`, so none of them could have seen it. LangChain
- * itself is not mocked here, so its execution-identity check runs for real.
+ * Every unit test that builds a deep agent mocks `deepagents`, so none of them
+ * sees what the model is actually bound with. LangChain itself is not mocked
+ * here: the todo middleware is the one `DeepAgentFactory` installs, configured
+ * the way it configures it, and `AgentNode` runs its checks for real.
  */
-describe('createCompactTodoToolMiddleware', () => {
+describe('todoListMiddleware as DeepAgentFactory installs it', () => {
   /** Descriptions the model was actually bound with, by tool name. */
   let bound: Map<string, string>;
 
@@ -42,6 +39,9 @@ describe('createCompactTodoToolMiddleware', () => {
     schema: z.object({}),
   });
 
+  /** The configuration the factory uses for the deep agent and the orchestrator. */
+  const installed = () => todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION });
+
   /** Builds and runs one turn of a real agent with the given middleware. */
   async function runTurn(middleware: unknown[]): Promise<void> {
     const agent = createAgent({
@@ -52,33 +52,51 @@ describe('createCompactTodoToolMiddleware', () => {
     await agent.invoke({ messages: [{ role: 'user', content: 'plan the work' }] } as never);
   }
 
-  it('is accepted by the real AgentNode, which rejects a replaced tool', async () => {
-    await expect(runTurn([todoListMiddleware(), createCompactTodoToolMiddleware()])).resolves.toBeUndefined();
-  });
-
   it('binds the model with the compact description', async () => {
-    await runTurn([todoListMiddleware(), createCompactTodoToolMiddleware()]);
+    await runTurn([installed()]);
 
     expect(bound.get('write_todos')).toBe(COMPACT_WRITE_TODOS_DESCRIPTION);
   });
 
   it('leaves every other tool exactly as it was declared', async () => {
-    await runTurn([todoListMiddleware(), createCompactTodoToolMiddleware()]);
+    await runTurn([installed()]);
 
     expect(bound.get('echo')).toBe(echo.description);
   });
 
-  it('passes a request that carries no write_todos straight through', async () => {
-    await runTurn([createCompactTodoToolMiddleware()]);
+  // The description tells the model to send every item because each call
+  // replaces the list. That is only honest if the installed tool behaves that
+  // way, so this writes twice through a real agent and reads what survived.
+  it('describes a tool whose list really is replaced, not merged', async () => {
+    const first = [
+      { content: 'read the module', status: 'completed' },
+      { content: 'write the spec', status: 'in_progress' },
+    ];
+    const second = [{ content: 'write the spec', status: 'completed' }];
 
-    expect(bound.has('write_todos')).toBe(false);
-    expect(bound.get('echo')).toBe(echo.description);
+    const agent = createAgent({
+      model: new FakeToolCallingModel({
+        toolCalls: [
+          [{ name: 'write_todos', args: { todos: first }, id: 'call-1' }],
+          [{ name: 'write_todos', args: { todos: second }, id: 'call-2' }],
+          [],
+        ],
+      }) as never,
+      tools: [] as never,
+      middleware: [installed()] as never,
+    });
+
+    const state = await agent.invoke({ messages: [{ role: 'user', content: 'plan the work' }] } as never) as { todos?: unknown };
+
+    expect(state.todos).toEqual(second);
   });
 
-  // This pins the library rule the module is designed around. If a future
-  // LangChain relaxes it, this test fails and says the constraint moved — which
-  // is when cloning, the cleaner mechanism, becomes available again.
-  it('documents why it does not clone: the library refuses a replaced tool', async () => {
+  // Pins the library rule that made the previous design necessary: a tool in
+  // `wrapModelCall` may be filtered but not replaced by another object of the
+  // same name. The native option makes it moot here, but it still binds anyone
+  // who reaches for a description-rewriting middleware — and if a future
+  // LangChain relaxes it, this fails and says the constraint moved.
+  it('documents why descriptions are set at construction: the library refuses a replaced tool', async () => {
     const cloning = createMiddleware({
       name: 'CloningTodoTool',
       wrapModelCall: async (request, handler) => handler({
@@ -113,32 +131,5 @@ describe('COMPACT_WRITE_TODOS_DESCRIPTION', () => {
   // growing it back past this is a decision to make on purpose.
   it('stays a fraction of the library default', () => {
     expect(COMPACT_WRITE_TODOS_DESCRIPTION.length).toBeLessThan(1_500);
-  });
-
-  // The description tells the model to send every item because each call
-  // replaces the list. That is only honest if the installed tool behaves that
-  // way, so this writes twice through a real agent and reads what survived.
-  it('describes a tool whose list really is replaced, not merged', async () => {
-    const first = [
-      { content: 'read the module', status: 'completed' },
-      { content: 'write the spec', status: 'in_progress' },
-    ];
-    const second = [{ content: 'write the spec', status: 'completed' }];
-
-    const agent = createAgent({
-      model: new FakeToolCallingModel({
-        toolCalls: [
-          [{ name: 'write_todos', args: { todos: first }, id: 'call-1' }],
-          [{ name: 'write_todos', args: { todos: second }, id: 'call-2' }],
-          [],
-        ],
-      }) as never,
-      tools: [] as never,
-      middleware: [todoListMiddleware(), createCompactTodoToolMiddleware()] as never,
-    });
-
-    const state = await agent.invoke({ messages: [{ role: 'user', content: 'plan the work' }] } as never) as { todos?: unknown };
-
-    expect(state.todos).toEqual(second);
   });
 });
