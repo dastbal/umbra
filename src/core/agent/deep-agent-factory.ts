@@ -39,6 +39,7 @@ import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
 import { todoListMiddleware } from 'langchain';
 import { COMPACT_WRITE_TODOS_DESCRIPTION } from './compact-todo-tool.middleware';
+import { createContextEditingMiddleware } from './context-editing';
 import { buildSubagentGraphs } from './delegation/subagent-registry';
 import { createDelegateTool } from './delegation/delegate.tool';
 import { buildReadbackGraphs } from './delegation/readback';
@@ -265,6 +266,7 @@ export class DeepAgentFactory {
         // prompt plans with it, so Umbra installs it — natively, with the
         // compact description, since there is no default left to replace.
         todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION }),
+        createContextEditingMiddleware(),
         createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
@@ -354,7 +356,7 @@ export class DeepAgentFactory {
       model: DeepAgentFactory.resolveRuntimeModel(model) as any,
       systemPrompt,
       checkpointer: DeepAgentFactory.buildCheckpointer(rootDir, 'mcp') as any,
-      middleware: [createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+      middleware: [createContextEditingMiddleware(), createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
         model,
@@ -465,6 +467,7 @@ export class DeepAgentFactory {
       // greeting came to cost /usr/bin/bash.0729.
       middleware: [
         todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION }),
+        createContextEditingMiddleware(),
         createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
           limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
           costOf: DeepAgentFactory.buildCostResolver(model),
