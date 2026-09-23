@@ -241,13 +241,6 @@ export class ChatSession {
   /** Whether deep mentor mode is active for this session. */
   private mentorModeActive = false;
   /**
-   * Message count at the time of the last proactive compression.
-   * Used as an anti-thrash guard: compression only fires again after
-   * at least MIN_MESSAGES_BETWEEN_COMPRESSIONS new messages have been added
-   * since the last compression (ADR-024).
-   */
-  private lastCompressedMessageCount = 0;
-  /**
    * The slash command registry for this session.
    *
    * Built once in the constructor and read by the dispatcher, the picker and
@@ -795,9 +788,9 @@ export class ChatSession {
       if (handleSmallTalk(trimmed)) continue;
 
       await this.sendMessage(trimmed);
-      // Phase 2: proactive compression — check token budget after each turn.
-      // Fires silently after the agent's response is fully streamed (ADR-024).
-      await this.checkAndCompressContext();
+      // No compression step follows the turn. Stale tool results are cleared
+      // inside the model call by the context-editing middleware (ADR-037); the
+      // summary this used to append grew the thread it was meant to shrink.
     }
   }
 
@@ -981,62 +974,6 @@ export class ChatSession {
     // and a session that ended on an error is exactly the one worth reading.
     await flushPendingTraces();
     process.exit(0);
-  }
-
-  // ── Private: Auto-Compression ──────────────────────────────────────────────
-
-  /**
-   * Proactively checks the context token budget after each turn and silently
-   * compresses conversation history if the budget is exceeded (ADR-024).
-   *
-   * ## How it works
-   * 1. Reads the current LangGraph state via `getState()` (ADR-021 try/catch).
-   * 2. Calls `ContextCompressor.isOverBudget()` (chars / 4 heuristic, 80k default).
-   * 3. If over budget AND enough new messages since last compression:
-   *    → compresses history and injects a silent `[CONTEXT HANDOFF]` message.
-   *
-   * ## Anti-thrash guard
-   * Tracks `lastCompressedMessageCount`. Compression only fires again after at
-   * least `MIN_MESSAGES_BETWEEN_COMPRESSIONS` new messages have been added,
-   * preventing repeated compression on every turn when hovering at the threshold.
-   *
-   * ## Graceful degradation
-   * If `getState()` is unavailable (deepagents version mismatch) or compression
-   * fails, the error is silently swallowed — the session must continue regardless.
-   */
-  private async checkAndCompressContext(): Promise<void> {
-    /** Minimum new messages since last compression before we compress again. */
-    const MIN_MESSAGES_BETWEEN_COMPRESSIONS = 10;
-
-    try {
-      const state = await this.agent.getState(this.graphConfig);
-      const messages: unknown[] = state?.values?.messages ?? [];
-
-      // Anti-thrash: skip if not enough new messages since last compression
-      const newMessagesSinceLastCompression = messages.length - this.lastCompressedMessageCount;
-      if (newMessagesSinceLastCompression < MIN_MESSAGES_BETWEEN_COMPRESSIONS) return;
-
-      if (!ContextCompressor.isOverBudget(messages)) return;
-
-      // Over budget — compress silently
-      const summarizerModel = resolveSummarizerModel();
-      const summary = await ContextCompressor.compress(messages, summarizerModel);
-
-      if (summary) {
-        this.lastCompressedMessageCount = messages.length;
-        // Inject the summary as a context handoff — no user-visible console output
-        await this.sendMessage(
-          `[CONTEXT HANDOFF — AUTO COMPRESSION]\n\n` +
-          `The conversation history has grown large and was silently compressed.\n` +
-          `The following is a technical summary of all work done so far:\n\n` +
-          `${summary}\n\n` +
-          `Acknowledge this context briefly, then wait for the next instruction.`,
-        );
-      }
-    } catch {
-      // ADR-021: getState() or compression may not be available in all contexts.
-      // Silently degrade — the session must continue regardless.
-    }
   }
 
   /**

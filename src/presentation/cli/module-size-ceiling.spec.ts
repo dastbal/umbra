@@ -25,7 +25,11 @@ const CEILINGS: ReadonlyArray<{ readonly file: string; readonly maxLines: number
   // Lowered from 1,418 when rendering a suspension moved to `hitl-prompt.ts`:
   // answering every pending interrupt instead of only the first would otherwise
   // have spent the ratchet's slack on the file it exists to hold down.
-  { file: 'src/presentation/cli/chat-session.ts', maxLines: 1355 },
+  //
+  // Lowered again, from 1,355, when `checkAndCompressContext` was removed:
+  // context editing clears stale tool results inside the model call (ADR-037),
+  // so the turn no longer ends with a summary appended to its own thread.
+  { file: 'src/presentation/cli/chat-session.ts', maxLines: 1292 },
 ];
 
 /** How far below its ceiling a file may sit before the ceiling must be lowered. */

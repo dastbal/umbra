@@ -136,10 +136,16 @@ export interface DeepAgentFactoryConfig {
   rootDir?: string;
 
   /**
-   * Enable context compression via SummarizationMiddleware.
-   * When true, old messages are automatically summarized when context fills up.
-   * Recommended for long-running tasks (refactors, multi-file implementations).
-   * @default true for orchestrator, false for simple deep agent
+   * Has no effect, and never had one.
+   *
+   * It was documented as enabling summarization for long tasks. The factory read
+   * it into a local that nothing used, so no value ever changed behaviour.
+   * Interactive agents now always clear stale tool results through
+   * `createContextEditingMiddleware` (ADR-037), which is the behaviour this flag
+   * promised. It is kept only because `DeepAgentFactoryConfig` is exported, and
+   * removing a field would break a consumer that still passes it.
+   *
+   * @deprecated No effect; context editing is always on for interactive agents.
    */
   enableContextCompression?: boolean;
 
@@ -397,7 +403,6 @@ export class DeepAgentFactory {
     const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
     const session = resolveSessionModel(agentConfig.models.supervisor, config.model);
     const model = session.model;
-    const enableCompression = config.enableContextCompression ?? true;
 
     // hasSubagents: this mode registers researcher/coder/verifier, so `task`
     // must reach the provider (ADR-013).
