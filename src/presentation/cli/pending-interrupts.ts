@@ -50,6 +50,71 @@ export function readPendingInterrupts(state: unknown): PendingInterrupt[] {
   return dedupeById([...fromTasks, ...fromState]);
 }
 
+/**
+ * One suspension and the value the operator gave for it.
+ */
+export interface AnsweredInterrupt {
+  /** The suspension's LangGraph id, when it carried one. */
+  id?: string;
+  /** The value to hand back to the tool waiting on that suspension. */
+  answer: unknown;
+}
+
+/**
+ * LangGraph's own test for a resume key: a 128-bit XXH3 digest in hex.
+ *
+ * Copied deliberately rather than imported — `isXXH3` is internal to
+ * `@langchain/langgraph` (`dist/hash.js`) and not part of its public surface.
+ * The consequence of getting it wrong is silent, so it is spelled out here
+ * instead of approximated as "a non-empty string".
+ */
+const RESUME_KEY = /^[0-9a-f]{32}$/;
+
+/**
+ * Decides whether a set of suspensions can be answered one by one.
+ *
+ * Asked *before* the operator is prompted, because a set that cannot be
+ * correlated must not be put in front of them: collecting three answers and
+ * then discarding two is worse than asking for one.
+ *
+ * @param ids - The ids of the suspensions awaiting an answer.
+ * @returns `true` when every suspension can carry its own answer.
+ */
+export function canCorrelateResume(ids: Array<string | undefined>): boolean {
+  return ids.length > 0 && ids.every((id) => typeof id === 'string' && RESUME_KEY.test(id));
+}
+
+/**
+ * Builds the value that resumes a suspended run, correlated where it can be.
+ *
+ * ## Why this is not simply an object
+ *
+ * `Command({ resume })` has two modes and the runtime picks between them
+ * silently. `mapCommand` uses the per-task mode **only** when the value is an
+ * object whose keys are *all* XXH3 digests; a single key that is not sends the
+ * whole value to `NULL_TASK_ID` instead — a broadcast, where one answer is
+ * written to every task waiting in that super-step.
+ *
+ * That difference is the whole point. Two writes gated in one assistant message
+ * suspend as two tasks, and under the broadcast one approval authorizes both —
+ * including the one the operator was never shown. So a set where every id is a
+ * real digest is correlated, and a set where any id is missing or malformed
+ * answers the first suspension alone rather than silently authorizing the rest.
+ *
+ * @param answered - Each pending suspension with the value that answers it.
+ * @returns The payload for `Command({ resume })`, or `undefined` when there is
+ * nothing to answer.
+ */
+export function buildResumePayload(answered: AnsweredInterrupt[]): unknown {
+  if (answered.length === 0) return undefined;
+  if (!canCorrelateResume(answered.map((entry) => entry.id))) return answered[0]!.answer;
+
+  const payload: Record<string, unknown> = {};
+  for (const entry of answered) payload[entry.id as string] = entry.answer;
+
+  return payload;
+}
+
 function readInterruptList(value: unknown): PendingInterrupt[] {
   if (!Array.isArray(value)) return [];
 

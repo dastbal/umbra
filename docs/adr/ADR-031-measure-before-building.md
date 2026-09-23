@@ -711,3 +711,194 @@ repository would repeat the mistake ADR-028 named, so it needs at least two.
   readiness race — come from audit sessions whose raw captures did not survive.
   They are prior observations, not reproducible measurements. The committed
   harness is what makes the next round reproducible.
+
+---
+
+## Amendment — 2026-09-23 · The floor, measured where it leaves the process
+
+Phase 2 is *counting the prompt before paying for it*. What it counted was the
+prompt Umbra builds, recorded at construction by `recordSessionOverhead` in
+`src/core/agent/session-overhead.ts`. What the provider receives is larger:
+deepagents concatenates its own prompt blocks after construction, and its todo
+middleware contributes a tool Umbra never declares. Nothing had measured the
+difference, because nothing measured at the boundary.
+
+### How it was measured, and why the model class could not be faked
+
+`scripts/bench-turn-floor.mjs` (`npm run bench:floor`) builds the real agent
+through `DeepAgentFactory#create` and replaces only the provider model's
+`_generate`, so what it records is by construction what would have been sent.
+The provider model is the real class on purpose: deepagents resolves an
+instance to a harness profile by class name (`getModelProvider`), so a fake
+model would have been measured under a different profile and reported a
+different catalog. The class is an input to the measurement.
+
+### What it found
+
+On the default configuration (`gemini-2.5-flash-lite`, `cl100k_base`), before
+this amendment's change:
+
+| | Tokens |
+|---|---|
+| Measured at the boundary | 7,239 (system 3,904 + 12 tools 3,335) |
+| What `sessionOverhead()` holds — the number `ContextCompressor` decides with | 3,307 |
+| **Unseen by the guard** | **3,932 — 54% of the floor** |
+
+One tool was most of it. `write_todos`, from `todoListMiddleware`, carried an
+11,389-character description — 2,650 tokens, more than the other eleven tools
+together four times over. 66% of it was `<example>` blocks; most of the rest
+restated rules the deep prompt already gives.
+
+### What changed
+
+`createCompactTodoToolMiddleware` in
+`src/core/agent/compact-todo-tool.middleware.ts` shows the model
+`COMPACT_WRITE_TODOS_DESCRIPTION`: every rule of the tool, none of the examples.
+It is installed first in all four root agents in `deep-agent-factory.ts` — deep,
+analysis, the MCP advisor, and the orchestrator. The MCP advisor behind
+`continue_conversation` is read-only and never plans, and the analysis prompt
+forbids the tool outright; both were paying for it on every turn.
+
+The tool was compacted rather than removed because it is load-bearing: the deep
+and orchestrator prompts plan with it and the CLI renders it.
+
+Two routes that look simpler did not survive the installed packages, and both
+are recorded in that module's TSDoc so they are not re-proposed:
+
+- `todoListMiddleware({ toolDescription })` needs deepagents' default instance
+  excluded, and that exclusion filters the *whole* middleware array by name —
+  a configured replacement is removed with the default, and a renamed one
+  produces two `write_todos` under the empty harness profile.
+- Cloning the tool in `wrapModelCall` passes `tsc` and is refused by `AgentNode`
+  at the first model call, "to preserve ToolNode execution identity". Every unit
+  test mocks `deepagents`, so none could have caught it; the bench did.
+
+### After
+
+`npm run bench:floor` on the same configuration: **4,880** tokens (system 3,904
++ 12 tools 976), `write_todos` at 291. **2,359 fewer tokens per turn, 32.6% of
+the floor**, with the tool, its name and its behaviour unchanged.
+
+### What is still not seen, and why it was not fixed here
+
+The guard still holds 3,307, so **1,573 tokens — 32.2% of the new floor — remain
+unseen**: deepagents' concatenated prompt blocks and the compact `write_todos`.
+This amendment reduces the blind spot by shrinking what it hid; it does not
+close it.
+
+Closing it has a constraint that makes a quick fix wrong. Every hook Umbra
+installs runs *before* deepagents' `_ToolExclusionMiddleware`, which is pushed
+last, so the tool list any Umbra hook can read is the pre-exclusion list — seven
+builtins larger than what is sent. Recording overhead from a hook would swap an
+under-count for an over-count. A correct fix needs the excluded tool names each
+harness profile registered, which Umbra owns but does not currently return. It
+is recorded in `docs/deferred-work.md`. A number that looks authoritative and is
+wrong in the other direction would be worse than one known to be low.
+
+### Verification evidence
+
+- `npm run bench:floor` — the before and after figures above; reports under
+  `docs/benchmarks/results/`.
+- `src/core/agent/compact-todo-tool.middleware.spec.ts` — 14 passed, against a
+  real `createAgent` rather than a mock: the real `AgentNode` accepts the
+  middleware; the model is bound with the compact description; other tools are
+  untouched; the cloning route is refused (pinning the constraint, so a future
+  LangChain that relaxes it fails this test and says so); each rule survives; the
+  description stays under 1,500 characters; and two writes through a real agent
+  leave only the second list, which is the claim the description makes.
+- Full unit suite 1,068 passed. The one failure is `retrieval-gate.spec.ts`,
+  which predates this change and touches none of its modules.
+
+---
+
+## Amendment — 2026-09-23 (second) · The upgrade moved the floor, and made the native option possible
+
+The first amendment of this date compacted `write_todos` by setting the
+description on the tool deepagents registered, because deepagents 1.10.2
+installed `todoListMiddleware()` on every deep agent with no options and the
+two simpler routes did not survive it. Part of that is no longer true, and it
+is corrected here rather than removed.
+
+### What deepagents 1.14 changed
+
+The LangChain family was upgraded the same day (deepagents 1.10.2 → 1.14.0,
+langchain 1.4.4 → 1.5.12, `@langchain/core` 1.1.48 → 1.2.12). In 1.14,
+`todoListMiddleware()` is no longer part of the default stack: it is
+`extraMiddleware` on a few built-in harness profiles. Measured with
+`npm run bench:floor` on the same configuration, the deep agent on 1.14
+carried no `write_todos` at all — while its prompt still planned with it.
+
+It also shrank what deepagents concatenates into the system prompt: 3,904
+tokens on 1.10.2, 2,851 on 1.14.
+
+### What changed in Umbra
+
+`DeepAgentFactory` installs `todoListMiddleware({ toolDescription:
+COMPACT_WRITE_TODOS_DESCRIPTION })` itself, in the two agents whose prompts plan
+with the tool — deep and the orchestrator. With no library default left to
+replace, the native option is the whole mechanism, and the middleware that set
+the description in place is removed. `COMPACT_WRITE_TODOS_DESCRIPTION` stays in
+`src/core/agent/compact-todo-tool.middleware.ts`, whose TSDoc keeps the history
+of the two refused routes.
+
+The analysis agent, whose prompt forbids the tool, and the MCP advisor, which
+never plans, now carry no todo list at all rather than a compacted one.
+
+### The floor, decomposed
+
+The control arm is what lets the two causes be separated:
+
+| Deep agent | Tokens per turn |
+|---|---|
+| deepagents 1.10.2, library description (morning of 2026-09-23) | 7,239 |
+| deepagents 1.14, library description | 6,186 — **the upgrade alone: −1,053** |
+| deepagents 1.14, compact description | 3,827 — **the compaction: −2,359** |
+
+The compaction saves exactly 2,359 tokens on both library versions, so its
+effect is independent of the upgrade.
+
+`bench:floor` now takes `--agent`. The other two root agents, measured for the
+first time:
+
+| Agent | Floor | Tools | Unseen by the guard |
+|---|---|---|---|
+| deep | 3,827 | 12 | 528 (13.8%) |
+| MCP advisor | 2,606 | 7 | 22 (0.8%) |
+| orchestrator | 4,519 | 11 | 560 (12.4%) |
+
+The blind spot recorded in the first amendment is smaller than it was, for a
+reason unrelated to fixing it: deepagents 1.14 concatenates less. What remains
+on the deep agent and the orchestrator is the todo list Umbra now installs,
+which `recordSessionOverhead` still cannot see. The deferred entry is updated.
+
+### Verification evidence
+
+Reports under `docs/benchmarks/results/`, all stamped `9cf7ff7` with a clean
+tree: the deep agent in both arms, the MCP advisor and the orchestrator.
+`compact-todo-tool.middleware.spec.ts` drives a real `createAgent` with
+`todoListMiddleware({ toolDescription })` as the factory installs it: the model
+is bound with the compact description, other tools are untouched, and two
+writes leave only the second list.
+
+---
+
+## Amendment — 2026-09-23 (third) · The guard phase 2 built is retired
+
+Phase 2 counted the prompt before the call so that
+`ContextCompressor.isOverBudget` could decide when `ChatSession` compressed,
+reading the overhead `recordSessionOverhead` recorded at construction. Both
+amendments of this date measured how much of the real request that guard could
+not see.
+
+It no longer exists. ADR-037 replaces the decision it made with
+`contextEditingMiddleware`, which counts the request it edits inside the model
+call — the assembled system prompt and the real messages, which is exactly what
+this record's blind-spot finding asked for. `isOverBudget` and `estimateTokens`
+were removed with `ChatSession#checkAndCompressContext`, their only caller.
+
+What remains of phase 2 is `recordSessionOverhead` and its registry, which no
+production code reads any more; `bench:floor` reports it as its "believed"
+figure. Retiring both is recorded in `docs/deferred-work.md`. Phase 2's other
+purpose — counting a request before paying for it, for routing and refusal —
+is not affected by this and still stands as this record describes it.
+

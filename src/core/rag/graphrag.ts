@@ -88,6 +88,8 @@ export interface GraphProjectionReadiness {
   readonly reason: string;
   /** Number of derived rows that need a fresh source scan. */
   readonly pendingFiles: number;
+  /** Bounded sample of the exact source paths that need a fresh scan. */
+  readonly affectedPaths: string[];
 }
 
 /** Both typed graph projections needed by the planner. */
@@ -192,6 +194,7 @@ export type GraphRagSearchResult =
       readonly clarification?: string;
       readonly recoveredWithContext: boolean;
       readonly ignoredModifiers: readonly string[];
+      readonly droppedTerms: readonly string[];
       readonly files: readonly GraphRagFileContext[];
       readonly provenance?: RetrievalProvenance;
       readonly strategy: GraphRagStrategy;
@@ -603,6 +606,7 @@ export class GraphRagService {
         ...(prepared.base.clarification === undefined ? {} : { clarification: prepared.base.clarification }),
         recoveredWithContext: prepared.base.recoveredWithContext,
         ignoredModifiers: prepared.base.ignoredModifiers,
+        droppedTerms: prepared.base.droppedTerms,
         files,
         ...(prepared.base.provenance === undefined ? {} : { provenance: prepared.base.provenance }),
         strategy,
@@ -668,20 +672,23 @@ export class GraphRagService {
       "SELECT COUNT(*) AS count FROM file_registry WHERE index_state = 'indexed'",
     ).get() as { count: number };
     if (indexed.count === 0) {
-      return { ready: false, reason: 'No indexed source files are available.', pendingFiles: 0 };
+      return { ready: false, reason: 'No indexed source files are available.', pendingFiles: 0, affectedPaths: [] };
     }
     const pending = this.db.prepare(`
-      SELECT COUNT(*) AS count
+      SELECT r.path AS path
         FROM file_registry r
         LEFT JOIN nest_scan s ON s.file_path = r.path
        WHERE r.index_state = 'indexed' AND (s.hash IS NULL OR s.hash <> r.hash)
-    `).get() as { count: number };
-    return pending.count === 0
-      ? { ready: true, reason: 'NestJS wiring covers the indexed source corpus.', pendingFiles: 0 }
+       ORDER BY r.path
+    `).all() as { path: string }[];
+    const affectedPaths = pending.slice(0, 20).map((row) => row.path);
+    return pending.length === 0
+      ? { ready: true, reason: 'NestJS wiring covers the indexed source corpus.', pendingFiles: 0, affectedPaths: [] }
       : {
           ready: false,
-          reason: `${pending.count} indexed source file(s) lack a current NestJS scan.`,
-          pendingFiles: pending.count,
+          reason: `${pending.length} indexed source file(s) lack a current NestJS scan: ${affectedPaths.join(', ')}.`,
+          pendingFiles: pending.length,
+          affectedPaths,
         };
   }
 
@@ -892,8 +899,18 @@ export class GraphRagService {
     const selected: GraphRagFileContext[] = [];
     let remainingChunks = budget.maxChunks;
     let remainingTokens = budget.maxEstimatedTokens;
+    // A branch marked accepted has passed source availability and traversal
+    // policy. Reserve one small slot before spending the whole answer on large
+    // hybrid seed files, otherwise GraphRAG can do real graph work yet show
+    // none of the accepted evidence to the caller.
+    const graphReserveChunks = candidates.length === 0 ? 0 : 1;
+    const graphReserveTokens = candidates.length === 0 ? 0 : Math.min(256, budget.maxEstimatedTokens);
     for (const seed of seeds) {
-      const bounded = this.fitFileWithinBudget(seed, remainingChunks, remainingTokens);
+      const bounded = this.fitFileWithinBudget(
+        seed,
+        Math.max(0, remainingChunks - graphReserveChunks),
+        Math.max(0, remainingTokens - graphReserveTokens),
+      );
       if (bounded === undefined) continue;
       selected.push(bounded);
       remainingChunks -= bounded.chunks.length;

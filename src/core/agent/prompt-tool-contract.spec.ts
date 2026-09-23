@@ -13,6 +13,7 @@ import { resolveCapabilityTools, type AgentCapability } from './agent-kernel';
 import { researcherSubAgent } from '../subagents/researcher.subagent';
 import { coderSubAgent } from '../subagents/coder.subagent';
 import { verifierSubAgent } from '../subagents/verifier.subagent';
+import { declaredToolNames } from './delegation/subagent-registry';
 
 /**
  * Every tool name the codebase knows about, read from the tool objects rather
@@ -32,7 +33,8 @@ const DEEPAGENTS_TOOL_NAMES = [
 const VOCABULARY = [...new Set([...OWN_TOOL_NAMES, ...DEEPAGENTS_TOOL_NAMES])];
 
 /**
- * What `DeepAgentFactory.create()` declares, plus deepagents' own `write_todos`.
+ * What `DeepAgentFactory.create()` declares, plus the `write_todos` it installs
+ * itself — deepagents stopped installing the todo list by default in 1.14.
  *
  * Membership is stated here; the names come from the tool objects. If a tool is
  * added to `create()` and not added here, this test reports a name the prompt
@@ -174,18 +176,40 @@ describe('the deep prompt only names tools the model can actually call', () => {
 describe('a subagent prompt only names tools that subagent declares', () => {
   const SUBAGENTS = [researcherSubAgent, coderSubAgent, verifierSubAgent];
 
+  /**
+   * A delegate's instructions as text.
+   *
+   * deepagents 1.14 widened `SubAgent.systemPrompt` to `string | SystemMessage`.
+   * Umbra builds a string today, but reading `.text` keeps the check honest if a
+   * profile ever supplies a structured message. An absent prompt is a failure,
+   * not an empty string: a delegate with no instructions names no tools, and the
+   * check would pass vacuously on exactly the case it should catch.
+   */
+  function promptText(subagent: (typeof SUBAGENTS)[number]): string {
+    const prompt = subagent.systemPrompt;
+    if (prompt === undefined) throw new Error(`${subagent.name} has no system prompt`);
+    return typeof prompt === 'string' ? prompt : prompt.text;
+  }
+
 
   it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
     'the %s prompt advertises nothing it cannot call',
     (_name, subagent) => {
-      const declared = [
-        ...(subagent.tools ?? []).map((tool) => (tool as { name: string }).name),
-        // deepagents contributes the todo list to every subagent.
-        'write_todos',
-      ];
-      const undeclared = toolsNamedIn(subagent.systemPrompt)
+      // What the compiled delegate actually holds — nothing added by assumption.
+      //
+      // This list used to append `write_todos` under the comment "deepagents
+      // contributes the todo list to every subagent". It does not: Umbra's
+      // delegates are compiled by `subagent-registry.ts#compile` with plain
+      // `createAgent`, which installs no todo middleware. So the test declared
+      // the one tool it should have been checking, passed, and the Coder and the
+      // Researcher were ordered — as step 1 of their protocol — to call a tool
+      // neither of them has. A contract test that assumes its answer protects
+      // nothing.
+      const declared = declaredToolNames(subagent);
+      const prompt = promptText(subagent);
+      const undeclared = toolsNamedIn(prompt)
         .filter((name) => !declared.includes(name))
-        .filter((name) => !forbiddenInPrompt(subagent.systemPrompt, name));
+        .filter((name) => !forbiddenInPrompt(prompt, name));
 
       expect(undeclared).toEqual([]);
     },
@@ -197,7 +221,7 @@ describe('a subagent prompt only names tools that subagent declares', () => {
       const declared = (subagent.tools ?? []).map((tool) => (tool as { name: string }).name);
 
       expect(declared).toContain('ask_delegator');
-      expect(subagent.systemPrompt).toContain('ask_delegator');
+      expect(promptText(subagent)).toContain('ask_delegator');
     },
   );
 
@@ -243,7 +267,7 @@ describe('the orchestrator prompt only names tools its profile grants', () => {
     createSupervisorRoleProfile(): { capabilities: readonly AgentCapability[] };
   };
 
-  /** Tool names the Supervisor's own capabilities resolve to, plus the harness todo list. */
+  /** Tool names the Supervisor's own capabilities resolve to, plus the todo list the factory installs. */
   const supervisorDeclares = (): string[] => [
     ...resolveCapabilityTools(internals.createSupervisorRoleProfile().capabilities, {
       delegateTool: { name: 'delegate' } as never,
@@ -272,5 +296,47 @@ describe('the orchestrator prompt only names tools its profile grants', () => {
   it('names enough tools that the check cannot pass vacuously', () => {
     expect(toolsNamedIn(internals.buildSystemPrompt('C:\\project', 'orchestrator')).length)
       .toBeGreaterThan(2);
+  });
+});
+
+/**
+ * The advisor behind the published `continue_conversation` tool.
+ *
+ * It resolves four read-only capabilities and has nothing to delegate to, yet
+ * `buildSystemPrompt` had no branch for it: `'mcp'` fell through to the
+ * orchestrator's prompt, which tells it that it coordinates a researcher, a
+ * coder and a verifier through `delegate` and plans with `write_todos`. No test
+ * covered this prompt, so a foreign client's advisor was instructed to call
+ * tools it does not hold on every conversation turn.
+ */
+describe('the MCP advisor prompt only names tools its profile grants', () => {
+  const internals = DeepAgentFactory as unknown as {
+    buildSystemPrompt(rootDir: string, type: 'mcp'): string;
+    createMcpAdvisorRoleProfile(): { capabilities: readonly AgentCapability[] };
+  };
+
+  const advisorDeclares = (): string[] =>
+    resolveCapabilityTools(internals.createMcpAdvisorRoleProfile().capabilities)
+      .map((one) => (one as { name: string }).name);
+
+  it('advertises nothing the advisor cannot call', () => {
+    const declared = advisorDeclares();
+    const prompt = internals.buildSystemPrompt('C:\project', 'mcp');
+    const undeclared = toolsNamedIn(prompt)
+      .filter((name) => !forbiddenInPrompt(prompt, name))
+      .filter((name) => !declared.includes(name));
+
+    expect(undeclared).toEqual([]);
+  });
+
+  it('is not told that it orchestrates subagents it does not have', () => {
+    const prompt = internals.buildSystemPrompt('C:\project', 'mcp');
+
+    expect(prompt).not.toContain('ROLE: ORCHESTRATOR');
+    expect(prompt).not.toMatch(/delegate`? with subagent/);
+  });
+
+  it('names enough tools that the check cannot pass vacuously', () => {
+    expect(toolsNamedIn(internals.buildSystemPrompt('C:\project', 'mcp')).length).toBeGreaterThan(0);
   });
 });

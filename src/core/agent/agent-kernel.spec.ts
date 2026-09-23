@@ -57,6 +57,13 @@ describe('AgentKernel', () => {
     expect(names).not.toContain('execute_command');
   });
 
+  it('keeps the MCP advisory search surface read-only', () => {
+    const names = resolveCapabilityTools(['search_codebase_readonly']).map((tool) => tool.name);
+
+    expect(names).toEqual(expect.arrayContaining(['ask_codebase', 'inspect_project', 'search_workspace']));
+    expect(names).not.toContain('refresh_project_index');
+  });
+
   it('builds an advisory subagent with kernel instructions and only declared tools', () => {
     const role = advisory();
     const subagent = buildSubagentFromProfile(role, context);

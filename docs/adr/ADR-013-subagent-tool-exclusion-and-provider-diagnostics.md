@@ -383,3 +383,139 @@ The rule this record established is unchanged and is what makes the new exclusio
 safe: the prompt names only tools the mode declares, and a contract test now
 fails if the orchestrator prompt orders a `task` call — which it immediately did
 for four route instructions.
+
+---
+
+## Amendment — 2026-09-21: the flush awaited a queue that was empty by construction
+
+This record states that flushing pending traces makes observability survive
+process exit, and its own Verification Evidence admits the property was never
+proven end to end. It was never proven because it did not hold.
+
+`flushPendingTraces` in `src/core/observability/trace-flush.ts` constructed
+`new Client()` and awaited *that instance's* `awaitPendingTraceBatches()`. A
+LangSmith client's pending-batch state is per instance — `_pendingDrains` is
+defined on `this` in `langsmith/dist/client.js` — while the tracer posts through
+the module singleton, `getDefaultLangChainClientSingleton()` in
+`@langchain/core/dist/tracers/tracer_langchain.js`. A freshly constructed client
+has an empty queue by definition, so the flush returned immediately while the
+real batch was still in flight, and the runs worth debugging were exactly the
+ones missing from the project.
+
+It now awaits `awaitAllCallbacks()` from `@langchain/core/callbacks/promises`,
+which settles both halves that matter: the background callback queue a tracer
+enqueues into (`queue.onIdle()`) and that singleton's pending batches. Everything
+else this record decided is kept — the `isTracingEnabled` gate, the 2 s bound,
+the catch that swallows a failed flush, and the rule that this path prints
+nothing.
+
+The visible consequence is real and intended: Ctrl+C can now genuinely wait up to
+the bound, because there is now something to wait for. This record's own ordering
+— the farewell is printed before the wait — already absorbs it.
+
+Note for a future reader: the comment near `DeepAgentFactory` claiming
+`deepagents` vendors its own copy of `@langchain/core` is false. There is exactly
+one `@langchain/core` in this tree, which is why this fix reaches the singleton
+the tracer uses. Had it been true, it would not.
+
+### Verification evidence
+
+`npx jest --runInBand src/core/observability/trace-flush.spec.ts` — 8 passed. The
+suite's mock target moved from the `langsmith` module to the callback barrier,
+which is the point: mocking the client was mocking the wrong object.
+
+---
+
+## Amendment — 2026-09-23: the delegate contract assumed the tool it should have checked
+
+This record's contract test stops a prompt naming a tool its model cannot call.
+For the deep prompt it worked. For the delegates it could not, because it
+supplied its own answer.
+
+The delegate block of `src/core/agent/prompt-tool-contract.spec.ts` built each
+delegate's declared set as its tools **plus `write_todos`**, under the comment
+*deepagents contributes the todo list to every subagent*. It does not. Umbra's
+delegates are compiled by `compile` in
+`src/core/agent/delegation/subagent-registry.ts` with plain `createAgent`, which
+installs no todo middleware. Compiled and listed, neither delegate holds the
+tool:
+
+- Coder — `safe_write_file, safe_read_file, list_files, run_tests,
+  run_integrity_check, list_adrs, ask_delegator`
+- Researcher — `ask_codebase, inspect_project, search_workspace,
+  refresh_project_index, safe_read_file, list_files, list_adrs, ask_delegator`
+
+Yet step 1 of the Coder's mandatory protocol was *Call write_todos with the
+complete implementation steps*, the Researcher's was *Call write_todos with your
+investigation steps*, and the Researcher's tool list advertised it. Both were
+told, as their first instruction, to call a tool they do not have. The test
+passed because it declared the tool it was meant to be checking.
+
+It also misled a review. An external audit of 2026-09-16, verified by two
+adversarial passes, planned around delegates that *had* `write_todos` — it read
+the prompts and believed them. A prompt is an assertion about a tool; the
+compiled agent is the fact.
+
+### What changed
+
+- The delegate test now reads `declaredToolNames` — the compiled delegate's
+  tools, nothing added by assumption. It was run first and failed for the Coder
+  and the Researcher, which is the reason it exists; the Verifier, whose prompt
+  never named the tool, passed.
+- `CODER_SYSTEM_PROMPT` and `RESEARCHER_SYSTEM_PROMPT` keep the discipline and
+  drop the tool: list the steps before writing, state the investigation before
+  calling anything, never count a step done without disk confirmation.
+
+The Coder and the Researcher were therefore **not** given `write_todos`. They
+have run without it since they were written, so whatever they achieve they
+achieve without it; adding it would add cost for a benefit no measurement
+supports. `UNBUDGETED_TOOLS` in `subagent-budget.middleware.ts` still exempts
+`write_todos` from the attempt count — correct should a delegate ever receive it,
+and unreachable until one does.
+
+---
+
+## Amendment — 2026-09-23 (second): a builtin nobody declared, and a prompt nobody checked
+
+Two more cases of the defect this record exists to prevent, both surfaced by
+upgrading deepagents to 1.14 and measuring the real agent.
+
+### `delete` reached every provider
+
+deepagents 1.14 contributes a `delete` tool — "Permanently removes the file or
+directory... recursively... This cannot be undone" — and it was not in
+`REPLACED_BUILTIN_TOOLS` in `src/core/agent/deep-agent-factory.ts`, so the
+harness profiles of all three providers let it through.
+
+Umbra passes no `backend`, so deepagents' default `StateBackend` applies and the
+tool removes only a virtual file. That is its own defect: the model is told a
+real file is gone when it is not. `SafeFilesystemBackend` extends the real
+`FilesystemBackend` and is used only inside Umbra's own tools; were it ever
+passed as the agent's `backend`, `delete` would remove directories recursively
+without passing through `AgentSecurityPolicy`. It is now excluded alongside the
+other builtins Umbra replaces — `delete_file` is the guarded replacement.
+
+No type check and no unit test saw it: every test that builds a deep agent
+mocks `deepagents`. It surfaced as a tool name in `npm run bench:floor`.
+
+### The MCP advisor's prompt was the orchestrator's
+
+`DeepAgentFactory#buildSystemPrompt` had branches for `simple` and `analysis`,
+and everything else fell through to the orchestrator's prompt — `mcp`
+included. The read-only advisor behind the published `continue_conversation`
+tool resolves seven read tools and has nothing to delegate to, and on every
+conversation turn it was told that it coordinates a researcher, a coder and a
+verifier through `delegate` and plans with `write_todos`.
+
+`prompt-tool-contract.spec.ts` now covers the `mcp` prompt against the tools
+`createMcpAdvisorRoleProfile` resolves. It was run first and failed for the
+right reasons — it named `refresh_project_index`, `run_integrity_check` and
+`write_todos`, and called itself ORCHESTRATOR. A second assertion checks the
+delegation instruction directly, because `delegate` lives in
+`src/core/agent/delegation/` and is not in the vocabulary the first check
+recognises; without it the advisor could still read "delegate to the coder"
+and pass.
+
+The prompt's own tool list is derived from the advisor's profile when the
+prompt is built, so it cannot drift from what the advisor holds. The decision
+itself is recorded in ADR-036.

@@ -27,6 +27,34 @@ describe('NestChunker module fallback', () => {
   });
 });
 
+describe('NestChunker class signatures', () => {
+  it('preserves the declaration semantics required to read a class context honestly', () => {
+    const result = new NestChunker().analyze(
+      'src/financing-port.ts',
+      [
+        "import { BaseError } from './base-error';",
+        "import { Source } from './source';",
+        '/** Port documentation belongs in metadata, not executable context. */',
+        'export abstract class FinancingPort<T extends Source> extends BaseError implements Iterable<T> {',
+        '  constructor(message: string) { super(message); }',
+        '  abstract load(): Promise<T>;',
+        '}',
+      ].join('\n'),
+      'fixture-hash',
+    );
+
+    const signature = result.chunks.find((chunk) => chunk.type === 'class_signature');
+
+    expect(signature?.content).toContain(
+      'export abstract class FinancingPort<T extends Source> extends BaseError implements Iterable<T> {',
+    );
+    expect(signature?.content).toContain('super(message);');
+    expect(signature?.content).not.toContain("import { BaseError } from './base-error';");
+    expect(signature?.content).not.toContain('Port documentation belongs in metadata');
+    expect(signature?.metadata.documentation).toContain('Port documentation belongs in metadata');
+  });
+});
+
 /**
  * `resolveModulePath` probes the real filesystem, so these need files that
  * exist. A temp root keeps them independent of this repository's own layout.

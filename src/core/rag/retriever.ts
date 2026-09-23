@@ -18,6 +18,7 @@ import {
 import {
   fuseRankings,
   hasGroundedEvidence,
+  preferExecutableEvidence,
   RetrievalEvidence,
 } from './hybrid-ranking';
 import { renderSkeletonForContext } from './skeleton-render';
@@ -84,6 +85,8 @@ export type RetrievalContextResult =
       readonly recoveredWithContext: boolean;
       /** Repeated manner modifiers omitted only from the absence gate. */
       readonly ignoredModifiers: readonly string[];
+      /** Unknown terms omitted from the absence gate because another subject is grounded. */
+      readonly droppedTerms: readonly string[];
       readonly files: readonly RetrievalFileContext[];
       readonly provenance?: RetrievalProvenance;
     }
@@ -281,7 +284,7 @@ export class RetrieverService {
     semantic.forEach((result) => byId.set(result.chunk.id, result));
     lexicalRows.forEach((result) => byId.set(result.chunk.id, result));
 
-    return fuseRankings(
+    const fused = fuseRankings(
       semantic.map((result) => ({ id: result.chunk.id, lexicalExact: false })),
       lexical.map((candidate) => {
         const result = byId.get(candidate.chunkId);
@@ -310,6 +313,11 @@ export class RetrieverService {
             },
           ];
     });
+    return preferExecutableEvidence(fused.map((candidate) => ({
+      ...candidate,
+      id: candidate.chunk.id,
+      type: candidate.chunk.type,
+    }))).map(({ id: _id, type: _type, ...candidate }) => candidate);
   }
 
   /**
@@ -597,6 +605,7 @@ export class RetrieverService {
     const taught = this.retrievalMemory.knownTerms();
     const initialAssessment = assessUnknownTerms(this.db, this.retrievalMemory.expand(query), taught);
     let ignoredModifiers = initialAssessment.ignoredModifiers;
+    let droppedTerms = initialAssessment.droppedTerms;
     if (initialAssessment.strict.length > 0) {
       const clarification = context?.trim();
       // Unlike the ungrounded path below, a clarification is checked rather
@@ -611,6 +620,7 @@ export class RetrieverService {
               taught,
             );
       ignoredModifiers = clarifiedAssessment.ignoredModifiers;
+      droppedTerms = clarifiedAssessment.droppedTerms;
 
       if (clarifiedAssessment.strict.length > 0) {
         return {
@@ -687,6 +697,7 @@ export class RetrieverService {
       ...(clarified === undefined ? {} : { clarification: clarified }),
       recoveredWithContext,
       ignoredModifiers,
+      droppedTerms,
       files: [...filesMap.values()],
       ...(this.lastProvenance === undefined ? {} : { provenance: this.lastProvenance }),
     };

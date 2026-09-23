@@ -43,3 +43,43 @@ Only an interrupted named session loses its persisted conversation history.
 Operators receive an explicit warning and can continue immediately with a
 valid empty session. A future implementation may add a safe checkpoint rollback
 when LangGraph exposes that operation.
+
+---
+
+## Amendment — 2026-09-21: the reset left behind exactly the rows it existed to remove
+
+This record decided that a named session interrupted after a tool result is
+recovered rather than left in an unusable checkpoint, and noted that a safe
+partial rollback would be reconsidered when LangGraph exposed the operation. Two
+things are now true that were not.
+
+**The operation exists.** `SqliteSaver#deleteThread` ships in the installed
+`@langchain/langgraph-checkpoint-sqlite` and removes a thread from both tables in
+one transaction. The comment in `DeepAgentFactory#clearCorruptedCheckpoint`
+saying the saver exposed no delete API was false against the installed version.
+
+**The reset never worked.** That method opened its own `better-sqlite3` handle
+and deleted from `checkpoint_writes`, `checkpoints` and `checkpoint_blobs`. The
+saver's schema is exactly two tables — `checkpoints` and `writes`. Two of the
+three statements therefore threw into an empty `catch`, and the `writes` rows
+survived every reset. Those rows are the pending writes of an interrupted tool
+call: the precise state this record exists to clear. It also opened a second
+handle on a WAL file the live saver holds, and leaked it on any throw before
+`db.close()`.
+
+`clearCorruptedCheckpoint` is now `async` and delegates to `deleteThread`, after
+a `getTuple` probe that does two jobs: `deleteThread` is the one method on this
+saver that does not call `setup()` first, and the tuple supplies the *cleared*
+boolean that `changes > 0` used to produce. The handle closes in a `finally`.
+Three call sites in `src/bin/cli.ts` — two of them synchronous — now await it.
+
+Still open, and recorded rather than fixed: the `'simple' | 'orchestrator'`
+parameter cannot reach the `analysis` database that
+`DeepAgentFactory#buildCheckpointer` also creates.
+
+### Verification evidence
+
+`npx jest --runInBand src/core/agent/checkpoint-clear.spec.ts` — 4 passed. The
+first seeds a real checkpoint *and* a real pending write, then asserts both
+tables reach zero; it fails against the previous implementation, which left the
+`writes` row in place.

@@ -1,19 +1,19 @@
-import { Client } from 'langsmith';
+import { awaitAllCallbacks } from '@langchain/core/callbacks/promises';
 import {
   flushPendingTraces,
   isTracingEnabled,
   suppressLangSmithTransportLogs,
 } from './trace-flush';
 
-const awaitPendingTraceBatches = jest.fn();
-
-jest.mock('langsmith', () => ({
-  Client: jest.fn().mockImplementation(() => ({
-    awaitPendingTraceBatches: (...args: unknown[]) => awaitPendingTraceBatches(...args),
-  })),
+// The mock target is the callback barrier, not the LangSmith client. Waiting on
+// a freshly constructed `Client` was the defect: its queue is per instance and
+// the tracer posts through the module singleton, so the old flush awaited an
+// empty queue and returned while the batch was still in flight.
+jest.mock('@langchain/core/callbacks/promises', () => ({
+  awaitAllCallbacks: jest.fn(),
 }));
 
-const MockedClient = Client as unknown as jest.Mock;
+const mockAwaitAllCallbacks = awaitAllCallbacks as jest.MockedFunction<typeof awaitAllCallbacks>;
 
 describe('trace flushing on exit', () => {
   const saved = { ...process.env };
@@ -24,7 +24,7 @@ describe('trace flushing on exit', () => {
     delete process.env.LANGSMITH_API_KEY;
     process.env.LANGCHAIN_TRACING_V2 = 'true';
     process.env.LANGCHAIN_API_KEY = 'ls-test-key';
-    awaitPendingTraceBatches.mockResolvedValue(undefined);
+    mockAwaitAllCallbacks.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -52,34 +52,32 @@ describe('trace flushing on exit', () => {
     });
   });
 
-  it('waits for the pending batches when tracing is on', async () => {
+  it('waits on the queue the tracer actually posts through', async () => {
     await flushPendingTraces();
-    expect(MockedClient).toHaveBeenCalledTimes(1);
-    expect(awaitPendingTraceBatches).toHaveBeenCalledTimes(1);
+    expect(mockAwaitAllCallbacks).toHaveBeenCalledTimes(1);
   });
 
   it('does nothing at all when tracing is off', async () => {
     process.env.LANGCHAIN_TRACING_V2 = 'false';
     await flushPendingTraces();
-    expect(MockedClient).not.toHaveBeenCalled();
-    expect(awaitPendingTraceBatches).not.toHaveBeenCalled();
+    expect(mockAwaitAllCallbacks).not.toHaveBeenCalled();
   });
 
   it('gives up at the timeout instead of holding the terminal', async () => {
     // A hung observability backend must never stop the process from exiting.
-    awaitPendingTraceBatches.mockImplementation(() => new Promise(() => undefined));
+    mockAwaitAllCallbacks.mockImplementation(() => new Promise(() => undefined));
     const started = Date.now();
     await flushPendingTraces(30);
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it('swallows a failing flush so the exit path is unchanged', async () => {
-    awaitPendingTraceBatches.mockRejectedValue(new Error('backend down'));
+    mockAwaitAllCallbacks.mockRejectedValue(new Error('backend down'));
     await expect(flushPendingTraces(30)).resolves.toBeUndefined();
   });
 
-  it('survives a client that cannot even be constructed', async () => {
-    MockedClient.mockImplementationOnce(() => {
+  it('survives a barrier that throws synchronously', async () => {
+    mockAwaitAllCallbacks.mockImplementationOnce(() => {
       throw new Error('no api key');
     });
     await expect(flushPendingTraces(30)).resolves.toBeUndefined();

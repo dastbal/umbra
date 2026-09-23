@@ -141,6 +141,69 @@ export const researchArtifactSchema = z.object({
   }
 });
 
+/**
+ * Runtime validator for the compact handoff returned by the Coder.
+ *
+ * ## Why the writer needs one at all
+ *
+ * The Coder used to report in prose, and the orchestration guard recovers a
+ * delegation's status by looking for a literal `"status": "…"` in the result.
+ * Prose has none, so a **successful** implementation was read as having produced
+ * no artifact — classified `infrastructure-failure`, not counted as an attempt,
+ * leaving `coderCalls` at zero. The policy then refuses the Verifier, and that
+ * refusal throws: the turn ended the moment the orchestrator tried to verify its
+ * own work.
+ *
+ * ## Why this status vocabulary and not a truer one
+ *
+ * `['ready','blocked','partial']` is the Researcher's vocabulary, and it is the
+ * one `classifyDelegationOutcome` already decides on. A more natural
+ * `implemented` would parse, validate, and change nothing — the outcome would
+ * fall through to `infrastructure-failure` exactly as prose does today. The
+ * shared vocabulary is the load-bearing part of this contract.
+ *
+ * ## What is deliberately absent
+ *
+ * There is no list of files written. The Verifier reports `changedFiles` from
+ * what is actually on disk; asking the writer to also declare them would invite
+ * it to *claim* a write it never made, which is the failure the FILE CREATION
+ * LAW exists to prevent. Descriptions of the work belong here; the file list is
+ * the Verifier's to state.
+ *
+ * Two rules beyond the field shapes, mirroring the Researcher:
+ *
+ * - A `ready` implementation must describe at least one change. An
+ *   implementation that changed nothing and calls itself finished is a
+ *   contradiction, not a handoff.
+ * - A `partial` implementation must say what stayed unknown, for the same reason
+ *   a partial research handoff must: otherwise it is indistinguishable from a
+ *   complete one.
+ */
+export const implementationArtifactSchema = z.object({
+  status: z.enum(['ready', 'blocked', 'partial']),
+  objective: z.string(),
+  changesMade: z.array(z.string()),
+  testsRun: z.array(z.string()).default([]),
+  remainingWork: z.array(z.string()).default([]),
+  unknowns: z.array(z.string()).default([]),
+  nextAction: z.string(),
+}).superRefine((artifact, ctx) => {
+  if (artifact.status === 'ready' && artifact.changesMade.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['changesMade'],
+      message: 'A ready implementation must describe at least one change.',
+    });
+  }
+  if (artifact.status === 'partial' && artifact.unknowns.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['unknowns'],
+      message: 'A partial implementation must state what stayed unknown.',
+    });
+  }
+});
+
 /** Runtime validator for the compact handoff returned by the Verifier. */
 export const verificationArtifactSchema = z.object({
   status: z.enum(['passed', 'failed', 'blocked']),

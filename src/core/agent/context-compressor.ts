@@ -11,10 +11,24 @@
  * agent's context.
  *
  * ## Why NOT deepagents' SummarizationMiddleware
- * ADR-007: deepagents registers `SummarizationMiddleware` in `REQUIRED_MIDDLEWARE_NAMES`.
- * Adding it manually causes a "defined multiple times" error at agent construction.
- * `ContextCompressor` is completely external — a clean one-shot LLM call via
- * `LLMProvider.createChatModel()`. Zero contact with deepagents internals.
+ * deepagents already installs its own summarization middleware on every deep
+ * agent, at 85% of the model's window, and it stays there as the backstop. A
+ * `/model` switch needs something different: a summary taken *out* of one agent
+ * and handed to a new one, which no middleware inside either agent can do.
+ * `ContextCompressor` is a one-shot LLM call via `LLMProvider.createChatModel()`
+ * with no contact with deepagents internals.
+ *
+ * This section used to cite ADR-007 and `REQUIRED_MIDDLEWARE_NAMES` as the
+ * reason. ADR-007 never mentions summarization, and that set was
+ * `{FilesystemMiddleware, SubAgentMiddleware}`; the conclusion held, the reason
+ * did not.
+ *
+ * ## What it no longer does
+ * It also compressed proactively after every turn, through `isOverBudget` and
+ * `estimateTokens`, and `ChatSession` sent the summary back into the same
+ * thread — two model calls that removed nothing. Stale tool results are now
+ * cleared inside the model call by `createContextEditingMiddleware` (ADR-037),
+ * and both methods were removed with the path that called them.
  *
  * ## Fallback chain (ADR-020)
  * 1. **Primary**: `CONTEXT_SUMMARIZER_MODEL` env var (default: `gemini-2.5-flash-lite`)
@@ -33,31 +47,8 @@
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { LLMProvider } from '../llm/provider';
 import { isOllamaModel } from '../config/model-resolver';
-import { tokenCounter } from '../llm/tokens/token-counter';
-import { sessionOverhead } from './session-overhead';
-import type { CountableTool } from '../llm/tokens/token-counter.port';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
-
-/**
- * Default maximum token budget before proactive compression fires.
- *
- * ~~Using chars/4 as a token estimate. 80,000 tokens ≈ 320,000 characters.~~
- * **Amended for ADR-031 phase 2:** the count is now a real BPE count of the
- * whole request, so the threshold no longer converts to a character figure.
- * The value is unchanged at 80,000, deliberately: changing the counter and the
- * budget in the same commit would make it impossible to tell which one moved
- * the behaviour. Note that the number it is compared against is now *larger*
- * for the same conversation, because tool-call arguments and framing were
- * previously uncounted — so compression fires earlier than it used to, which
- * is the correction, not a regression.
- *
- * This is well under the gemini-2.5-flash-lite 1M token context window but
- * aggressive enough to prevent "model output must contain" crashes (ADR-024).
- *
- * Override with `MAX_CONTEXT_TOKENS` environment variable.
- */
-const DEFAULT_TOKEN_BUDGET = 80_000;
 
 /**
  * System prompt used for the one-shot compression call.
@@ -102,74 +93,6 @@ export class ContextCompressor {
   private constructor() {}
 
   // ── Public API ──────────────────────────────────────────────────────────────
-
-  /**
-   * Counts the tokens a messages array will cost on the next request.
-   *
-   * ## Amended for ADR-031 phase 2
-   * This was `chars / 4` over `msg.content` alone, and both halves of that were
-   * a problem. The ratio was wrong by a content-dependent factor — over 20% on
-   * ordinary TypeScript — and, more seriously, `content` is not the request.
-   * An `AIMessage` that calls a tool carries its arguments in `tool_calls`, so
-   * a turn that wrote a large file counted as nearly free, and the per-message
-   * framing a provider adds was never charged at all.
-   *
-   * It now delegates to {@link TokenCounterPort}, which uses a real BPE encoder
-   * and counts tool-call arguments and framing. `overhead` defaults to what
-   * {@link sessionOverhead} recorded when the agent was built: a deep agent's
-   * tool schemas are thousands of fixed tokens on every request, and no call
-   * site had them to hand — which is exactly why the budget was always measured
-   * against a number smaller than the thing it guards. Reading the recorded
-   * value rather than threading it through every caller means the count is
-   * right for all of them, not only for the one that remembered to pass it.
-   *
-   * @param messages - Raw messages array from agent state.
-   * @param overhead - The system prompt and tool definitions, when known.
-   * @returns Token count.
-   */
-  public static estimateTokens(
-    messages: unknown[],
-    overhead: { system?: string; tools?: readonly CountableTool[] } = sessionOverhead(),
-  ): number {
-    if (!messages || messages.length === 0) return 0;
-
-    return tokenCounter().countRequest({
-      messages,
-      system: overhead?.system,
-      tools: overhead?.tools,
-    }).total;
-  }
-
-  /**
-   * Returns true when the estimated token count of a messages array exceeds
-   * the configured budget threshold.
-   *
-   * Reads `MAX_CONTEXT_TOKENS` from the environment (integer, tokens).
-   * Falls back to `DEFAULT_TOKEN_BUDGET` (80,000) if unset or invalid.
-   *
-   * Used by `ChatSession.checkAndCompressContext()` to decide whether
-   * to trigger proactive compression after each turn (ADR-024).
-   *
-   * @param messages - Raw messages array from agent state.
-   * @param overhead - The system prompt and tool definitions, when known.
-   * @returns True if the token budget is exceeded.
-   *
-   * @example
-   * ```ts
-   * // In .env: MAX_CONTEXT_TOKENS=50000 (trigger earlier)
-   * if (ContextCompressor.isOverBudget(messages)) {
-   *   await ContextCompressor.compress(messages, summarizerModel);
-   * }
-   * ```
-   */
-  public static isOverBudget(
-    messages: unknown[],
-    overhead: { system?: string; tools?: readonly CountableTool[] } = sessionOverhead(),
-  ): boolean {
-    const budget = parseInt(process.env.MAX_CONTEXT_TOKENS ?? '', 10);
-    const threshold = Number.isFinite(budget) && budget > 0 ? budget : DEFAULT_TOKEN_BUDGET;
-    return ContextCompressor.estimateTokens(messages, overhead) > threshold;
-  }
 
   /**
    * Compresses a LangGraph conversation history into a concise summary string.

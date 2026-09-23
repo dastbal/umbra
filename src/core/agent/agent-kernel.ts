@@ -25,6 +25,7 @@ export type AgentCapability =
   | 'read_code'
   | 'read_adrs'
   | 'search_codebase'
+  | 'search_codebase_readonly'
   | 'read_dependency_graph'
   | 'write_code'
   | 'delete_files'
@@ -124,6 +125,17 @@ export const CAPABILITY_REGISTRY: Readonly<Record<AgentCapability, CapabilityDef
     tools: () => [askCodebaseTool, inspectProjectTool, searchWorkspaceTool, refreshIndexTool],
   },
   /**
+   * The discovery half of code search, deliberately without index refresh.
+   *
+   * A conversational MCP advisor may inspect evidence but cannot start a
+   * hidden indexing write while carrying a public `readOnlyHint`.
+   */
+  search_codebase_readonly: {
+    id: 'search_codebase_readonly',
+    risk: 'read',
+    tools: () => [askCodebaseTool, inspectProjectTool, searchWorkspaceTool],
+  },
+  /**
    * The AST dependency graph, which had no capability at all.
    *
    * `queryDependencyGraphTool` was reachable only by importing it directly, so
@@ -181,7 +193,7 @@ export const CAPABILITY_REGISTRY: Readonly<Record<AgentCapability, CapabilityDef
 const ADVISORY_CAPABILITIES: readonly AgentCapability[] = [
   'read_code',
   'read_adrs',
-  'search_codebase',
+  'search_codebase_readonly',
   'ask_delegator',
 ];
 
@@ -274,7 +286,7 @@ export function validateRoleProfile(profile: RoleProfile, external: boolean): vo
       throw new Error(`Role '${profile.id}' requests unknown capability '${capability}'.`);
     }
   }
-  if (profile.workflowRole === 'researcher' || profile.workflowRole === 'verifier') {
+  if (profile.workflowRole === 'researcher' || profile.workflowRole === 'verifier' || profile.workflowRole === 'advisory') {
     assertNoWriteCapability(profile);
   }
   if (external) validateExternalRole(profile);

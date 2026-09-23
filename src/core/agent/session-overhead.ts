@@ -13,7 +13,7 @@
  *
  * They are also assembled deep inside `DeepAgentFactory` and then handed to
  * `createDeepAgent`, which keeps them. Nothing downstream holds a reference —
- * `ChatSession#checkAndCompressContext` has the message list and nothing else.
+ * `ChatSession#checkAndCompressContext` had the message list and nothing else.
  * That is precisely why the budget guard has always measured a number smaller
  * than the request it guards (ADR-031 phase 2).
  *
@@ -31,6 +31,17 @@
  * A subagent run does not overwrite it: {@link recordSessionOverhead} is called
  * only from the interactive construction paths, so a delegate's narrower tool
  * list never makes the supervisor's budget look cheaper than it is.
+ */
+
+/*
+ * ## No production reader since ADR-037
+ *
+ * Its only reader was `ContextCompressor.estimateTokens`, called from
+ * `isOverBudget` to decide when `ChatSession` compressed. Context editing
+ * replaced that decision and counts the request it edits, inside the model
+ * call, so both methods were removed and this registry is read only by
+ * `scripts/bench-turn-floor.mjs` as its "believed" figure. Retiring it is
+ * recorded in `docs/deferred-work.md`.
  */
 
 import type { CountableTool } from '../llm/tokens/token-counter.port';

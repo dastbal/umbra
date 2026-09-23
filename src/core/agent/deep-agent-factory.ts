@@ -37,6 +37,9 @@ import { writeLine } from '../observability/console-sink';
 import { OllamaChatAdapter, resolveOllamaBaseUrl } from '../llm/ollama-adapter';
 import { buildOllamaWarning } from '../../presentation/cli/theme';
 import { createOrchestrationGuard } from './orchestration-guard.middleware';
+import { todoListMiddleware } from 'langchain';
+import { COMPACT_WRITE_TODOS_DESCRIPTION } from './compact-todo-tool.middleware';
+import { createContextEditingMiddleware } from './context-editing';
 import { buildSubagentGraphs } from './delegation/subagent-registry';
 import { createDelegateTool } from './delegation/delegate.tool';
 import { buildReadbackGraphs } from './delegation/readback';
@@ -70,9 +73,19 @@ import {
   type RoleProfile,
 } from './agent-kernel';
 
-/** Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools. */
+/**
+ * Built-in filesystem tools replaced by Umbra's guarded, Windows-safe tools.
+ *
+ * `delete` arrived with deepagents 1.14: "Permanently removes the file or
+ * directory... recursively... This cannot be undone". Against the default
+ * `StateBackend` it only removes a virtual file, which is its own defect — the
+ * model is told a real file is gone when it is not. Against a real
+ * `FilesystemBackend` it would delete recursively without passing through
+ * `AgentSecurityPolicy`. Umbra's `delete_file` is the guarded replacement, the
+ * same relationship every other entry here has with its tool.
+ */
 const REPLACED_BUILTIN_TOOLS = [
-  'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file',
+  'grep', 'glob', 'ls', 'read_file', 'write_file', 'edit_file', 'delete',
 ] as const;
 
 // ── Architecture Decision Records ──────────────────────────────────────────────
@@ -123,10 +136,16 @@ export interface DeepAgentFactoryConfig {
   rootDir?: string;
 
   /**
-   * Enable context compression via SummarizationMiddleware.
-   * When true, old messages are automatically summarized when context fills up.
-   * Recommended for long-running tasks (refactors, multi-file implementations).
-   * @default true for orchestrator, false for simple deep agent
+   * Has no effect, and never had one.
+   *
+   * It was documented as enabling summarization for long tasks. The factory read
+   * it into a local that nothing used, so no value ever changed behaviour.
+   * Interactive agents now always clear stale tool results through
+   * `createContextEditingMiddleware` (ADR-037), which is the behaviour this flag
+   * promised. It is kept only because `DeepAgentFactoryConfig` is exported, and
+   * removing a field would break a consumer that still passes it.
+   *
+   * @deprecated No effect; context editing is always on for interactive agents.
    */
   enableContextCompression?: boolean;
 
@@ -248,7 +267,13 @@ export class DeepAgentFactory {
       model: modelParam as any,
       systemPrompt,
       checkpointer: checkpointer as any, // ADR-002
-      middleware: [createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+      middleware: [
+        // deepagents 1.14 stopped installing the todo list by default; this
+        // prompt plans with it, so Umbra installs it — natively, with the
+        // compact description, since there is no default left to replace.
+        todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION }),
+        createContextEditingMiddleware(),
+        createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
         limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
         costOf: DeepAgentFactory.buildCostResolver(model),
         model,
@@ -310,6 +335,47 @@ export class DeepAgentFactory {
   }
 
   /**
+   * Creates the persistent, read-only advisor used by the MCP conversation
+   * adapter. It has a dedicated checkpoint database and never performs the
+   * factory's automatic index refresh: MCP startup owns that lifecycle.
+   *
+   * @param config - Root, model, and opaque MCP conversation thread id.
+   * @returns A compiled read-only conversational DeepAgent.
+   */
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  public static async createMcpAdvisor(
+    config: DeepAgentFactoryConfig = {},
+  ): Promise<any> {
+    const rootDir = config.rootDir ?? process.cwd();
+    const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
+    const session = resolveSessionModel(agentConfig.models.researcher, config.model);
+    const model = session.model;
+
+    await DeepAgentFactory.bootstrap(rootDir, model, undefined, false, false);
+
+    const profile = DeepAgentFactory.createMcpAdvisorRoleProfile();
+    const tools = resolveCapabilityTools(profile.capabilities);
+    const systemPrompt = DeepAgentFactory.buildSystemPrompt(rootDir, 'mcp', agentConfig);
+    recordSessionOverhead(systemPrompt, tools);
+
+    const agent = createDeepAgent({
+      model: DeepAgentFactory.resolveRuntimeModel(model) as any,
+      systemPrompt,
+      checkpointer: DeepAgentFactory.buildCheckpointer(rootDir, 'mcp') as any,
+      middleware: [createContextEditingMiddleware(), createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
+        limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
+        costOf: DeepAgentFactory.buildCostResolver(model),
+        model,
+        modelSource: session.source,
+        buildModel: (candidate) => LLMProvider.createChatModel(candidate, 0),
+        onRouted: (notice) => writeLine(notice),
+      })],
+      tools: tools as any[],
+    });
+    return registerAgentKernelTelemetry(agent, [profile]);
+  }
+
+  /**
    * Creates an Orchestrator agent with Researcher and Coder subagents.
    *
    * The Orchestrator delegates to specialized subagents via the `task` tool:
@@ -337,7 +403,6 @@ export class DeepAgentFactory {
     const agentConfig = DeepAgentFactory.resolveAgentConfig(rootDir, config.agentConfig);
     const session = resolveSessionModel(agentConfig.models.supervisor, config.model);
     const model = session.model;
-    const enableCompression = config.enableContextCompression ?? true;
 
     // hasSubagents: this mode registers researcher/coder/verifier, so `task`
     // must reach the provider (ADR-013).
@@ -406,6 +471,8 @@ export class DeepAgentFactory {
       // orchestrated one out — the same omission ADR-008 made, which is how a
       // greeting came to cost /usr/bin/bash.0729.
       middleware: [
+        todoListMiddleware({ toolDescription: COMPACT_WRITE_TODOS_DESCRIPTION }),
+        createContextEditingMiddleware(),
         createIterationBudgetMiddleware(DEFAULT_INTERACTIVE_TOOL_BUDGET, rootDir, {
           limits: { maxCostUsd: agentConfig.limits.maxCostUsd },
           costOf: DeepAgentFactory.buildCostResolver(model),
@@ -442,6 +509,7 @@ export class DeepAgentFactory {
     model: string,
     interaction?: InteractionService,
     hasSubagents = false,
+    syncIndex = true,
   ): Promise<void> {
     // 1. Setup the workspace directory
     //
@@ -549,7 +617,7 @@ export class DeepAgentFactory {
     // NOTE: RAG embeddings always use Vertex AI (text-embedding-004), even for
     // Ollama chat models. If Vertex credentials are missing, indexing is skipped
     // gracefully — the agent can still function without semantic search.
-    await DeepAgentFactory.maybeReindex(rootDir, interaction);
+    if (syncIndex) await DeepAgentFactory.maybeReindex(rootDir, interaction);
   }
 
   /**
@@ -584,6 +652,25 @@ export class DeepAgentFactory {
         'run_tests',
         'verify_integrity',
       ],
+    };
+  }
+
+  /**
+   * The MCP advisor's role profile: read-only, and nothing it can delegate to.
+   *
+   * Extracted from `createMcpAdvisor` so the prompt-tool contract can hold its
+   * prompt to the tools this profile resolves, as it already does for the deep
+   * agent and the Supervisor.
+   */
+  private static createMcpAdvisorRoleProfile(): RoleProfile {
+    return {
+      id: 'mcp-advisor',
+      displayName: 'MCP Advisor',
+      description: 'Answers repository questions without changing the project.',
+      kernelApiVersion: KERNEL_API_VERSION,
+      workflowRole: 'advisory',
+      rolePrompt: 'Answer the user with cited repository evidence. Ask one concise follow-up only when necessary.',
+      capabilities: ['read_code', 'read_adrs', 'read_dependency_graph', 'search_codebase_readonly'],
     };
   }
 
@@ -837,43 +924,49 @@ export class DeepAgentFactory {
    * Resetting the named thread prevents the invalid tool-only history from being
    * combined with a later human message.
    *
+   * ## Why the saver does this and not raw SQL
+   *
+   * This used to open its own `better-sqlite3` handle and delete from
+   * `checkpoint_writes`, `checkpoints` and `checkpoint_blobs`, under a comment
+   * saying `SqliteSaver` exposed no delete API. Two of those three tables have
+   * never existed — the schema is `checkpoints` and `writes` — so those
+   * statements threw into an empty `catch` and the `writes` rows of a corrupted
+   * thread were **never** removed, which is precisely the half that holds an
+   * interrupted tool call. The installed saver does expose `deleteThread`, and
+   * it covers both tables in one transaction.
+   *
+   * The probe before it does two jobs: `deleteThread` is the one method on this
+   * saver that does not call `setup()` first, so it needs the tables to exist;
+   * and the tuple is what tells the caller whether anything was there at all —
+   * the boolean the old `changes > 0` produced.
+   *
    * @param rootDir - Project root directory (where `.umbra/` lives).
    * @param threadId - The LangGraph thread ID of the corrupted session.
    * @param agentType - Which DB file to look in.
    * @returns true if a checkpoint was cleared, false if none was found.
    */
-  public static clearCorruptedCheckpoint(
+  public static async clearCorruptedCheckpoint(
     rootDir: string,
     threadId: string,
     agentType: 'simple' | 'orchestrator' = 'simple',
-  ): boolean {
+  ): Promise<boolean> {
     const dbFile = agentType === 'orchestrator' ? 'orchestrator_history.db' : 'deep_agent_history.db';
     const dbPath = agentPath(rootDir, dbFile);
 
     if (!fs.existsSync(dbPath)) return false;
 
+    const checkpointer = DeepAgentFactory.buildCheckpointer(rootDir, agentType);
     try {
-      // Use better-sqlite3 directly — SqliteSaver doesn't expose delete APIs
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath);
+      const existing = await checkpointer.getTuple({ configurable: { thread_id: threadId } });
+      await checkpointer.deleteThread(threadId);
 
-      let cleared = false;
-
-      // Delete from all checkpoint tables for this thread
-      for (const table of ['checkpoint_writes', 'checkpoints', 'checkpoint_blobs']) {
-        try {
-          const info = db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(threadId);
-          if ((info as any).changes > 0) cleared = true;
-        } catch {
-          // Table might not exist in older schema versions — skip
-        }
-      }
-
-      db.close();
-      return cleared;
+      return existing !== undefined;
     } catch {
       return false;
+    } finally {
+      // Closed even when the delete throws. The previous implementation leaked
+      // its handle on any throw before `db.close()`.
+      try { checkpointer.db.close(); } catch { /* already closed */ }
     }
   }
 
@@ -964,14 +1057,16 @@ export class DeepAgentFactory {
    */
   private static buildCheckpointer(
     rootDir: string,
-    type: 'simple' | 'orchestrator' | 'analysis' = 'simple',
+    type: 'simple' | 'orchestrator' | 'analysis' | 'mcp' = 'simple',
   ): SqliteSaver {
     const agentDir = agentPath(rootDir);
     const dbFile = type === 'orchestrator'
       ? 'orchestrator_history.db'
       : type === 'analysis'
         ? 'analysis_history.db'
-        : 'deep_agent_history.db';
+        : type === 'mcp'
+          ? 'mcp_conversations.db'
+          : 'deep_agent_history.db';
     const dbPath = path.join(agentDir, dbFile);
     return SqliteSaver.fromConnString(dbPath);
   }
@@ -1014,7 +1109,7 @@ export class DeepAgentFactory {
    */
   private static buildSystemPrompt(
     rootDir: string,
-    type: 'simple' | 'orchestrator' | 'analysis',
+    type: 'simple' | 'orchestrator' | 'analysis' | 'mcp',
     agentConfig: AgentConfig = parseAgentConfig({}),
     evidenceManifest = '',
     advisoryRoles: readonly RoleProfile[] = [],
@@ -1187,6 +1282,36 @@ This mode intentionally does not use semantic RAG so broad audits remain stable,
 low-cost, and bounded; do not invent evidence that is absent from the manifest.
 
 ${evidenceManifest}`;
+    }
+
+    if (type === 'mcp') {
+      // The advisor behind the published `continue_conversation` tool. It had no
+      // branch here and fell through to the orchestrator's prompt, which told a
+      // read-only advisor that it coordinates a researcher, a coder and a
+      // verifier through `delegate` and plans with `write_todos` — none of which
+      // it holds. `policy` is left out on purpose: every line of it is about
+      // delegating or writing, and this advisor does neither.
+      //
+      // The tool list is derived from the advisor's own profile rather than
+      // typed, so this prompt cannot name a tool the advisor was never given.
+      const advisorTools = resolveCapabilityTools(DeepAgentFactory.createMcpAdvisorRoleProfile().capabilities)
+        .map((tool) => `\`${(tool as { name: string }).name}\``)
+        .join(', ');
+
+      return base + `
+
+🎯 YOUR ROLE: READ-ONLY REPOSITORY ADVISOR
+You answer questions about this repository for a client connected over MCP. You
+cannot change the project and there is no one to delegate to: every answer comes
+from what your tools show you.
+
+Your tools: ${advisorTools}.
+
+- Cite a real relative path for every claim you make about the code.
+- When the repository cannot settle a question, say what is missing instead of
+  guessing. Ask one concise follow-up only when the answer genuinely depends on it.
+- Never describe a change as made, a test as run, or a file as written. You can
+  read; you cannot act.`;
     }
 
     const advisoryCatalog = advisoryRoles.length === 0

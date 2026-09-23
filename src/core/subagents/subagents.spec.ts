@@ -44,6 +44,13 @@ describe('specialized subagent specifications', () => {
     expect(toolNames(coder)).toContain('safe_write_file');
   });
 
+  // Without one the Coder reported in prose, the orchestration guard found no
+  // status in it, and a successful implementation was counted as no attempt at
+  // all — which made the policy refuse the Verifier and end the turn.
+  it('makes the writer hand back a structured artifact like the other two roles', () => {
+    expect(createCoderSubAgent('gemini-2.5-pro').responseFormat).toBeDefined();
+  });
+
   it('keeps Verifier read-only while requiring tests and type-checks', () => {
     const verifier = createVerifierSubAgent('gemini-2.5-flash-lite');
     const names = toolNames(verifier);
