@@ -13,6 +13,7 @@ import { resolveCapabilityTools, type AgentCapability } from './agent-kernel';
 import { researcherSubAgent } from '../subagents/researcher.subagent';
 import { coderSubAgent } from '../subagents/coder.subagent';
 import { verifierSubAgent } from '../subagents/verifier.subagent';
+import { declaredToolNames } from './delegation/subagent-registry';
 
 /**
  * Every tool name the codebase knows about, read from the tool objects rather
@@ -178,11 +179,17 @@ describe('a subagent prompt only names tools that subagent declares', () => {
   it.each(SUBAGENTS.map((subagent) => [subagent.name, subagent] as const))(
     'the %s prompt advertises nothing it cannot call',
     (_name, subagent) => {
-      const declared = [
-        ...(subagent.tools ?? []).map((tool) => (tool as { name: string }).name),
-        // deepagents contributes the todo list to every subagent.
-        'write_todos',
-      ];
+      // What the compiled delegate actually holds — nothing added by assumption.
+      //
+      // This list used to append `write_todos` under the comment "deepagents
+      // contributes the todo list to every subagent". It does not: Umbra's
+      // delegates are compiled by `subagent-registry.ts#compile` with plain
+      // `createAgent`, which installs no todo middleware. So the test declared
+      // the one tool it should have been checking, passed, and the Coder and the
+      // Researcher were ordered — as step 1 of their protocol — to call a tool
+      // neither of them has. A contract test that assumes its answer protects
+      // nothing.
+      const declared = declaredToolNames(subagent);
       const undeclared = toolsNamedIn(subagent.systemPrompt)
         .filter((name) => !declared.includes(name))
         .filter((name) => !forbiddenInPrompt(subagent.systemPrompt, name));
