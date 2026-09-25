@@ -63,7 +63,7 @@
     "better-sqlite3": "^12.10.0",
     "chalk": "^4.1.2",
     "commander": "^14.0.2",
-    "deepagents": "1.10.2",
+    "deepagents": "1.14.0",
     "dotenv": "^17.4.2",
     "js-tiktoken": "^1.0.21",
     "langchain": "1.4.4",
