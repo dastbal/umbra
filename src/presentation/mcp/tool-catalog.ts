@@ -6,10 +6,12 @@ import {
   executeNestGraph, integrityResultSchema, nestGraphResultSchema,
   graphRagInvestigationResultSchema,
   indexStatusResultSchema, type IndexStatusResult, workspaceInventoryResultSchema, workspaceSearchResultSchema,
+  isRetryableRead, type WorktreeIndexScope,
 } from '../../core/tools';
 import { McpToolResult } from './mcp.contracts';
 import { toStructuredToolResult } from './dto-mapper';
 import { McpConversationService } from './conversation-service';
+import { selectWorktree, worktreeArgument } from './worktree-arguments';
 
 /** A read-only capability published to a foreign MCP client. */
 export interface PublishedTool {
@@ -105,9 +107,29 @@ function publishDependencyGraph(): PublishedTool {
   return {
     name: 'query_dependency_graph', title: 'Query file dependencies',
     description: 'Finds inbound or outbound TypeScript file dependencies in the authorized project.',
-    inputSchema: { filePath: z.string().min(1).describe('Repository-relative TypeScript file path.'), direction: z.enum(['inbound', 'outbound']).describe('Direction of dependency traversal.') },
+    inputSchema: { filePath: z.string().min(1).describe('Repository-relative TypeScript file path.'), direction: z.enum(['inbound', 'outbound']).describe('Direction of dependency traversal.'), worktree: worktreeArgument },
     outputSchema: dependencyGraphResultSchema,
-    invoke: async (args) => { const input = z.object({ filePath: z.string().min(1), direction: z.enum(['inbound', 'outbound']) }).parse(args); return toStructuredToolResult(dependencyGraphResultSchema, executeDependencyGraph(input)); },
+    invoke: async (args) => {
+      const input = z.object({ filePath: z.string().min(1), direction: z.enum(['inbound', 'outbound']), worktree: worktreeArgument }).parse(args);
+      const query = { filePath: input.filePath, direction: input.direction };
+      if (input.worktree === undefined) return toStructuredToolResult(dependencyGraphResultSchema, executeDependencyGraph(query));
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return failure(selection.message);
+      try {
+        // Graph rows only: edges need no vectors, so no embedding provider is involved.
+        const { result, worktree } = await selection.views.read(selection.worktree, { embed: false }, (view) => executeDependencyGraph(query, { db: view.db }));
+        return toStructuredToolResult(dependencyGraphResultSchema, { ...result, worktree });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isRetryableRead(error)) return failure(message);
+        return toStructuredToolResult(dependencyGraphResultSchema, {
+          schemaVersion: 1, status: 'abstained', code: 'DEPENDENCY_GRAPH_ERROR', summary: 'The worktree view of the dependency graph is briefly unavailable.',
+          data: { filePath: query.filePath, direction: query.direction, relations: [] }, evidence: [],
+          diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }], truncated: false, retryable: true,
+          nextAction: 'Retry the same call in a moment.',
+        });
+      }
+    },
     rootUnavailable: failure,
   };
 }
@@ -120,9 +142,28 @@ function publishNestGraph(): PublishedTool {
   return {
     name: 'query_nest_graph', title: 'Query NestJS wiring',
     description: 'Finds providers, injection consumers, or module bindings in the authorized project.',
-    inputSchema: { name: z.string().trim().min(1).describe('Injection token or module class name.'), direction: z.enum(['provides', 'injects', 'module']).describe('Wiring relationship to inspect.') },
+    inputSchema: { name: z.string().trim().min(1).describe('Injection token or module class name.'), direction: z.enum(['provides', 'injects', 'module']).describe('Wiring relationship to inspect.'), worktree: worktreeArgument },
     outputSchema: nestGraphResultSchema,
-    invoke: async (args) => { const input = z.object({ name: z.string().trim().min(1), direction: z.enum(['provides', 'injects', 'module']) }).parse(args); return toStructuredToolResult(nestGraphResultSchema, executeNestGraph(input)); },
+    invoke: async (args) => {
+      const input = z.object({ name: z.string().trim().min(1), direction: z.enum(['provides', 'injects', 'module']), worktree: worktreeArgument }).parse(args);
+      const query = { name: input.name, direction: input.direction };
+      if (input.worktree === undefined) return toStructuredToolResult(nestGraphResultSchema, executeNestGraph(query));
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return failure(selection.message);
+      try {
+        const { result, worktree } = await selection.views.read(selection.worktree, { embed: false }, (view) => executeNestGraph(query, { db: view.db }));
+        return toStructuredToolResult(nestGraphResultSchema, { ...result, worktree });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isRetryableRead(error)) return failure(message);
+        return toStructuredToolResult(nestGraphResultSchema, {
+          schemaVersion: 1, status: 'abstained', code: 'NEST_GRAPH_ERROR', summary: 'The worktree view of the NestJS graph is briefly unavailable.',
+          data: { name: query.name, normalizedName: '', direction: query.direction, bindings: [], injections: [] }, evidence: [],
+          diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }], truncated: false, retryable: true,
+          nextAction: 'Retry the same call in a moment.',
+        });
+      }
+    },
     rootUnavailable: failure,
   };
 }
@@ -161,9 +202,19 @@ function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): Publi
   return {
     name: 'ask_codebase', title: 'Search the codebase',
     description: 'Searches indexed code with the approved deterministic hybrid/graph policy and returns paths, ranges, snippets, provenance, and a next read-only recommendation. Scores are ranking signals, not confidence probabilities.',
-    inputSchema: { query: z.string().min(1).describe('Original natural-language code question.'), context: z.string().max(2000).optional().describe('Optional one-time clarification.') },
+    inputSchema: { query: z.string().min(1).describe('Original natural-language code question.'), context: z.string().max(2000).optional().describe('Optional one-time clarification.'), worktree: worktreeArgument },
     outputSchema: codebaseSearchResultSchema,
-    invoke: async (args) => { const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional() }).parse(args); const readiness = readReadiness(); if (!readiness.ready) return unavailable(readiness.message, readiness.retryable); return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(input)).result); },
+    invoke: async (args) => {
+      const input = z.object({ query: z.string().min(1), context: z.string().max(2000).optional(), worktree: worktreeArgument }).parse(args);
+      const readiness = readReadiness();
+      if (!readiness.ready) return unavailable(readiness.message, readiness.retryable);
+      const search = { query: input.query, ...(input.context === undefined ? {} : { context: input.context }) };
+      if (input.worktree === undefined) return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(search)).result);
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return unavailable(selection.message);
+      const scope: WorktreeIndexScope = { read: (read) => selection.views.read(selection.worktree, { embed: true }, read) };
+      return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(search, scope)).result);
+    },
     rootUnavailable: unavailable,
   };
 }
@@ -177,8 +228,19 @@ function publishProjectInventory(): PublishedTool {
   return {
     name: 'inspect_project', title: 'Inspect project artifact types',
     description: 'Maps safe project artifact types and exclusions without reading content or requiring an index.',
-    inputSchema: {}, outputSchema: workspaceInventoryResultSchema,
-    invoke: async () => toStructuredToolResult(workspaceInventoryResultSchema, executeProjectInventory()), rootUnavailable: failure,
+    inputSchema: { worktree: worktreeArgument }, outputSchema: workspaceInventoryResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ worktree: worktreeArgument }).parse(args ?? {});
+      if (input.worktree === undefined) return toStructuredToolResult(workspaceInventoryResultSchema, executeProjectInventory());
+      const startedAt = Date.now();
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return failure(selection.message);
+      const result = executeProjectInventory(selection.worktree.root);
+      return toStructuredToolResult(workspaceInventoryResultSchema, {
+        ...result, worktree: selection.provenanceOf(selection.worktree, undefined, { elapsedMs: Date.now() - startedAt }),
+      });
+    },
+    rootUnavailable: failure,
   };
 }
 
@@ -195,11 +257,25 @@ function publishWorkspaceSearch(): PublishedTool {
       query: z.string().trim().min(1).max(500).describe('Exact literal text to find.'),
       path: z.string().min(1).optional().describe('Optional repository-relative file or directory.'),
       maxMatches: z.number().int().min(1).max(100).optional().describe('Maximum matches to return; defaults to 100.'),
+      worktree: worktreeArgument,
     },
     outputSchema: workspaceSearchResultSchema,
     invoke: async (args) => {
-      const input = z.object({ query: z.string().trim().min(1).max(500), path: z.string().min(1).optional(), maxMatches: z.number().int().min(1).max(100).optional() }).parse(args);
-      return toStructuredToolResult(workspaceSearchResultSchema, executeWorkspaceSearch(input));
+      const input = z.object({ query: z.string().trim().min(1).max(500), path: z.string().min(1).optional(), maxMatches: z.number().int().min(1).max(100).optional(), worktree: worktreeArgument }).parse(args);
+      const search = {
+        query: input.query,
+        ...(input.path === undefined ? {} : { path: input.path }),
+        ...(input.maxMatches === undefined ? {} : { maxMatches: input.maxMatches }),
+      };
+      if (input.worktree === undefined) return toStructuredToolResult(workspaceSearchResultSchema, executeWorkspaceSearch(search));
+      const startedAt = Date.now();
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return failure(selection.message);
+      // A live read: the worktree's own files, under the same containment rules as the served root.
+      const result = executeWorkspaceSearch(search, selection.worktree.root);
+      return toStructuredToolResult(workspaceSearchResultSchema, {
+        ...result, worktree: selection.provenanceOf(selection.worktree, undefined, { elapsedMs: Date.now() - startedAt }),
+      });
     },
     rootUnavailable: failure,
   };
@@ -251,8 +327,33 @@ export function buildToolCatalog(options: {
   conversationService?: McpConversationService;
 }): PublishedTool[] {
   const catalog: PublishedTool[] = [publishAskCodebase(options.semanticSearchReadiness), publishWorkspaceSearch(), publishProjectInventory(), publishGraphRagInvestigation(options.semanticSearchReadiness), {
-    name: 'get_index_status', title: 'Get index status', description: 'Reports live lifecycle, persisted provenance, and durable coverage as separate fields without invoking an embedding provider.', inputSchema: {}, outputSchema: indexStatusResultSchema,
-    invoke: async () => toStructuredToolResult(indexStatusResultSchema, options.readIndexStatus()),
+    name: 'get_index_status', title: 'Get index status', description: 'Reports live lifecycle, persisted provenance, and durable coverage as separate fields without invoking an embedding provider. With worktree, also reports how many indexed files that worktree changes or lacks.', inputSchema: { worktree: worktreeArgument }, outputSchema: indexStatusResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ worktree: worktreeArgument }).parse(args ?? {});
+      const status = options.readIndexStatus();
+      // Before a root is accepted there is no repository to select a worktree of.
+      if (input.worktree === undefined || status.code === 'INDEX_STATUS_AWAITING_ROOT') return toStructuredToolResult(indexStatusResultSchema, status);
+      const startedAt = Date.now();
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) {
+        return toStructuredToolResult(indexStatusResultSchema, {
+          ...status, status: 'blocked', code: 'INDEX_STATUS_ERROR', summary: 'The requested worktree cannot be selected.',
+          diagnostics: [{ severity: 'error', code: 'WORKTREE_NOT_SELECTABLE', message: selection.message }, ...status.diagnostics],
+        });
+      }
+      try {
+        const delta = await selection.views.delta(selection.worktree);
+        return toStructuredToolResult(indexStatusResultSchema, {
+          ...status, worktree: selection.provenanceOf(selection.worktree, delta, { elapsedMs: Date.now() - startedAt }),
+        });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return toStructuredToolResult(indexStatusResultSchema, {
+          ...status, status: 'error', code: 'INDEX_STATUS_ERROR', summary: 'The worktree delta could not be computed.',
+          diagnostics: [{ severity: 'error', code: 'WORKTREE_DELTA_ERROR', message }, ...status.diagnostics],
+        });
+      }
+    },
   }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
   if (options.projectRootReady === undefined) return catalog;
   const rooted = catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args: Record<string, unknown>) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });

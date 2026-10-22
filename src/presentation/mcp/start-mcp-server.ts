@@ -153,7 +153,9 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
     instructions:
       'Umbra publishes read-only knowledge about one repository. Its index may be warming in the ' +
       'background; call get_index_status before retrying ask_codebase. The repository is fixed for ' +
-      'this session and cannot be changed by a tool argument.',
+      'this session and cannot be changed by a tool argument. If you work in a git worktree of it, ' +
+      'pass your current working directory as `worktree`: answers then describe that worktree, ' +
+      'uncommitted edits included. Only the repository\'s own worktrees are accepted.',
     tools,
     resources: buildResourceCatalog(() => rootDir, () => formatIndexStatusForModel(executeIndexStatus(rootDir, lifecycle))),
     prompts: buildPromptCatalog(),

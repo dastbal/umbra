@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { buildToolCatalog } from './tool-catalog';
 import type { IndexStatusResult } from '../../core/tools';
 
@@ -101,7 +102,8 @@ describe('MCP live workspace evidence catalog', () => {
     expect(search?.inputSchema.query).toBeDefined();
     expect(search?.inputSchema.path).toBeDefined();
     expect(search?.description).toContain('not semantic ranking');
-    expect(inventory?.inputSchema).toEqual({});
+    // Its only input is the optional worktree selection (ADR-038).
+    expect(Object.keys(inventory?.inputSchema ?? {})).toEqual(['worktree']);
   });
 
   it('blocks literal search at the same pinned-root boundary as other workspace tools', async () => {
@@ -193,5 +195,26 @@ describe('MCP query_nest_graph', () => {
     const tool = catalog().find((candidate) => candidate.name === 'query_nest_graph');
 
     await expect(tool?.invoke({ name: 'AI_AGENT', direction: 'exports' })).rejects.toBeDefined();
+  });
+});
+
+describe('MCP worktree selection (ADR-038)', () => {
+  const catalog = () => buildToolCatalog({
+    semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
+    readIndexStatus: () => indexStatus(),
+  });
+
+  it('offers an optional worktree exactly on the tools that can answer about one', () => {
+    const selecting = catalog()
+      .filter((tool) => tool.inputSchema.worktree !== undefined)
+      .map((tool) => tool.name)
+      .sort();
+
+    expect(selecting).toEqual([
+      'ask_codebase', 'get_index_status', 'inspect_project', 'query_dependency_graph', 'query_nest_graph', 'search_workspace',
+    ]);
+    for (const tool of catalog().filter((candidate) => candidate.inputSchema.worktree !== undefined)) {
+      expect(z.object({ worktree: tool.inputSchema.worktree! }).safeParse({}).success).toBe(true);
+    }
   });
 });
