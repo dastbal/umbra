@@ -16,6 +16,8 @@ import {
 import { EmbeddingsPort } from './embeddings';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
 import { readIndexStamp, writeIndexStamp } from './index-stamp';
+import { analyzeSourceFile, commitIndexedFile, commitSkippedFile } from './indexed-file-rows';
+import { captureIndexedGitState, mergeIndexedGitState } from './indexed-git-state';
 import { IndexRunLease } from './index-run-lease';
 import { encodeVector } from './vector-codec';
 import {
@@ -54,6 +56,15 @@ export class IndexerService {
   private readonly prismaChunker = new PrismaSchemaChunker();
   private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
   private static activeIndex: Promise<IndexRunResult> | undefined;
+
+  /**
+   * Whether this process is running an index right now. A worktree overlay
+   * (ADR-038) refuses to open its write window meanwhile, so this process's
+   * own commits never wait on it.
+   */
+  public static get running(): boolean {
+    return IndexerService.activeIndex !== undefined;
+  }
 
   /**
    * When true, all progress console.log calls are suppressed.
@@ -186,6 +197,11 @@ export class IndexerService {
   ): Promise<IndexRunResult> {
     IndexerService.log(`🚀 Starting Indexing Process on: ${discovery.sourceOrigin} (${discovery.sourceFiles.length} files)`);
 
+    // Read before any file is, so the head names the commit every clean file
+    // came from (ADR-038). Commits made during the run stay between this head
+    // and any worktree, where an overlay can still see them.
+    const gitAtStart = await captureIndexedGitState(rootDir);
+
     const filesToProcess: WorkspaceFile[] = [];
 
     // A provider switch invalidates every vector even though no file changed.
@@ -265,6 +281,7 @@ export class IndexerService {
         coveredFiles: this.countCoveredFiles(),
         status: 'partial',
         diagnostic,
+        git: gitAtStart,
       });
       throw error;
     }
@@ -280,6 +297,7 @@ export class IndexerService {
         discoveredFiles: discovery.sourceFiles.length,
         coveredFiles: this.countCoveredFiles(),
         status: 'complete',
+        git: mergeIndexedGitState(gitAtStart, await captureIndexedGitState(rootDir)),
       });
       return { disposition: 'completed', filesIndexed: 0, status: 'complete' };
     }
@@ -288,6 +306,7 @@ export class IndexerService {
 
     let indexedFiles = 0;
     const failures: string[] = [];
+    const pendingPaths: string[] = [];
     for (let position = 0; position < filesToProcess.length; position += 1) {
       const file = filesToProcess[position]!;
       try {
@@ -296,6 +315,7 @@ export class IndexerService {
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         failures.push(`${file.relativePath}: ${message}`);
+        pendingPaths.push(file.relativePath);
         IndexerService.failure(
           `❌ ${position + 1}/${filesToProcess.length} pending | ` +
             `${compactPath(file.relativePath, 22).padEnd(22)} | ${shortFailureReason(message)}`,
@@ -318,6 +338,7 @@ export class IndexerService {
       coveredFiles: this.countCoveredFiles(),
       status: failures.length > 0 ? 'partial' : 'complete',
       diagnostic: failures.length > 0 ? failures.slice(0, 5).join('; ') : undefined,
+      git: mergeIndexedGitState(gitAtStart, await captureIndexedGitState(rootDir), pendingPaths),
     });
     return {
       disposition: 'completed',
@@ -341,90 +362,24 @@ export class IndexerService {
   ): Promise<'indexed' | 'skipped'> {
     this.reportProgress(file.relativePath, position, total, 0, 'preparing');
     const content = fs.readFileSync(file.absolutePath, 'utf-8');
-    const hash = crypto.createHash('md5').update(content).digest('hex');
-    const analysis = file.kind === 'prisma-schema'
-      ? this.prismaChunker.analyze(file.relativePath, content, hash)
-      : this.chunker.analyze(file.relativePath, content, hash);
-    const chunks = splitChunksForEmbedding(
-      analysis.chunks.map((chunk) => ({ ...chunk, filePath: file.relativePath } as ProcessedChunk & { filePath: string })),
-    ) as Array<ProcessedChunk & { filePath: string }>;
-    if (chunks.length === 0) {
-      if (content.trim().length > 0) {
+    // The rows are defined once, in `indexed-file-rows.ts`, because a worktree
+    // overlay (ADR-038) writes the same rows for a worktree's version of a file.
+    const analyzed = analyzeSourceFile({ typescript: this.chunker, prisma: this.prismaChunker }, file, content);
+    if (analyzed.chunks.length === 0) {
+      if (!analyzed.empty) {
         throw new Error(
           'The source contains content but produced zero index chunks. It was left pending for retry.',
         );
       }
-      this.commitSkippedFile(file, hash, analysis.skeleton, 'empty-or-whitespace source');
+      commitSkippedFile(this.db, analyzed, analyzed.skeleton, 'empty-or-whitespace source');
       this.reportProgress(file.relativePath, position, total, 0, 'skipped empty source');
       return 'skipped';
     }
 
-    const vectors = await this.embedFileChunks(chunks, file.relativePath, position, total);
-    if (vectors.length !== chunks.length || vectors.some((vector) => vector.length === 0)) {
-      throw new Error(`Embedding provider returned ${vectors.length} unusable vectors for ${chunks.length} chunks.`);
-    }
-
-    const identity = this.embeddings.identity;
-    const replaceFile = this.db.prepare(`
-      INSERT OR REPLACE INTO file_registry
-        (path, hash, last_indexed, skeleton_signature, index_state, skip_reason)
-      VALUES (?, ?, ?, ?, 'indexed', NULL)
-    `);
-    const insertChunk = this.db.prepare(`
-      INSERT INTO code_chunks (id, file_path, chunk_type, content, metadata)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET file_path = excluded.file_path, chunk_type = excluded.chunk_type,
-        content = excluded.content, metadata = excluded.metadata
-    `);
-    const insertVector = this.db.prepare(`
-      INSERT INTO chunk_vectors (chunk_id, provider, model, dimensions, vector)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(chunk_id, provider, model) DO UPDATE SET dimensions = excluded.dimensions, vector = excluded.vector
-    `);
-    const commit = this.db.transaction(() => {
-      replaceFile.run(file.relativePath, hash, Date.now(), analysis.skeleton === null ? null : JSON.stringify(analysis.skeleton));
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index]!;
-        const vector = vectors[index]!;
-        insertChunk.run(chunk.id, chunk.filePath, chunk.type, chunk.content, JSON.stringify(chunk.metadata));
-        insertVector.run(chunk.id, identity.provider, identity.model, vector.length, encodeVector(vector));
-      }
-      replaceDependencyGraphForFile(this.db, file.relativePath, analysis.dependencies, hash);
-
-      // Nest wiring is replaced inside the same transaction as the chunks it
-      // belongs to. Committed separately it could be half-applied, and a
-      // binding row that outlives the file that declared it is the stale
-      // confidence ADR-017 was written about.
-      if (file.kind === 'typescript') {
-        replaceNestGraphForFile(this.db, file.relativePath, analyzeNestGraph(file.relativePath, content), hash);
-      }
-    });
-    commit();
-    this.reportProgress(file.relativePath, position, total, vectors.length, `saved ${chunks.length} chunks`);
+    const vectors = await this.embedFileChunks(analyzed.chunks, file.relativePath, position, total);
+    commitIndexedFile(this.db, this.embeddings.identity, analyzed, vectors);
+    this.reportProgress(file.relativePath, position, total, vectors.length, `saved ${analyzed.chunks.length} chunks`);
     return 'indexed';
-  }
-
-  /** Commits an intentional zero-content omission, never an embedding failure. */
-  private commitSkippedFile(
-    file: WorkspaceFile,
-    hash: string,
-    skeleton: object | null,
-    reason: string,
-  ): void {
-    const replaceFile = this.db.prepare(`
-      INSERT OR REPLACE INTO file_registry
-        (path, hash, last_indexed, skeleton_signature, index_state, skip_reason)
-      VALUES (?, ?, ?, ?, 'skipped', ?)
-    `);
-    this.db.transaction(() => {
-      replaceFile.run(
-        file.relativePath,
-        hash,
-        Date.now(),
-        skeleton === null ? null : JSON.stringify(skeleton),
-        reason,
-      );
-    })();
   }
 
   /** Embeds all chunks belonging to one file before that file becomes durable. */

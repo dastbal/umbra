@@ -55,6 +55,25 @@ export interface IndexStamp {
   readonly status: IndexStatus;
   /** Discovery failure recorded before any embedding call, when the scope is empty. */
   readonly diagnostic?: string;
+  /**
+   * The git state the run indexed: the head when it started and every path that
+   * had uncommitted changes. A worktree overlay (ADR-038) reads it to know which
+   * paths the index may hold in a version no commit has. Absent for a run
+   * outside git, or for a stamp written before 2.4.0.
+   */
+  readonly git?: IndexedGitState;
+}
+
+/** Git state recorded by an index run. */
+export interface IndexedGitState {
+  /** Commit checked out when the run started. */
+  readonly head: string;
+  /**
+   * Root-relative paths with uncommitted changes at the run's start or end,
+   * plus — until a run completes — the previous stamp's, because a file a
+   * partial run left pending still holds the older run's content.
+   */
+  readonly dirty: readonly string[];
 }
 
 /** File name of the stamp inside the workspace directory. */
@@ -81,6 +100,7 @@ export function writeIndexStamp(
     diagnostic?: string;
     discoveredFiles?: number;
     coveredFiles?: number;
+    git?: IndexedGitState;
   },
 ): void {
   const stamp: IndexStamp = {
@@ -93,6 +113,7 @@ export function writeIndexStamp(
     coveredFiles: run.coveredFiles,
     status: run.status,
     diagnostic: run.diagnostic,
+    git: run.git,
   };
 
   try {
@@ -137,8 +158,18 @@ export function readIndexStamp(rootDir: string): IndexStamp | undefined {
       coveredFiles: typeof parsed.coveredFiles === 'number' ? parsed.coveredFiles : undefined,
       status: parsed.status === 'partial' || parsed.status === 'empty' ? parsed.status : 'complete',
       diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic : undefined,
+      git: parseIndexedGitState(parsed.git),
     };
   } catch {
     return undefined;
   }
+}
+
+/** Accepts the recorded git state only when its shape is exactly what a run writes. */
+function parseIndexedGitState(value: unknown): IndexedGitState | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const candidate = value as { head?: unknown; dirty?: unknown };
+  if (typeof candidate.head !== 'string' || candidate.head.length === 0) return undefined;
+  if (!Array.isArray(candidate.dirty) || candidate.dirty.some((entry) => typeof entry !== 'string')) return undefined;
+  return { head: candidate.head, dirty: candidate.dirty as string[] };
 }
