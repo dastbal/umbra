@@ -28,8 +28,45 @@ export const toolDiagnosticSchema = z.object({
   endLine: z.number().int().positive().optional(),
 });
 
+/**
+ * Which git worktree a result describes, when the caller selected one (ADR-038).
+ *
+ * Index-backed evidence paths keep the index's form, relative to the served
+ * root: for the served repository's own worktrees that is also the path in the
+ * worktree, and for a submodule's worktree `indexPrefix` says what to strip.
+ * Live-search evidence is relative to the worktree itself.
+ */
+export const toolWorktreeSchema = z.object({
+  /** Canonical absolute root of the worktree the answer is about. */
+  path: z.string(),
+  /** Checked-out branch, when not detached. */
+  branch: z.string().optional(),
+  /** Checked-out commit. */
+  head: z.string().optional(),
+  /** True when the selection is the served repository's own checkout. */
+  isPinnedRoot: z.boolean(),
+  /**
+   * Present when the worktree belongs to a submodule: evidence paths are the
+   * index's, so `<indexPrefix>/src/a.ts` in an answer is `src/a.ts` in this worktree.
+   */
+  indexPrefix: z.string().optional(),
+  /** Indexed files whose worktree content replaced the base index's for this answer. */
+  changedFiles: z.number().int().nonnegative(),
+  /** Indexed files the worktree does not have, hidden for this answer. */
+  deletedFiles: z.number().int().nonnegative(),
+  /** Chunks the provider embedded for this worktree's overlay; zero on a cache hit. */
+  chunksEmbedded: z.number().int().nonnegative(),
+  /** Chunks whose vector was reused from the base index or an earlier overlay. */
+  chunksReused: z.number().int().nonnegative(),
+  /** Wall time to prepare and run the worktree read. */
+  elapsedMs: z.number().nonnegative(),
+});
+
 /** Source evidence suitable for CLI, MCP and telemetry projections. */
 export type ToolEvidence = z.infer<typeof toolEvidenceSchema>;
+
+/** Worktree provenance suitable for CLI, MCP and telemetry projections. */
+export type ToolWorktree = z.infer<typeof toolWorktreeSchema>;
 
 /** Diagnostic suitable for CLI, MCP and telemetry projections. */
 export type ToolDiagnostic = z.infer<typeof toolDiagnosticSchema>;
@@ -44,6 +81,8 @@ interface ToolResultCommon<TCode extends string, TData> {
   readonly truncated: boolean;
   readonly retryable: boolean;
   readonly nextAction?: string;
+  /** Present only when the caller selected a worktree. */
+  readonly worktree?: ToolWorktree;
 }
 
 /** Valid structured outcome returned by a read-only Umbra capability. */
@@ -71,6 +110,7 @@ export function createToolResultSchema<TData extends z.ZodType, TCode extends z.
     truncated: z.boolean(),
     retryable: z.boolean(),
     nextAction: z.string().optional(),
+    worktree: toolWorktreeSchema.optional(),
   };
   // MCP SDK 1.x normalizes an advertised output schema as an object before it
   // validates `structuredContent`. A discriminated union is valid Zod, but it

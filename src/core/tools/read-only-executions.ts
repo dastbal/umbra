@@ -25,8 +25,11 @@ import {
 import { AgentSecurityPolicy } from '../security';
 import { AgentDB } from '../state/db';
 import { clearPendingRetrievalAlias, stageRetrievalAlias } from '../rag/retrieval-memory';
+import { RetrieverService } from '../rag/retriever';
+import type { OverlayView } from '../rag/overlay-scope';
+import type Database from 'better-sqlite3';
 import { AdrIndexEntry, buildAdrIndex } from './adr-index';
-import { createToolResultSchema, ToolResult } from './tool-result';
+import { createToolResultSchema, ToolResult, type ToolWorktree } from './tool-result';
 import { wrapUntrustedFileContent } from './utils/untrusted-content';
 
 const execFileAsync = promisify(execFile);
@@ -309,10 +312,11 @@ export function formatAdrCatalogForModel(result: AdrCatalogResult): string {
 /** Queries the persisted file dependency graph without formatting it. */
 export function executeDependencyGraph(input: {
   filePath: string; direction: 'inbound' | 'outbound';
-}): DependencyGraphResult {
-  const data: DependencyGraphData = { ...input, relations: [] };
+}, options: { readonly db?: Database.Database } = {}): DependencyGraphResult {
+  const data: DependencyGraphData = { filePath: input.filePath, direction: input.direction, relations: [] };
   try {
-    const db = AgentDB.getInstance();
+    // A worktree read (ADR-038) passes the connection that carries its overlay.
+    const db = options.db ?? AgentDB.getInstance();
     const normalizedPath = input.filePath.split(path.sep).join('/');
     const sql = input.direction === 'inbound'
       ? 'SELECT source AS path, relation FROM dependency_graph WHERE target = ? OR target = ?'
@@ -348,11 +352,12 @@ export function formatDependencyGraphForModel(result: DependencyGraphResult): st
 /** Queries NestJS bindings and injections without presentation markup. */
 export function executeNestGraph(input: {
   name: string; direction: 'provides' | 'injects' | 'module';
-}): NestGraphResult {
+}, options: { readonly db?: Database.Database } = {}): NestGraphResult {
   const normalizedName = normalizeToken(input.name);
-  const data: NestGraphData = { ...input, normalizedName, bindings: [], injections: [] };
+  const data: NestGraphData = { name: input.name, direction: input.direction, normalizedName, bindings: [], injections: [] };
   try {
-    const db = AgentDB.getInstance();
+    // A worktree read (ADR-038) passes the connection that carries its overlay.
+    const db = options.db ?? AgentDB.getInstance();
     if (input.direction === 'provides') data.bindings = [...findBindingsForToken(db, input.name)];
     else if (input.direction === 'injects') data.injections = [...findInjectionsForToken(db, input.name)];
     else data.bindings = [...findBindingsForModule(db, input.name)];
@@ -570,10 +575,24 @@ export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): st
   return `🔎 LIVE WORKSPACE SEARCH (literal matches; not semantic ranking)\n${matches.join('\n')}${suffix}`;
 }
 
+/**
+ * Runs an index read against one worktree's view of the index (ADR-038).
+ *
+ * The read must await nothing but the view's embeddings: it runs inside a
+ * window that holds the index's write lock.
+ */
+export interface WorktreeIndexScope {
+  /**
+   * @param read - The read to run on the worktree's view.
+   * @returns Its result, with the worktree's provenance.
+   */
+  read<T>(read: (view: OverlayView) => Promise<T>): Promise<{ result: T; worktree: ToolWorktree }>;
+}
+
 /** Searches the code index and retains evidence before model formatting. */
 export async function executeCodebaseSearch(input: {
   query: string; context?: string;
-}): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
+}, scope?: WorktreeIndexScope): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
   const emptyData: CodebaseSearchData = {
     query: input.query, ...(input.context === undefined ? {} : { clarification: input.context }),
     recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
@@ -589,18 +608,31 @@ export async function executeCodebaseSearch(input: {
       return { result, modelContent: `Code index unavailable: ${message}` };
     }
     clearPendingRetrievalAlias();
-    const graphRag = new GraphRagService();
-    const contextResult = await graphRag.search(input.query, input.context);
+    let contextResult: GraphRagSearchResult;
+    let worktree: ToolWorktree | undefined;
+    if (scope === undefined) {
+      contextResult = await new GraphRagService().search(input.query, input.context);
+    } else {
+      const scoped = await scope.read((view) => new GraphRagService(
+        new RetrieverService(view.embeddings, { db: view.db, vectorSearchAvailable: view.vectorSearchAvailable }),
+        view.db,
+      ).search(input.query, input.context));
+      contextResult = scoped.result;
+      worktree = scoped.worktree;
+    }
     const candidate = contextResult.status === 'success' ? contextResult.learningCandidate : undefined;
-    if (candidate !== undefined) stageRetrievalAlias(candidate);
+    // An alias learned from a worktree's answer could name paths only that
+    // worktree has; it is never staged for the base index.
+    if (candidate !== undefined && worktree === undefined) stageRetrievalAlias(candidate);
     const data = toCodebaseSearchData(contextResult);
+    const scoped = worktree === undefined ? {} : { worktree };
     if (contextResult.status === 'abstained') {
       const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_NO_EVIDENCE',
         summary: contextResult.reason === 'unknown_terms'
           ? `No indexed evidence contains: ${contextResult.unknownTerms.join(', ')}.`
           : 'The nearest results lacked independent grounding evidence.',
         data, evidence: [], diagnostics: [], truncated: false, retryable: input.context === undefined,
-        nextAction: input.context === undefined ? 'Clarify once with a repository symbol, path, or domain term.' : undefined };
+        nextAction: input.context === undefined ? 'Clarify once with a repository symbol, path, or domain term.' : undefined, ...scoped };
       return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
     }
     const evidence = contextResult.files.flatMap((file) => file.chunks.map((chunk) => ({
@@ -613,10 +645,20 @@ export async function executeCodebaseSearch(input: {
       ...(recommendationNextAction(contextResult.strategy.recommendation) === undefined ? {} : {
         nextAction: recommendationNextAction(contextResult.strategy.recommendation),
       }),
+      ...scoped,
     };
     return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
+    if (isRetryableRead(error)) {
+      // A worktree read that could not take the index's write lock in time: a
+      // peer is writing for a bounded time, so this is "come back", not a fault.
+      const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_INDEX_UNAVAILABLE',
+        summary: 'The worktree view of the index is briefly unavailable.', data: emptyData, evidence: [],
+        diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }],
+        truncated: false, retryable: true, nextAction: 'Retry the same call in a moment.' };
+      return { result, modelContent: `Worktree view unavailable: ${message}` };
+    }
     const result: CodebaseSearchResult = { schemaVersion: 1, status: 'error', code: 'CODEBASE_SEARCH_ERROR',
       summary: 'The codebase search failed.', data: emptyData, evidence: [],
       diagnostics: [{ severity: 'error', code: 'CODEBASE_SEARCH_ERROR', message }],
@@ -749,4 +791,9 @@ function recommendationNextAction(
     return `Call query_dependency_graph for ${recommendation.subject ?? 'the grounded file'} if relationship detail is needed.`;
   }
   return `Call query_nest_graph for ${recommendation.subject ?? 'the grounded symbol'} if runtime wiring detail is needed.`;
+}
+
+/** Whether a read failed for a reason that asking again will clear, such as the overlay's write lock (ADR-038). */
+export function isRetryableRead(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { retryable?: unknown }).retryable === true;
 }
