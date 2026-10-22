@@ -68,7 +68,8 @@ export type WorktreeResolutionCode =
   | 'WORKTREE_NOT_ABSOLUTE'
   | 'WORKTREE_NOT_FOUND'
   | 'WORKTREE_NOT_REGISTERED'
-  | 'WORKTREE_GIT_UNAVAILABLE';
+  | 'WORKTREE_GIT_UNAVAILABLE'
+  | 'WORKTREE_PINNED_SUBDIRECTORY';
 
 /** Thrown when a requested path is not one of the pinned repository's worktrees. */
 export class WorktreeResolutionError extends Error {
@@ -216,9 +217,30 @@ export async function resolveWorktree(
   }
   const realPinned = realpathOrUndefined(pinnedRoot) ?? path.resolve(pinnedRoot);
 
+  // A worktree is a whole checkout. When the served root is a subdirectory of
+  // its repository, every worktree root lies above it, so selecting one would
+  // widen the server to the repository's siblings — exactly what pinning a
+  // subdirectory excluded. Refused rather than mapped: no measured case pins a
+  // subdirectory, and mapping would need every git path rebased.
+  const topLevel = await gitTopLevel(realPinned, git);
+  if (topLevel !== undefined && topLevel !== realPinned) {
+    throw new WorktreeResolutionError(
+      'WORKTREE_PINNED_SUBDIRECTORY',
+      `Umbra serves ${realPinned}, a subdirectory of the repository at ${topLevel}. ` +
+        'Selecting a worktree needs the served root to be the top level of its repository; omit `worktree`.',
+    );
+  }
+  const pinnedCommon = await gitCommonDir(realPinned, git);
+
   const repositories: { root: string; prefix: string }[] = [{ root: realPinned, prefix: '' }];
   for (const submodule of await readInitialisedSubmodules(git, realPinned)) {
-    repositories.push({ root: path.join(realPinned, submodule), prefix: submodule });
+    const root = path.join(realPinned, submodule);
+    // A submodule is part of this repository only when it is a real directory
+    // inside it whose git data lives in this repository's store (absorbed,
+    // under `<common>/modules/`) or inside its own checkout. A `.gitmodules`
+    // path that is a symlink, or a `.git` file pointing at another repository,
+    // would otherwise hand that repository's worktrees to the caller.
+    if (await isOwnSubmodule(root, realPinned, pinnedCommon, git)) repositories.push({ root, prefix: submodule });
   }
 
   let best: { root: string; entry: GitWorktree; repository: { root: string; prefix: string } } | undefined;
@@ -379,6 +401,35 @@ export async function readInitialisedSubmodules(git: GitRunner, root: string): P
     if (fs.existsSync(path.join(root, submodule, '.git'))) submodules.push(submodule);
   }
   return submodules;
+}
+
+/** Whether a declared submodule path is a real directory of this repository, with its git data in this repository. */
+async function isOwnSubmodule(
+  root: string,
+  realPinned: string,
+  pinnedCommon: string | undefined,
+  git: GitRunner,
+): Promise<boolean> {
+  try {
+    if (!fs.lstatSync(root).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  const real = realpathOrUndefined(root);
+  if (real !== root || !isSameOrInside(real, realPinned)) return false;
+  const common = await gitCommonDir(root, git);
+  if (common === undefined) return false;
+  return isSameOrInside(common, realPinned) || (pinnedCommon !== undefined && isSameOrInside(common, pinnedCommon));
+}
+
+/** The canonical top level of the repository containing a directory, or undefined when git cannot say. */
+async function gitTopLevel(root: string, git: GitRunner): Promise<string | undefined> {
+  try {
+    const output = (await git(['rev-parse', '--show-toplevel'], root)).trim();
+    return output.length === 0 ? undefined : realpathOrUndefined(output);
+  } catch {
+    return undefined;
+  }
 }
 
 /** The canonical shared git directory of a working tree, or undefined when git cannot say. */

@@ -109,3 +109,63 @@ describe('resolveWorktree', () => {
     await expect(resolveWorktree(repo, repo, failingGit)).rejects.toMatchObject({ code: 'WORKTREE_GIT_UNAVAILABLE' });
   });
 });
+
+describe('resolveWorktree at the repository boundary', () => {
+  let base: string;
+  let other: string;
+
+  beforeEach(() => {
+    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-worktree-boundary-')));
+    other = path.join(base, 'other');
+    fs.mkdirSync(other);
+    fs.writeFileSync(path.join(other, 'secret.ts'), 'export const secret = 1;\n');
+    git(other, 'init', '-q', '-b', 'main');
+    git(other, 'add', '.');
+    git(other, 'commit', '-q', '-m', 'other');
+  });
+
+  afterEach(() => {
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  /** A repository whose `.gitmodules` declares `sub`, with `sub` left to the caller to create. */
+  const pinnedWithDeclaredSubmodule = (): string => {
+    const pinned = path.join(base, 'pinned');
+    fs.mkdirSync(pinned);
+    fs.writeFileSync(path.join(pinned, 'package.json'), '{}');
+    fs.writeFileSync(path.join(pinned, '.gitmodules'), '[submodule "sub"]\n\tpath = sub\n\turl = ../other\n');
+    git(pinned, 'init', '-q', '-b', 'main');
+    return pinned;
+  };
+
+  it('refuses a submodule path that is a symlink to another repository', async () => {
+    const pinned = pinnedWithDeclaredSubmodule();
+    fs.symlinkSync(other, path.join(pinned, 'sub'));
+    git(pinned, 'add', '.');
+    git(pinned, 'commit', '-q', '-m', 'pinned');
+    await expect(resolveWorktree(pinned, other)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+  });
+
+  it('refuses a submodule whose .git file points at another repository', async () => {
+    const pinned = pinnedWithDeclaredSubmodule();
+    fs.mkdirSync(path.join(pinned, 'sub'));
+    fs.writeFileSync(path.join(pinned, 'sub', '.git'), `gitdir: ${path.join(other, '.git')}\n`);
+    git(pinned, 'add', '.gitmodules', 'package.json');
+    git(pinned, 'commit', '-q', '-m', 'pinned');
+    await expect(resolveWorktree(pinned, other)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+  });
+
+  it('refuses any selection when the served root is a subdirectory of its repository', async () => {
+    const mono = path.join(base, 'mono');
+    fs.mkdirSync(path.join(mono, 'packages', 'app'), { recursive: true });
+    fs.mkdirSync(path.join(mono, 'secret'));
+    fs.writeFileSync(path.join(mono, 'packages', 'app', 'package.json'), '{}');
+    fs.writeFileSync(path.join(mono, 'secret', 'notes.txt'), 'sibling\n');
+    git(mono, 'init', '-q', '-b', 'main');
+    git(mono, 'add', '.');
+    git(mono, 'commit', '-q', '-m', 'mono');
+    const pinned = path.join(mono, 'packages', 'app');
+    await expect(resolveWorktree(pinned, pinned)).rejects.toMatchObject({ code: 'WORKTREE_PINNED_SUBDIRECTORY' });
+    await expect(resolveWorktree(pinned, path.join(mono, 'secret'))).rejects.toMatchObject({ code: 'WORKTREE_PINNED_SUBDIRECTORY' });
+  });
+});
