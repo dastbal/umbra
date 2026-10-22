@@ -1,4 +1,5 @@
 import { readGitHead, readGitStatusPaths, runGit, type GitRunner } from '../config/git-worktrees';
+import type { WorkspaceDiscovery } from '../config/workspace-discovery';
 import type { IndexedGitState } from './index-stamp';
 
 /**
@@ -16,17 +17,31 @@ import type { IndexedGitState } from './index-stamp';
  * Captures the head and the uncommitted paths of a checkout.
  *
  * @param root - The checkout being indexed.
+ * @param discovery - When given, keeps only the discovered source paths.
  * @param git - Injectable runner.
  * @returns The state, or undefined outside git or for a repository with no commits.
  */
-export async function captureIndexedGitState(root: string, git: GitRunner = runGit): Promise<IndexedGitState | undefined> {
+export async function captureIndexedGitState(
+  root: string,
+  discovery?: Pick<WorkspaceDiscovery, 'sourceFiles'>,
+  git: GitRunner = runGit,
+): Promise<IndexedGitState | undefined> {
   const head = await readGitHead(git, root);
   if (head === undefined) return undefined;
+  let dirty: string[];
   try {
-    return { head, dirty: [...new Set(await readGitStatusPaths(git, root))].sort() };
+    dirty = await readGitStatusPaths(git, root);
   } catch {
     return { head, dirty: [] };
   }
+  // Only source the index could hold matters to an overlay. A checkout with
+  // thousands of untracked non-source files must not grow a stamp that every
+  // readiness check parses.
+  if (discovery !== undefined) {
+    const sources = new Set(discovery.sourceFiles.map((file) => file.relativePath));
+    dirty = dirty.filter((relativePath) => sources.has(relativePath));
+  }
+  return { head, dirty: [...new Set(dirty)].sort() };
 }
 
 /**

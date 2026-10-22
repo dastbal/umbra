@@ -650,7 +650,7 @@ export async function executeCodebaseSearch(input: {
     return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    if (isRetryableRead(error)) {
+    if (scope !== undefined && isRetryableRead(error)) {
       // A worktree read that could not take the index's write lock in time: a
       // peer is writing for a bounded time, so this is "come back", not a fault.
       const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_INDEX_UNAVAILABLE',

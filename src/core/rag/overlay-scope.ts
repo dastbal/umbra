@@ -142,20 +142,21 @@ export class OverlayScope {
     overlay: WorktreeOverlay,
     read: (view: OverlayView) => Promise<T> | T,
   ): Promise<{ result: T; stats: OverlayScopeStats }> {
-    return this.exclusive(async () => {
-      let attempts = 0;
-      for (;;) {
-        attempts += 1;
-        try {
-          const { result, windowMs, outlived } = await this.window(overlay, read);
-          return { result, stats: { attempts, windowMs, windowOutlivedMacrotask: outlived } };
-        } catch (error: unknown) {
-          if (!(error instanceof OverlayEmbeddingMiss) || attempts >= MAX_ATTEMPTS) throw error;
-          // Outside the window now: the rollback ran in `window`'s finally.
-          this.rememberQuery(error.text, await this.options.embeddings.embedQuery(error.text));
-        }
+    let attempts = 0;
+    for (;;) {
+      attempts += 1;
+      try {
+        // The queue is held per window, not per read: the provider call below
+        // runs outside it, so a slow embedding never delays another worktree's
+        // read in this process — the graph tools need no provider at all.
+        const { result, windowMs, outlived } = await this.exclusive(() => this.window(overlay, read));
+        return { result, stats: { attempts, windowMs, windowOutlivedMacrotask: outlived } };
+      } catch (error: unknown) {
+        if (!(error instanceof OverlayEmbeddingMiss) || attempts >= MAX_ATTEMPTS) throw error;
+        // Outside the window and the queue now: the rollback ran in `window`'s finally.
+        this.rememberQuery(error.text, await this.options.embeddings.embedQuery(error.text));
       }
-    });
+    }
   }
 
   /** Closes the dedicated connection. Exists for tests and shutdown. */
@@ -198,7 +199,10 @@ export class OverlayScope {
         const result = await read(view);
         return { result, windowMs: Date.now() - startedAt, outlived };
       } finally {
-        db.exec('ROLLBACK');
+        // SQLite rolls a transaction back by itself on some errors (a full
+        // disk, an I/O error); a second ROLLBACK would then throw and replace
+        // the real error with "no transaction is active".
+        if (db.inTransaction) db.exec('ROLLBACK');
         open = false;
       }
     } finally {
@@ -342,5 +346,7 @@ function readHiddenRows(db: Database.Database, hidden: readonly string[]): Hidde
 /** Whether an error is SQLite reporting a lock held by another connection. */
 function isBusy(error: unknown): boolean {
   const code = (error as { code?: unknown } | undefined)?.code;
-  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED';
+  // Extended codes included: `SQLITE_BUSY_RECOVERY` is a peer replaying the WAL
+  // after a crash, which is exactly as transient as a held lock.
+  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'));
 }

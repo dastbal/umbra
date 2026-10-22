@@ -10,7 +10,7 @@ import { embeddingInputFor } from './embedding-input';
 import { analyzeSourceFile, type AnalyzedSourceFile } from './indexed-file-rows';
 import { PrismaSchemaChunker } from './prisma-schema-chunker';
 import { decodeVector } from './vector-codec';
-import type { WorktreeDelta } from './worktree-delta';
+import { readRegularFileNoFollow, type WorktreeDelta } from './worktree-delta';
 
 /**
  * A worktree's rows, ready to be stacked on the base index (ADR-038).
@@ -75,7 +75,8 @@ const EMBED_BATCH_SIZE = 10;
 export class WorktreeOverlayBuilder {
   private readonly overlays = new Map<string, WorktreeOverlay>();
 
-  private readonly memo = new Map<string, readonly number[]>();
+  /** Kept as float32, the precision the index stores, at half the memory of a number array. */
+  private readonly memo = new Map<string, Float32Array>();
 
   /**
    * @param embeddings - Provider whose identity the overlay's vectors must share with the base index.
@@ -112,7 +113,10 @@ export class WorktreeOverlayBuilder {
     const startedAt = Date.now();
     const chunkers = { typescript: new NestChunker(delta.worktreeRoot), prisma: new PrismaSchemaChunker() };
     const analyzed = cached?.files.map((file) => file.analyzed) ?? delta.changed.map((file) => {
-      const content = fs.readFileSync(file.absolutePath, 'utf-8');
+      const content = readRegularFileNoFollow(file.absolutePath);
+      if (content === undefined) {
+        throw new Error(`${file.worktreePath} stopped being a regular file while its worktree overlay was built; retry.`);
+      }
       // Parsed in the worktree's own paths, so imports resolve against its
       // files, then moved to the index's paths (a submodule's prefix).
       return relocate(analyzeSourceFile(chunkers, { relativePath: file.worktreePath, kind: file.kind }, content), delta.indexPrefix);
@@ -174,8 +178,9 @@ export class WorktreeOverlayBuilder {
 
     const vectors: (readonly number[] | undefined)[] = inputs.map((input, index) => {
       const known = this.memo.get(keys[index]!) ?? fromBase.get(input);
-      if (known !== undefined) this.remember(keys[index]!, known);
-      return known;
+      if (known === undefined) return undefined;
+      this.remember(keys[index]!, known);
+      return Array.from(known);
     });
     const reused = vectors.filter((vector) => vector !== undefined).length;
 
@@ -188,7 +193,7 @@ export class WorktreeOverlayBuilder {
       }
       batch.forEach((index, position) => {
         vectors[index] = result[position]!;
-        this.remember(keys[index]!, result[position]!);
+        this.remember(keys[index]!, Float32Array.from(result[position]!));
       });
     }
 
@@ -196,7 +201,7 @@ export class WorktreeOverlayBuilder {
   }
 
   /** The base index's vectors for one path, keyed by the exact text each was embedded from. */
-  private baseVectorsByInput(relativePath: string, identity: EmbeddingsIdentity): Map<string, readonly number[]> {
+  private baseVectorsByInput(relativePath: string, identity: EmbeddingsIdentity): Map<string, Float32Array> {
     const rows = this.baseDb.prepare(`
       SELECT c.id, c.chunk_type, c.content, c.metadata, v.vector
         FROM code_chunks c
@@ -205,7 +210,7 @@ export class WorktreeOverlayBuilder {
     `).all(identity.provider, identity.model, relativePath) as Array<{
       id: string; chunk_type: ChunkType; content: string; metadata: string; vector: Buffer;
     }>;
-    const byInput = new Map<string, readonly number[]>();
+    const byInput = new Map<string, Float32Array>();
     for (const row of rows) {
       let metadata: ChunkMetadata;
       try {
@@ -215,14 +220,14 @@ export class WorktreeOverlayBuilder {
       }
       byInput.set(
         embeddingInputFor({ id: row.id, type: row.chunk_type, content: row.content, metadata }),
-        Array.from(decodeVector(row.vector)),
+        decodeVector(row.vector),
       );
     }
     return byInput;
   }
 
   /** Records a vector in the bounded memo. */
-  private remember(key: string, vector: readonly number[]): void {
+  private remember(key: string, vector: Float32Array): void {
     this.memo.delete(key);
     this.memo.set(key, vector);
     while (this.memo.size > MAX_MEMO_VECTORS) {

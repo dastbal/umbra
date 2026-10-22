@@ -116,11 +116,68 @@ describe('computeWorktreeDelta', () => {
     expect((await delta()).changed.map((file) => file.relativePath)).toEqual(['src/new.ts']);
   });
 
+  it('re-runs discovery when a tsconfig already modified in the worktree is edited again', async () => {
+    writeIn(linked, 'tsconfig.json', '{"include":["src/**/*.ts"],"compilerOptions":{"strict":true}}');
+    writeIn(linked, 'extra/added.ts', 'export const added = 1;\n');
+    expect((await delta()).changed.map((file) => file.relativePath)).toEqual([]);
+    // Same set of new paths, new content: the scope must be read again.
+    writeIn(linked, 'tsconfig.json', '{"include":["src/**/*.ts","extra/**/*.ts"]}');
+    const touched = path.join(linked, 'tsconfig.json');
+    const later = new Date(Date.now() + 5_000);
+    fs.utimesSync(touched, later, later);
+    expect((await delta()).changed.map((file) => file.relativePath)).toEqual(['extra/added.ts']);
+  });
+
   it('changes its signature exactly when the overlay must change', async () => {
     const first = (await delta()).signature;
     expect((await delta()).signature).toBe(first);
     writeIn(linked, 'src/a.ts', 'export const a = 2;\n');
     expect((await delta()).signature).not.toBe(first);
+  });
+});
+
+describe('computeWorktreeDelta inside a superproject worktree', () => {
+  let base: string;
+  let superproject: string;
+  let worktree: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    resetWorktreeDeltaCache();
+    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-delta-submodule-')));
+    const library = path.join(base, 'library');
+    fs.mkdirSync(path.join(library, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(library, 'src', 'kept.ts'), 'export const kept = 1;\n');
+    fs.writeFileSync(path.join(library, 'src', 'doomed.ts'), 'export const doomed = 1;\n');
+    git(library, 'init', '-q', '-b', 'main');
+    git(library, 'add', '.');
+    git(library, 'commit', '-q', '-m', 'library');
+    superproject = path.join(base, 'superproject');
+    fs.mkdirSync(superproject);
+    fs.writeFileSync(path.join(superproject, 'package.json'), '{}');
+    git(superproject, 'init', '-q', '-b', 'main');
+    git(superproject, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', library, 'lib');
+    git(superproject, 'commit', '-q', '-m', 'superproject');
+    worktree = path.join(base, 'feature');
+    git(superproject, 'worktree', 'add', '-q', '-b', 'feature', worktree);
+    git(worktree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '-q');
+
+    db = new Database(':memory:');
+    db.exec('CREATE TABLE file_registry (path TEXT PRIMARY KEY, hash TEXT, last_indexed INTEGER)');
+    db.prepare('INSERT INTO file_registry (path, hash) VALUES (?, ?)').run('lib/src/kept.ts', md5('export const kept = 1;\n'));
+    db.prepare('INSERT INTO file_registry (path, hash) VALUES (?, ?)').run('lib/src/doomed.ts', md5('export const doomed = 1;\n'));
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it('hides a file deleted inside a submodule the worktree checked out, which the superproject status never names', async () => {
+    fs.rmSync(path.join(worktree, 'lib', 'src', 'doomed.ts'));
+    const result = await computeWorktreeDelta({ repositoryRoot: superproject, worktreeRoot: worktree, db });
+    expect(result.deleted).toEqual(['lib/src/doomed.ts']);
+    expect(result.changed).toEqual([]);
   });
 });
 

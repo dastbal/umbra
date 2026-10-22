@@ -69,9 +69,10 @@ export interface IndexedGitState {
   /** Commit checked out when the run started. */
   readonly head: string;
   /**
-   * Root-relative paths with uncommitted changes at the run's start or end,
-   * plus — until a run completes — the previous stamp's, because a file a
-   * partial run left pending still holds the older run's content.
+   * Root-relative source paths with uncommitted changes at the run's start or
+   * end, plus every file the run left pending, whose registry row still holds
+   * an older version than its disk. A run that fails before re-indexing any
+   * file keeps the previous stamp's state, which still describes the registry.
    */
   readonly dirty: readonly string[];
 }

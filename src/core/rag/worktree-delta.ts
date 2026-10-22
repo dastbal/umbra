@@ -6,6 +6,7 @@ import {
   readGitHead,
   readGitStatusPaths,
   readGitTrackedPaths,
+  readInitialisedSubmodules,
   runGit,
   type GitRunner,
 } from '../config/git-worktrees';
@@ -149,6 +150,7 @@ export async function computeWorktreeDelta(input: WorktreeDeltaInput): Promise<W
   // Paths git itself says differ: these may be deleted as well as changed.
   const deletable = new Set<string>([
     ...worktreeStatus, ...repositoryStatus, ...repositoryDiff, ...indexedDiff, ...(stamp?.git?.dirty ?? []),
+    ...(sameCheckout ? [] : await initialisedSubmoduleProposals(git, realWorktree, input.repositoryRoot)),
   ]);
   const candidates = new Set<string>([...deletable, ...untrackedIndexed.keys()]);
 
@@ -156,7 +158,7 @@ export async function computeWorktreeDelta(input: WorktreeDeltaInput): Promise<W
   const changed: DeltaFile[] = [];
   const deleted: string[] = [];
   const hashes = new Map<string, string>();
-  const unindexed: string[] = [];
+  const unindexed: { worktreePath: string; absolutePath: string }[] = [];
   // Ignored artifacts usually live under a directory the worktree does not
   // have at all (a nested repository, `.worktrees/<name>/`): checking each
   // ancestor directory once skips every file under a missing one, instead of
@@ -175,10 +177,11 @@ export async function computeWorktreeDelta(input: WorktreeDeltaInput): Promise<W
       continue;
     }
     if (indexedHash === undefined) {
-      unindexed.push(worktreePath);
+      unindexed.push({ worktreePath, absolutePath });
       continue;
     }
     const hash = md5File(absolutePath);
+    if (hash === undefined) continue;
     if (hash !== indexedHash) {
       changed.push({ absolutePath, relativePath: toIndex(worktreePath), worktreePath, kind: artifactKindOf(worktreePath) });
       hashes.set(toIndex(worktreePath), hash);
@@ -189,13 +192,14 @@ export async function computeWorktreeDelta(input: WorktreeDeltaInput): Promise<W
   // it — a new `.ts` outside every tsconfig, or a spec, is not source here
   // either. Discovery runs only when such a path exists.
   if (unindexed.length > 0) {
-    const scope = discoveredScope(worktreeRoot, worktreeHead, unindexed, input.discover);
-    for (const worktreePath of unindexed) {
+    const scope = discoveredScope(worktreeRoot, worktreeHead, unindexed.map((entry) => entry.worktreePath), input.discover);
+    for (const { worktreePath, absolutePath } of unindexed) {
       const kind = scope.get(worktreePath);
       if (kind === undefined) continue;
-      const absolutePath = path.join(realWorktree, worktreePath);
+      const hash = md5File(absolutePath);
+      if (hash === undefined) continue;
       changed.push({ absolutePath, relativePath: toIndex(worktreePath), worktreePath, kind });
-      hashes.set(toIndex(worktreePath), md5File(absolutePath));
+      hashes.set(toIndex(worktreePath), hash);
     }
   }
 
@@ -222,6 +226,30 @@ export function resetWorktreeDeltaCache(): void {
   untrackedIndexedCache.clear();
 }
 
+/**
+ * Changes inside the submodules a superproject worktree has initialised.
+ *
+ * The superproject's own status reports a submodule as one modified gitlink,
+ * never the files in it, and its `ls-files` lists none of them, so without
+ * this a file deleted inside a worktree's submodule would be handled as an
+ * ignored artifact and stay visible. Each submodule the worktree checked out
+ * is asked directly, against the same submodule in the main checkout.
+ */
+async function initialisedSubmoduleProposals(git: GitRunner, worktreeRoot: string, repositoryRoot: string): Promise<string[]> {
+  const submodules = await readInitialisedSubmodules(git, worktreeRoot);
+  const proposals = await Promise.all(submodules.map(async (submodule) => {
+    const inWorktree = path.join(worktreeRoot, submodule);
+    const [status, worktreeHead, mainHead] = await Promise.all([
+      readGitStatusPaths(git, inWorktree).catch(() => [] as string[]),
+      readGitHead(git, inWorktree),
+      readGitHead(git, path.join(repositoryRoot, submodule)),
+    ]);
+    const committed = await treeDiff(git, inWorktree, mainHead, worktreeHead);
+    return [...status, ...committed].map((relativePath) => `${submodule}/${relativePath}`);
+  }));
+  return proposals.flat();
+}
+
 /** Paths that differ between two commits; empty when either is unknown or they are equal. */
 async function treeDiff(git: GitRunner, root: string, from: string | undefined, to: string | undefined): Promise<string[]> {
   if (from === undefined || to === undefined || from === to) return [];
@@ -234,9 +262,11 @@ async function treeDiff(git: GitRunner, root: string, from: string | undefined, 
       .split('\0')
       .filter((entry) => entry.length > 0);
   } catch {
-    // A recorded head that this repository no longer has (rewritten history):
-    // the other proposals still stand, and the hash check stays exact for them.
-    paths = [];
+    // A recorded head that this repository no longer has (rewritten history),
+    // or a git that timed out under load: the other proposals still stand, and
+    // the hash check stays exact for them. Not cached, so a transient failure
+    // is asked again next call rather than remembered as "nothing changed".
+    return [];
   }
   treeDiffCache.set(key, paths);
   return paths;
@@ -280,6 +310,16 @@ async function untrackedIndexedPaths(
   }
   untrackedIndexedCache.set(repositoryRoot, { key, hashes });
   return hashes;
+}
+
+/** Size and modification time, as a cache-key fragment; empty when the path cannot be read. */
+function statStamp(absolutePath: string): string {
+  try {
+    const stat = fs.lstatSync(absolutePath);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return '';
+  }
 }
 
 /** Whether every ancestor directory of the path exists in the worktree, memoized for one delta. */
@@ -335,9 +375,34 @@ function containedRegularFile(realRoot: string, relativePath: string): string | 
   }
 }
 
-/** The registry's definition of a content change. */
-function md5File(absolutePath: string): string {
-  return crypto.createHash('md5').update(fs.readFileSync(absolutePath, 'utf-8')).digest('hex');
+/** The registry's definition of a content change, or undefined when the file is no longer a regular file. */
+function md5File(absolutePath: string): string | undefined {
+  const content = readRegularFileNoFollow(absolutePath);
+  return content === undefined ? undefined : crypto.createHash('md5').update(content).digest('hex');
+}
+
+/**
+ * Reads a file only if it is still a regular file when opened.
+ *
+ * `containedRegularFile` checks the path, and this read happens after it; a
+ * file swapped for a symlink in between would otherwise be followed outside
+ * the worktree. `O_NOFOLLOW` makes the open itself refuse a symlink, and the
+ * check runs on the descriptor that is read.
+ *
+ * @param absolutePath - A path already resolved inside the worktree.
+ * @returns The content, or undefined when the path is no longer a regular file.
+ */
+export function readRegularFileNoFollow(absolutePath: string): string | undefined {
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(absolutePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    if (!fs.fstatSync(descriptor).isFile()) return undefined;
+    return fs.readFileSync(descriptor, 'utf-8');
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
 }
 
 /** Same rule as `WorkspaceDiscoveryService.artifactKindOf`, for a path the index already holds. */
@@ -353,7 +418,10 @@ function discoveredScope(
   unindexed: readonly string[],
   discover: ((root: string) => WorkspaceDiscovery) | undefined,
 ): ReadonlyMap<string, WorkspaceArtifactKind> {
-  const key = `${head ?? ''}\0${unindexed.join('\0')}`;
+  // The paths alone are not enough: a tsconfig already modified in the
+  // worktree stays in the list when it is edited again, and that edit can
+  // bring a new file into scope. Size and mtime of each path change with it.
+  const key = `${head ?? ''}\0${unindexed.map((relativePath) => `${relativePath}@${statStamp(path.join(root, relativePath))}`).join('\0')}`;
   const cached = discoveryCache.get(root);
   if (cached !== undefined && cached.key === key) return cached.files;
   let files: Map<string, WorkspaceArtifactKind>;

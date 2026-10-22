@@ -310,6 +310,30 @@ describe('WorktreeViewService', () => {
     expect(seen.result.outside).toBe(0);
   });
 
+  it('never makes a graph read wait for another read\'s query embedding', async () => {
+    const worktree = await views.resolve(linked);
+    await views.read(worktree, { embed: true }, () => 'warm the overlay');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow = embeddings.embedQuery;
+    embeddings.embedQuery = async (text: string) => {
+      await gate;
+      return slow(text);
+    };
+    const pendingSearch = executeCodebaseSearch({ query: 'chargeback' }, { read: (read) => views.read(worktree, { embed: true }, read) });
+    // Let the search reach its provider call, outside the window.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const graph = await views.read(worktree, { embed: false }, (view) =>
+      executeDependencyGraph({ filePath: 'src/disputes/dispute.service.ts', direction: 'inbound' }, { db: view.db }));
+    expect(graph.result.status).toBe('success');
+
+    release();
+    expect((await pendingSearch).result.status).toBe('success');
+  });
+
   it('rolls back when the read throws', async () => {
     const before = baseFingerprint(dbPath);
     const worktree = await views.resolve(linked);

@@ -200,7 +200,7 @@ export class IndexerService {
     // Read before any file is, so the head names the commit every clean file
     // came from (ADR-038). Commits made during the run stay between this head
     // and any worktree, where an overlay can still see them.
-    const gitAtStart = await captureIndexedGitState(rootDir);
+    const gitAtStart = await captureIndexedGitState(rootDir, discovery);
 
     const filesToProcess: WorkspaceFile[] = [];
 
@@ -281,7 +281,9 @@ export class IndexerService {
         coveredFiles: this.countCoveredFiles(),
         status: 'partial',
         diagnostic,
-        git: gitAtStart,
+        // No file was re-indexed yet, so the previous run's state still
+        // describes what the registry holds.
+        git: previous?.git ?? gitAtStart,
       });
       throw error;
     }
@@ -297,7 +299,8 @@ export class IndexerService {
         discoveredFiles: discovery.sourceFiles.length,
         coveredFiles: this.countCoveredFiles(),
         status: 'complete',
-        git: mergeIndexedGitState(gitAtStart, await captureIndexedGitState(rootDir)),
+        // Nothing was re-read, so the state at the start is the whole story.
+        git: gitAtStart,
       });
       return { disposition: 'completed', filesIndexed: 0, status: 'complete' };
     }
@@ -338,7 +341,7 @@ export class IndexerService {
       coveredFiles: this.countCoveredFiles(),
       status: failures.length > 0 ? 'partial' : 'complete',
       diagnostic: failures.length > 0 ? failures.slice(0, 5).join('; ') : undefined,
-      git: mergeIndexedGitState(gitAtStart, await captureIndexedGitState(rootDir), pendingPaths),
+      git: mergeIndexedGitState(gitAtStart, await captureIndexedGitState(rootDir, discovery), pendingPaths),
     });
     return {
       disposition: 'completed',
