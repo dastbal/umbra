@@ -2406,3 +2406,47 @@ it.
 2. Add a real-`createAgent` spec, in the style of
    `compact-todo-tool.middleware.spec.ts`, asserting the exhausted instruction
    is in what the model is bound with — which no current test checks.
+
+## Worktree overlays: what ADR-038 left for later
+
+> Deferred 2026-10-22. Found while building and measuring worktree overlays.
+
+### The idea
+
+Finish the pattern ADR-038 started: make the overlay's first call cheap, share
+it across processes, and extend `worktree` to the remaining tools.
+
+### What is actually missing
+
+- **A persistent, content-keyed vector cache.** The overlay's memo lives in one
+  process. On a superproject worktree with 86 changed files, the first call
+  embedded 590 chunks in 22.5 s with Ollama. Three processes on one repository
+  each pay that once, and every restart pays it again. Keying `chunk_vectors`
+  (or a side table) by provider, model and embedding input would let any
+  process, any worktree and the base indexer reuse a vector. It is Cursor's
+  *"caches embeddings by chunk content"*. It needs a schema change, and so an
+  explicit decision.
+- **One server per repository.** gopls runs *"the gopls daemon"* that every
+  editor's process forwards to (`-remote=auto`), because *"many processes means
+  having many caches"*. On 2026-10-22, three Umbra processes served one
+  repository at 200–390 MB each, each with its own overlay cache.
+- **`worktree` on `investigate_graphrag`, `list_adrs`, `run_integrity_check` and
+  `continue_conversation`.** They still read the pinned root.
+  `run_integrity_check` executes `tsc`, so a worktree there is a new decision,
+  not a parameter.
+- **Warming an overlay before it is asked for.** For example on
+  `get_index_status` with `worktree`, which computes the delta already and
+  could start the build in the background.
+
+### The mechanism to reuse
+
+`WorktreeOverlayBuilder.vectorsFor` already separates *which inputs need a
+vector* from *where a vector comes from*; a persistent cache is a third source
+beside the base lookup and the memo. `start-mcp-server.ts` already isolates the
+startup order a daemon would have to keep.
+
+### Plan
+
+Measure first, as ADR-031 asks. Count how often a first worktree call exceeds
+a few seconds in real use before building either the cache or the daemon.
+

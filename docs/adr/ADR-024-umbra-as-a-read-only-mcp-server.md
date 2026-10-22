@@ -82,6 +82,8 @@ which makes writes technically unavailable in this mode.
    a root from an argument would reopen the whole path-traversal surface of
    ADR-011 and hand it to a remote caller. This is the single security decision
    the mode depends on.
+   *(Narrowed 2026-10-22, see the amendment of that date: a tool may select one
+   of the pinned repository's own git worktrees; the root itself stays pinned.)*
 4. **`stdout` belongs to the protocol.** Over stdio, JSON-RPC travels on stdout.
    Any log written there corrupts the connection.
 5. **The index must be warm.** `askCodebaseTool` reads from SQLite via `AgentDB`;
@@ -1152,3 +1154,46 @@ explains is a decision that needs a reason to reopen, and "a newer version
 exists" is not one. When there is a reason, the check to repeat is amendment
 6's: `node -e "require('@modelcontextprotocol/sdk/server/mcp.js')"` from the
 compiled output, then the handshake timing.
+
+---
+
+## Amendment — 2026-10-22: constraint 3's boundary is the repository, not one directory
+
+Constraint 3 says the root is pinned at launch and **"never read from a tool
+argument"**, because an argument would reopen ADR-011's path-traversal surface
+and hand it to a remote caller. The first half still holds without exception.
+The second half is narrowed by [ADR-038](./ADR-038-a-worktree-is-an-overlay-on-one-index.md),
+and this amendment records how, so the narrowing is not read as the constraint
+being dropped.
+
+**Why it had to move.** Claude Code starts one server per session and its
+subagents share it, and the server's only root sources all name the session's
+main checkout. That holds even for a desktop worktree session. An agent
+working in a git worktree therefore had no way to be answered about its own
+files. Measured on 2026-10-22: three servers for one repository, every one
+rooted at the main checkout, while ten worktrees of that repository had no
+index.
+
+**What a tool may now do.** `ask_codebase`, `search_workspace`,
+`inspect_project`, `query_dependency_graph`, `query_nest_graph` and
+`get_index_status` accept an optional `worktree`. The argument **selects**, it
+does not authorise. `resolveWorktree` in `src/core/config/git-worktrees.ts`
+accepts only a worktree that `git worktree list` reports for the pinned root or
+for one of its initialised submodules, plus the submodule's own checkout. It
+compares both sides after `realpath`, and it requires the selection to share
+that repository's `--git-common-dir`. Any other path is refused, however it is
+spelt. The pinned root itself cannot change, so no argument can make the server
+answer about another repository.
+
+**What it may read there.** The selected worktree is read only as discovery
+reads a root. The live tools search it under `WorkspaceEvidenceService`'s
+existing containment rules. The index overlay reads only regular files whose
+`realpath` stays inside the worktree, and never a symlink. Nothing is written:
+the overlay lives in a transaction that is always rolled back (ADR-038 §4), so
+constraint 2, *no writes*, is unchanged.
+
+**What did not change.** `run_integrity_check` still takes no argument and still
+runs in the pinned root. `continue_conversation`, `list_adrs` and
+`investigate_graphrag` still read the pinned root. The server instructions now
+say a worktree may be named, and still say the repository cannot be changed by
+a tool argument, which remains true.
