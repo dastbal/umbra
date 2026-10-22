@@ -45,10 +45,11 @@ let viewModule: typeof WorktreeViewModule | undefined;
 /**
  * Loads the worktree view on first use.
  *
- * Required lazily, like the indexing modules in `start-mcp-server.ts`: it pulls
- * in the indexer and the TypeScript chunker, and an eager import of the indexer
- * once cost 2.9 s before the MCP handshake (ADR-024 amendment 15). A session
- * that never selects a worktree never pays for it.
+ * Required lazily, like the indexing modules in `start-mcp-server.ts`, so the
+ * overlay modules stay off the path to the MCP handshake (ADR-024 amendment
+ * 15). This does not keep the indexer itself off that path: it is already
+ * reached at startup through the `core/tools` barrel, which `file-tools.ts`
+ * imports it into — a cost that predates worktree selection.
  */
 function loadWorktreeViews(): typeof WorktreeViewModule {
   // eslint-disable-next-line @typescript-eslint/no-var-requires

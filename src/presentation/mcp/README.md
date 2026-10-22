@@ -85,8 +85,9 @@ current working directory, and the server instructions say so.
 - **Index reads** go through `WorktreeViewService` in
   `src/core/rag/worktree-view.ts`. The worktree's changed files are stacked on
   the base index inside a transaction that is always rolled back, so the index
-  is never written. The module is required lazily, so a session that never
-  names a worktree never loads the indexer it imports.
+  is never written. The module is required lazily, which keeps the overlay
+  modules off the startup path; the indexer itself is already loaded at startup
+  through the `core/tools` barrel, a cost older than this feature.
 - **Live reads** (`search_workspace`, `inspect_project`) read the worktree's
   files directly.
 - **Provenance**: every such result carries `worktree` (`toolWorktreeSchema`):

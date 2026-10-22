@@ -96,6 +96,22 @@ Anything else is `WORKTREE_NOT_REGISTERED`. The pinned root is still pinned at
 launch, and no argument can make Umbra serve another repository (ADR-024's
 2026-10-22 amendment).
 
+Two rules were added after review, both reproduced on fixtures first:
+
+- **A submodule must really be this repository's.** Its declared path must be a
+  real directory inside the pinned root, not a symlink (`lstat`). Its
+  `--git-common-dir` must also lie inside the pinned root or inside the pinned
+  repository's own common dir, which is where git absorbs submodules, under
+  `modules/`. Before this rule, a `.gitmodules` path that was a symlink to
+  another repository made that repository selectable (`isOwnSubmodule`).
+- **The served root must be the top level of its repository.** When Umbra is
+  pinned to a subdirectory (a monorepo package with its own `package.json`),
+  every worktree root lies above it, so a selection would widen the server to
+  its siblings. That is refused as `WORKTREE_PINNED_SUBDIRECTORY`, not mapped:
+  no measured case pins a subdirectory, and mapping would need every git path
+  rebased, because porcelain paths are relative to the top level.
+
+
 ### 2. Git proposes, the content hash decides
 
 `computeWorktreeDelta` in `src/core/rag/worktree-delta.ts` asks git which paths
@@ -135,13 +151,25 @@ Three rules decide the edge cases:
   call to find edits the no-argument path does not see either.
 - **A symlink is never read.** A candidate is read only when `lstat` says it is
   a regular file whose `realpath` stays inside the worktree. Discovery already
-  skips symlinks; an indexed path replaced by one is hidden (ADR-011).
+  skips symlinks; an indexed path replaced by one is hidden (ADR-011). The read
+  itself opens the checked path with `O_NOFOLLOW` and checks the descriptor
+  (`readRegularFileNoFollow`), so a file swapped for a symlink after the check
+  is refused too.
+- **A submodule a superproject worktree has checked out is asked directly.**
+  The superproject's status names only the submodule's gitlink, and its
+  `ls-files` lists none of the submodule's files. So each submodule the
+  worktree has initialised gets its own status and head diff
+  (`initialisedSubmoduleProposals`). Without that, a file deleted in it would
+  be treated as an ignored artifact and stay visible.
 
 A path the index has never held enters the overlay only if discovery would index
 it in the worktree (`discoveredScope`), so a new spec or a file outside every
 tsconfig is not source. Discovery takes half a second on that repository, so it
-runs only when such a path appears, and its answer is cached until the head or
-the set of new paths changes.
+runs only when such a path appears. Its answer is cached until the head, the set
+of new paths, or the size or mtime of one of them changes: a tsconfig edited
+twice stays in the set, and its second edit can bring a file into scope. A `git
+diff` that fails, for example by timing out under load, is never cached as
+"nothing changed".
 
 For a submodule's worktree, every path is translated by the worktree's
 `indexPrefix`: `src/a.ts` there is `LONDONUW-AGENTS-DASHBOARD/src/a.ts` in the
@@ -208,9 +236,15 @@ in the other Umbra processes on the same index would hit their 5,000 ms busy
 timeout. So inside the window only synchronous SQL runs, plus query embeddings
 answered from a memo. When a query's embedding is not in the memo, the view
 throws, the window rolls back, the text is embedded outside, and the read is
-retried (at most three attempts: the query, and the clarified query). A
-`setImmediate` tripwire reports any window that outlived its macrotask
-(`windowOutlivedMacrotask`). The connection waits at most 1,000 ms for a peer's
+retried (at most three attempts: the query, and the clarified query). That
+provider call runs outside the window and outside the per-process queue, which
+is taken per window rather than per read. A slow embedding therefore never
+delays another worktree read in the process, and the graph tools need no
+provider at all. A `setImmediate` tripwire reports any window that outlived its
+macrotask (`windowOutlivedMacrotask`). `ROLLBACK` runs only while a transaction
+is still open, because SQLite rolls back by itself on some errors and a second
+`ROLLBACK` would replace the real error. An extended `SQLITE_BUSY_*` code counts
+as busy. The connection waits at most 1,000 ms for a peer's
 lock and then reports `OverlayBusyError`. The scope refuses to open while this
 process is indexing (`IndexerService.running`). And the singleton connection is
 opened before the first window, so its schema writes never meet the lock.
@@ -236,9 +270,11 @@ argument, each tool behaves exactly as before.
   worktrees is `blocked`.
 - An alias learned from a worktree answer is never staged for the base index,
   because it could name paths only that worktree has.
-- `worktree-view.ts` is required lazily (`loadWorktreeViews`). It pulls in the
-  indexer and the TypeScript chunker, and an eager import of the indexer once
-  cost 2.9 s before the handshake (ADR-024 amendment 15).
+- `worktree-view.ts` is required lazily (`loadWorktreeViews`), which keeps the
+  overlay modules off the path to the handshake (ADR-024 amendment 15). Review
+  found that this does not keep the *indexer* off it: the `core/tools` barrel
+  already reaches it at startup through `file-tools.ts`. That is older than
+  this decision and is left to its own change.
 
 ```mermaid
 flowchart LR
@@ -324,7 +360,21 @@ flowchart LR
   after indexing is not detected, which is the existing behaviour.
 - **The stamp's git state describes the pinned repository only.** For a
   submodule's worktree, commits made in the submodule's checkout after indexing
-  are found through its current head and status, not through the stamp.
+  are found through its current head and status, not through the stamp, so a
+  `git pull` in the submodule without a re-index is served as the base's
+  version, the same staleness the no-argument path has. Recording a state per
+  submodule would cost two git calls per submodule on every index run, and the
+  CLI re-indexes after every write.
+- **One read can race a peer's re-index.** The delta is computed before the
+  window, and the window stacks on the latest committed snapshot. If, in
+  between, a peer re-indexes a file that the worktree had unchanged and the
+  main checkout then edited, that one read serves the main checkout's new
+  version. The next read recomputes. Only the hidden rows' rowids are
+  re-validated inside the window.
+- **Each index run now spawns git**: a head and a status at the start, and again
+  at the end when files were processed. The recorded uncommitted paths are
+  limited to discovered source, so a checkout with many untracked non-source
+  files does not grow the stamp.
 
 ## Verification Evidence
 
@@ -349,6 +399,18 @@ flowchart LR
     the index's paths.
   - `src/presentation/mcp/tool-catalog.spec.ts`: exactly the six tools above
     publish an optional `worktree`.
+  - Added after review, each run first against the previous commit to see it
+    fail. In `git-worktrees.spec.ts`: a submodule path that is a symlink to
+    another repository, a submodule `.git` file pointing at one, and a
+    subdirectory pin (3 failed before the fix, 0 after). In
+    `worktree-delta.spec.ts`: a file deleted inside a superproject worktree's
+    submodule, and a tsconfig edited twice (2 failed before). In
+    `worktree-view.spec.ts`: a graph read made while another read waits on its
+    query embedding (1 failed before, because the old queue held the provider
+    call).
+- **Review before the PR:** four sasori, one lens each (concurrency, security,
+  delta correctness, no-argument regressions). Their findings and what was done
+  with each are listed in the PR body.
 - **Live, through the compiled binary.** `node dist/bin/cli.js mcp --root
   <clone>` was driven over stdio JSON-RPC on a clone of this repository, with
   Ollama `nomic-embed-text`. In its worktree, one file gained a function and one

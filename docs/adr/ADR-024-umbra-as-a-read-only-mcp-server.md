@@ -1181,8 +1181,11 @@ does not authorise. `resolveWorktree` in `src/core/config/git-worktrees.ts`
 accepts only a worktree that `git worktree list` reports for the pinned root or
 for one of its initialised submodules, plus the submodule's own checkout. It
 compares both sides after `realpath`, and it requires the selection to share
-that repository's `--git-common-dir`. Any other path is refused, however it is
-spelt. The pinned root itself cannot change, so no argument can make the server
+that repository's `--git-common-dir`. A submodule counts only when its path is
+a real directory inside the root, not a symlink, and its git data lives in this
+repository. A root that is a subdirectory of its repository refuses every
+selection, because every worktree root lies above it. Any other path is
+refused, however it is spelt. The pinned root itself cannot change, so no argument can make the server
 answer about another repository.
 
 **What it may read there.** The selected worktree is read only as discovery
