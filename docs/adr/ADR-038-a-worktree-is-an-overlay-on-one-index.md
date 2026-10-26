@@ -344,6 +344,10 @@ flowchart LR
   call took 0 ms. The memo lives in each process, so each of three processes on
   one repository pays it once, and a restart pays it again. A persistent
   content-keyed vector cache or a shared server would remove that (deferred).
+
+  > The repeated-session cost in this observation was closed by the 2026-10-26
+  > amendment below. The first embedding of genuinely new content still costs
+  > a provider call.
 - **Every worktree read takes the index's write lock** for the window: 23–32 ms
   to stack 21 files on that repository's copy. Peers' writes wait for it. A read
   that meets a peer's lock for more than 1,000 ms abstains and asks to be
@@ -490,3 +494,25 @@ SDKs before the MCP handshake, even though the catalog only uses read-only
 operations. A module-load check before the change confirmed `indexer.ts` was
 present in `require.cache`; the direct import removes that path. Index warm-up
 still starts after transport connection.
+
+### Measured after the cache change
+
+`npm run bench:cache -- --source-db <memory.db> --count 590` read 590 unique
+`code_chunks` from an existing Umbra index without changing it, sent their
+exact `embeddingInputFor` strings to local Ollama `nomic-embed-text` in batches
+of ten, then opened the cache from a fresh Node process. On 2026-10-26:
+
+| Vector phase | Time | Ollama calls | Cache hits |
+|---|---:|---:|---:|
+| Cold, generating and storing vectors | 10.10 s | 590 | 0 |
+| Fresh process, median of five reads | 67.55 ms | 0 | 590 |
+
+The warm reads ranged from 54.22 to 91.40 ms; the vector phase was about 150×
+faster. The report and input-set hash are in
+`docs/benchmarks/results/2026-10-26-embedding-cache-590-ollama.json`.
+This is a separate corpus from the 86-file worktree that took 22.5 s. The
+benchmark excludes git delta, parsing, the overlay window, and MCP transport,
+so it does not claim a 150× end-to-end tool improvement. The integration test
+also recreates `WorktreeViewService` and verifies that the second service
+embeds zero changed chunks; together these show why a new session no longer
+repeats the provider cost.

@@ -1,0 +1,31 @@
+{
+  "benchmark": "embedding-cache-across-processes",
+  "measuredAt": "2026-10-26T15:05:14.626Z",
+  "scope": "vector generation and cache lookup only; excludes git delta, parsing, overlay transaction and MCP transport",
+  "source": "unique code_chunks from an existing read-only Umbra index",
+  "inputCount": 590,
+  "inputHash": "dbdd8925be49c484b6ba5073f6ebfa2b58ba86ad51f2ebcf53ae4086541a8da5",
+  "identity": {
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "dimensions": 768
+  },
+  "cold": {
+    "elapsedMs": 10103.276144,
+    "providerMs": 10024.837279000001,
+    "providerCalls": 590
+  },
+  "freshProcess": {
+    "elapsedMsMedian": 67.549232,
+    "samplesMs": [
+      91.403955,
+      67.549232,
+      54.215489,
+      79.873505,
+      62.869035
+    ],
+    "providerCalls": 0,
+    "hits": 590
+  },
+  "cacheFileBytes": 2510848
+}
