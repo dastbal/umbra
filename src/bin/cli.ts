@@ -198,7 +198,7 @@ async function recoverIncompleteDeepSession(
       return agent;
     }
 
-    const cleared = DeepAgentFactory.clearCorruptedCheckpoint(
+    const cleared = await DeepAgentFactory.clearCorruptedCheckpoint(
       process.cwd(),
       threadId,
       'simple',
@@ -898,7 +898,7 @@ program
           chalk.yellow(`   Auto-clearing session "${options.session}" and retrying...\n`)
         );
 
-        const cleared = DeepAgentFactory.clearCorruptedCheckpoint(process.cwd(), threadId, 'simple');
+        const cleared = await DeepAgentFactory.clearCorruptedCheckpoint(process.cwd(), threadId, 'simple');
         if (cleared) {
           try {
             const recoveryConfig = loadAgentConfig(process.cwd());

@@ -18,6 +18,8 @@ export interface DependencyGraphReadiness {
   readonly reason: string;
   /** Indexed source files whose dependency projection is missing or stale. */
   readonly pendingFiles: number;
+  /** Bounded sample of the exact files that need a fresh dependency scan. */
+  readonly affectedPaths: string[];
 }
 
 /**
@@ -82,22 +84,25 @@ export function inspectDependencyGraphReadiness(
     "SELECT COUNT(*) AS count FROM file_registry WHERE index_state = 'indexed'",
   ).get() as { count: number };
   if (indexed.count === 0) {
-    return { ready: false, reason: 'No indexed source files are available.', pendingFiles: 0 };
+    return { ready: false, reason: 'No indexed source files are available.', pendingFiles: 0, affectedPaths: [] };
   }
 
   const pending = db.prepare(`
-    SELECT COUNT(*) AS count
+    SELECT r.path AS path
       FROM file_registry r
       LEFT JOIN dependency_scan s ON s.file_path = r.path
      WHERE r.index_state = 'indexed' AND (s.hash IS NULL OR s.hash <> r.hash)
-  `).get() as { count: number };
-  if (pending.count > 0) {
+     ORDER BY r.path
+  `).all() as { path: string }[];
+  if (pending.length > 0) {
+    const affectedPaths = pending.slice(0, 20).map((row) => row.path);
     return {
       ready: false,
-      reason: `${pending.count} indexed source file(s) lack a current dependency scan.`,
-      pendingFiles: pending.count,
+      reason: `${pending.length} indexed source file(s) lack a current dependency scan: ${affectedPaths.join(', ')}.`,
+      pendingFiles: pending.length,
+      affectedPaths,
     };
   }
 
-  return { ready: true, reason: 'Dependency relationships cover the indexed source corpus.', pendingFiles: 0 };
+  return { ready: true, reason: 'Dependency relationships cover the indexed source corpus.', pendingFiles: 0, affectedPaths: [] };
 }

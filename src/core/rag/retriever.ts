@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import { AgentDB } from '../state/db';
 import { cosineSimilarity } from './math';
 import { assessUnknownTerms, unknownTermReport } from './unknown-terms';
@@ -18,6 +19,7 @@ import {
 import {
   fuseRankings,
   hasGroundedEvidence,
+  preferExecutableEvidence,
   RetrievalEvidence,
 } from './hybrid-ranking';
 import { renderSkeletonForContext } from './skeleton-render';
@@ -84,6 +86,8 @@ export type RetrievalContextResult =
       readonly recoveredWithContext: boolean;
       /** Repeated manner modifiers omitted only from the absence gate. */
       readonly ignoredModifiers: readonly string[];
+      /** Unknown terms omitted from the absence gate because another subject is grounded. */
+      readonly droppedTerms: readonly string[];
       readonly files: readonly RetrievalFileContext[];
       readonly provenance?: RetrievalProvenance;
     }
@@ -163,12 +167,29 @@ export function formatRetrievalContextForLLM(result: RetrievalContextResult): st
   return output;
 }
 
-export class RetrieverService {
-  private db = AgentDB.getInstance();
+/** Optional collaborators for {@link RetrieverService}; every default is the process's own index. */
+export interface RetrieverOptions {
+  /**
+   * Connection to read the index through. A worktree overlay (ADR-038) passes
+   * its own connection, on which the worktree's rows are stacked.
+   */
+  readonly db?: Database.Database;
+  /**
+   * Whether `vec_distance_cosine` is loaded on {@link db}. Extensions load per
+   * connection, so the process-wide status describes only the default one.
+   */
+  readonly vectorSearchAvailable?: boolean;
+}
 
-  private readonly retrievalMemory = new RetrievalMemoryService(this.db);
+export class RetrieverService {
+  private readonly db: Database.Database;
+
+  private readonly retrievalMemory: RetrievalMemoryService;
 
   private readonly embeddings: EmbeddingsPort;
+
+  /** Whether SQL vector ranking is available on {@link db}; undefined means the default connection's status. */
+  private readonly vectorSearchAvailable?: boolean;
 
   /** Provenance of the most recent {@link query}, if one has run. */
   private lastProvenance?: RetrievalProvenance;
@@ -184,9 +205,13 @@ export class RetrieverService {
    *        provider, so existing callers such as `askCodebaseTool` — which do
    *        `new RetrieverService()` — keep working unchanged. The parameter is
    *        the injection seam tests and the MCP adapter use.
+   * @param options - Connection to read through; defaults to the process's index.
    */
-  constructor(embeddings: EmbeddingsPort = resolveEmbeddings().port) {
+  constructor(embeddings: EmbeddingsPort = resolveEmbeddings().port, options: RetrieverOptions = {}) {
     this.embeddings = embeddings;
+    this.db = options.db ?? AgentDB.getInstance();
+    this.retrievalMemory = new RetrievalMemoryService(this.db);
+    this.vectorSearchAvailable = options.vectorSearchAvailable;
   }
 
   /** The active embedding identity, for stamping and for diagnostics. */
@@ -270,7 +295,7 @@ export class RetrieverService {
     const dimensions = present.dimensions ?? queryVector.length;
 
     const candidateLimit = Math.max(limit, 12);
-    const semantic = AgentDB.vectorSearch.available
+    const semantic = (this.vectorSearchAvailable ?? AgentDB.vectorSearch.available)
       ? this.rankInSql(queryVector, candidateLimit, identity, dimensions)
       : this.rankInJavaScript(queryVector, candidateLimit, identity, dimensions);
 
@@ -281,7 +306,7 @@ export class RetrieverService {
     semantic.forEach((result) => byId.set(result.chunk.id, result));
     lexicalRows.forEach((result) => byId.set(result.chunk.id, result));
 
-    return fuseRankings(
+    const fused = fuseRankings(
       semantic.map((result) => ({ id: result.chunk.id, lexicalExact: false })),
       lexical.map((candidate) => {
         const result = byId.get(candidate.chunkId);
@@ -310,6 +335,11 @@ export class RetrieverService {
             },
           ];
     });
+    return preferExecutableEvidence(fused.map((candidate) => ({
+      ...candidate,
+      id: candidate.chunk.id,
+      type: candidate.chunk.type,
+    }))).map(({ id: _id, type: _type, ...candidate }) => candidate);
   }
 
   /**
@@ -343,11 +373,11 @@ export class RetrieverService {
                 vec_distance_cosine(v.vector, ?) AS distance
            FROM chunk_vectors v
            JOIN code_chunks c ON c.id = v.chunk_id
-          WHERE v.provider = ? AND v.model = ?
+          WHERE v.provider = ? AND v.model = ? AND v.dimensions = ?
           ORDER BY distance
           LIMIT ?`,
       )
-      .all(encodeVector(queryVector), identity.provider, identity.model, limit) as any[];
+      .all(encodeVector(queryVector), identity.provider, identity.model, dimensions, limit) as any[];
 
     this.lastProvenance = {
       provider: identity.provider,
@@ -389,9 +419,9 @@ export class RetrieverService {
                 c.content AS content, c.metadata AS metadata, v.vector AS vector
            FROM chunk_vectors v
            JOIN code_chunks c ON c.id = v.chunk_id
-          WHERE v.provider = ? AND v.model = ?`,
+          WHERE v.provider = ? AND v.model = ? AND v.dimensions = ?`,
       )
-      .all(identity.provider, identity.model) as any[];
+      .all(identity.provider, identity.model, dimensions) as any[];
 
     this.lastProvenance = {
       provider: identity.provider,
@@ -597,6 +627,7 @@ export class RetrieverService {
     const taught = this.retrievalMemory.knownTerms();
     const initialAssessment = assessUnknownTerms(this.db, this.retrievalMemory.expand(query), taught);
     let ignoredModifiers = initialAssessment.ignoredModifiers;
+    let droppedTerms = initialAssessment.droppedTerms;
     if (initialAssessment.strict.length > 0) {
       const clarification = context?.trim();
       // Unlike the ungrounded path below, a clarification is checked rather
@@ -611,6 +642,7 @@ export class RetrieverService {
               taught,
             );
       ignoredModifiers = clarifiedAssessment.ignoredModifiers;
+      droppedTerms = clarifiedAssessment.droppedTerms;
 
       if (clarifiedAssessment.strict.length > 0) {
         return {
@@ -687,6 +719,7 @@ export class RetrieverService {
       ...(clarified === undefined ? {} : { clarification: clarified }),
       recoveredWithContext,
       ignoredModifiers,
+      droppedTerms,
       files: [...filesMap.values()],
       ...(this.lastProvenance === undefined ? {} : { provenance: this.lastProvenance }),
     };

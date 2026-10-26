@@ -22,7 +22,7 @@ one you want; you do not need the other.
 
 | | What it is | You need | Start at |
 |---|---|---|---|
-| **1. An MCP server** | Umbra answers questions about your repo, and *your* agent thinks — Claude Code, Codex, Cursor, Gemini CLI. Read-only. No model inside it. | Nothing but Node and one local model pull. No cloud account. | [Part 1](#part-1--umbra-as-an-mcp-server) |
+| **1. An MCP server** | Umbra exposes deterministic repo evidence and an optional persistent read-only advisor to Claude Code, Codex, Cursor, and Gemini CLI. | Node plus the providers used by the tools you choose. | [Part 1](#part-1--umbra-as-an-mcp-server) |
 | **2. An agent CLI** | Umbra hosts its own model and does the work: analyzes, plans, writes, verifies, with subagents. | A chat provider — Ollama locally, or Gemini/Claude through Vertex AI. | [Part 2](#part-2--umbra-as-an-agent-cli) |
 
 Most people want Part 1. It is the smaller commitment, it needs no credentials,
@@ -74,8 +74,10 @@ and it makes every agent you already use better at your codebase.
 `umbra mcp` publishes what Umbra knows about **one repository** to any Model
 Context Protocol client, over stdio. It answers; the client thinks.
 
-There is **no chat model or agent loop inside it**. MCP tools answer through
-deterministic code and cannot write files or run commands. After Umbra has
+The evidence tools answer through deterministic code. `continue_conversation`
+is the deliberate exception: it runs Umbra's own **read-only** advisor and
+persists its checked context behind an opaque receipt; it cannot write files,
+run commands, choose a path, or refresh the index. After Umbra has
 validated a project root, its background warm-up may create that root's local
 `.umbra/` cache, protect it in `.gitignore`, and call the configured embedding
 provider; no MCP tool can select a path or request any of those writes.
@@ -98,6 +100,7 @@ Decided in [ADR-024](docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
 | Tool | `list_adrs` | *Why* is the code shaped this way — path, title and status of every decision record, without their bodies |
 | Tool | `run_integrity_check` | `tsc --noEmit` over the served repository |
 | Tool | `get_index_status` | Live warm-up state plus durable discovery, chunk, vector, stamp and lease coverage |
+| Tool | `continue_conversation` | Starts or resumes a read-only advisor conversation; retain its opaque `conversationId` between turns |
 | Resource | `umbra://adr-index` | The ADR catalog |
 | Resource | `umbra://index-status` | The same truthful index status as `get_index_status` |
 | Prompt | one per `skills/*.md` | The working guides the package ships |

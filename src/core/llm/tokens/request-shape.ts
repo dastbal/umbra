@@ -7,7 +7,7 @@
  *
  * ## The defect this module exists to fix
  *
- * `ContextCompressor.estimateTokens` sums `msg.content` and nothing else. What
+ * `ContextCompressor.estimateTokens` summed `msg.content` and nothing else. What
  * it omits is not a rounding error:
  *
  * - **Tool schemas.** A deep agent publishes its whole tool catalog on every

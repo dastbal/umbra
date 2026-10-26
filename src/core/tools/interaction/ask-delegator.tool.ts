@@ -3,6 +3,7 @@ import { tool } from '@langchain/core/tools';
 import { getConfig, interrupt, isGraphInterrupt } from '@langchain/langgraph';
 import { answerDelegateQuestion } from '../../agent/delegation/delegation-broker';
 import { currentTurn } from '../../agent/delegation/delegation-registry';
+import { fingerprintInterrupt } from '../utils/interrupt-fingerprint';
 import { log } from '../utils/logger';
 
 /** Marks an interrupt as a delegate's question rather than an approval request. */
@@ -26,12 +27,23 @@ export interface DelegateQuestionRequest {
   options?: string[];
   /** The delegation asking, for display. */
   askedBy: string;
+  /**
+   * Identifies *which* question an answer answers.
+   *
+   * LangGraph's own interrupt id is one per task, and within a task answers are
+   * matched by position — so a delegate that asks twice could receive the first
+   * answer for the second question and record it as fact. See
+   * `fingerprintInterrupt`.
+   */
+  questionId: string;
 }
 
 /** The operator's reply to a delegate's question. */
 export interface DelegateQuestionResponse {
   /** The answer, or absent when the operator declined to answer. */
   answer?: string;
+  /** Echoes the {@link DelegateQuestionRequest.questionId} being answered. */
+  questionId?: string;
 }
 
 /**
@@ -136,11 +148,16 @@ async function askOperator(
   question: string,
   options?: readonly string[],
 ): Promise<string | undefined> {
+  const questionId = fingerprintInterrupt(DELEGATE_QUESTION_KIND, {
+    question,
+    options: options ? [...options] : undefined,
+  });
   const request: DelegateQuestionRequest = {
     kind: DELEGATE_QUESTION_KIND,
     question,
     options: options ? [...options] : undefined,
     askedBy: 'subagent',
+    questionId,
   };
 
   let response: DelegateQuestionResponse | undefined;
@@ -152,6 +169,14 @@ async function askOperator(
     if (isGraphInterrupt(error)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     log.error(`Question channel unavailable: ${message}`);
+    return undefined;
+  }
+
+  if (response !== undefined && response.questionId !== questionId) {
+    // The answer belongs to a different question. Recording it would put words
+    // in the operator's mouth, which is worse than the delegate proceeding with
+    // a recorded unknown — that is what the unanswered path is for.
+    log.error('An answer arrived for a different question; the delegate will record it as unknown.');
     return undefined;
   }
 

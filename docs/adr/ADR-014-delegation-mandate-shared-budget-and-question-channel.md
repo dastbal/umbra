@@ -485,3 +485,58 @@ Everything else here stands. The mandate itself — the user request verbatim, t
 known context, the scope — is unchanged and is now enforced by the provider
 instead of by us. The shared budget, the partial handoff, the question channel and
 the distinction between a failure and an attempt are all still in force.
+
+---
+
+## Amendment — 2026-09-21: an answer that does not say what it answers
+
+Two of this record's mechanisms were right in shape and unbound in fact.
+
+### The question channel could be satisfied by the wrong answer
+
+`askOperator` in `src/core/tools/interaction/ask-delegator.tool.ts` sent
+`{ kind, question, options, askedBy }` and accepted `response?.answer` with
+nothing binding that answer to that question. Inside one task LangGraph hands
+resume values out **by position** — `scratchpad.interruptCounter` in
+`@langchain/langgraph/dist/interrupt.js` — and its interrupt id is
+`XXH3(checkpoint_ns)`, one per task, so identity could not separate them either.
+A delegate that asked twice could record the first answer against the second
+question and carry it forward as fact. The full mechanism is in the 2026-09-21
+amendment to `ADR-011-path-containment-and-real-approval.md`.
+
+`DelegateQuestionRequest` now carries a `questionId` from `fingerprintInterrupt`
+(`src/core/tools/utils/interrupt-fingerprint.ts`), the CLI echoes it back through
+`answerSuspension` in `src/presentation/cli/hitl-prompt.ts`, and an answer naming
+a different question is treated as **not answered**. That is deliberately the
+same outcome as a declined prompt: this record already decided a recorded unknown
+beats an invented reply, and a misattributed answer is an invented reply with
+better manners.
+
+### Section 4 counted the writer's success as an infrastructure failure
+
+*A failure and an attempt are different things* assumes the guard can tell them
+apart, and for the Coder it could not. `readArtifactStatus` in
+`src/core/agent/orchestration-guard.middleware.ts` recovers a delegation status
+with a regex requiring a literal `"status": "..."`. The Researcher and the
+Verifier return structured artifacts; the Coder returned prose, so a
+**successful** implementation yielded no status, `classifyDelegationOutcome` in
+`src/core/agent/delegation/delegation-outcome.ts` reached its terminal branch —
+`infrastructure-failure`, `consumesAttempt: false` — and `coderCalls` stayed at
+zero.
+
+The consequence lands in `src/core/agent/orchestration-policy.ts`: with
+`coderCalls` at zero the Verifier is refused, and that refusal *throws*
+`OrchestrationGuardViolation`. The turn died at the moment the orchestrator tried
+to verify its own work, and the Coder could be re-delegated on the first-attempt
+branch without ever reaching `maxRetries`.
+
+`implementationArtifactSchema` in `src/core/agent/contracts.ts`, bound in
+`src/core/subagents/coder.subagent.ts`, closes it. `write_todos` remains exempt
+from the attempt count as this record decided.
+
+### Verification evidence
+
+`npx jest --runInBand src/core/tools/interaction/ask-delegator.tool.spec.ts` —
+passes, including an answer naming a different question being recorded as an
+unknown. `src/core/agent/contracts.spec.ts` — 13 passed, including a test that
+pins the artifact vocabulary to what `classifyDelegationOutcome` decides on.

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { buildToolCatalog } from './tool-catalog';
 import type { IndexStatusResult } from '../../core/tools';
 
@@ -11,7 +12,7 @@ const indexStatus = (phase: 'ready' | 'indexing' | 'unavailable' | 'awaiting-roo
 describe('MCP ask_codebase catalog', () => {
   it('keeps query compatible and publishes optional contextual retry input', () => {
     const tool = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
       readIndexStatus: () => indexStatus(),
     })
       .find((candidate) => candidate.name === 'ask_codebase');
@@ -23,7 +24,7 @@ describe('MCP ask_codebase catalog', () => {
 
   it('keeps a stable catalog and returns a retryable status while indexing', async () => {
     const tools = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: false, message: 'indexing 23% (12/52 files)' }),
+      semanticSearchReadiness: () => ({ ready: false, message: 'indexing 23% (12/52 files)', retryable: true }),
       readIndexStatus: () => indexStatus('indexing'),
     });
     const ask = tools.find((candidate) => candidate.name === 'ask_codebase');
@@ -31,16 +32,35 @@ describe('MCP ask_codebase catalog', () => {
 
     expect(names).toContain('ask_codebase');
     expect(names).toContain('get_index_status');
+    // Not isError. A LangChain-JS client raises a ToolException on that and the
+    // model never reads nextAction — destroying this server's own recovery
+    // instruction on a cold start, which is the most common first contact.
     await expect(ask?.invoke({ query: 'where is this implemented?' })).resolves.toMatchObject({
-      content: [{ type: 'text', text: expect.stringContaining('indexing 23%') }],
+      structuredContent: {
+        status: 'abstained',
+        code: 'CODEBASE_INDEX_UNAVAILABLE',
+        retryable: true,
+        nextAction: expect.stringContaining('get_index_status'),
+      },
+    });
+    expect((await ask?.invoke({ query: 'where is this implemented?' }))?.isError).toBeUndefined();
+  });
+
+  it('still refuses as an error when retrying will not help', async () => {
+    const ask = buildToolCatalog({
+      semanticSearchReadiness: () => ({ ready: false, message: 'Index warm-up failed.', retryable: false }),
+      readIndexStatus: () => indexStatus('unavailable'),
+    }).find((candidate) => candidate.name === 'ask_codebase');
+
+    await expect(ask?.invoke({ query: 'where is this implemented?' })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE' },
+      structuredContent: { status: 'blocked', code: 'CODEBASE_INDEX_UNAVAILABLE', retryable: false },
     });
   });
 
   it('publishes the same index status through a no-argument tool', async () => {
     const status = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: false, message: 'provider unavailable' }),
+      semanticSearchReadiness: () => ({ ready: false, message: 'provider unavailable', retryable: false }),
       readIndexStatus: () => indexStatus('unavailable'),
     }).find((candidate) => candidate.name === 'get_index_status');
 
@@ -51,7 +71,7 @@ describe('MCP ask_codebase catalog', () => {
 
   it('keeps the catalog visible but gates root-bound tools until the client supplies a root', async () => {
     const tools = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: false, message: 'waiting for root' }),
+      semanticSearchReadiness: () => ({ ready: false, message: 'waiting for root', retryable: true }),
       readIndexStatus: () => indexStatus('awaiting-root'),
       projectRootReady: () => false,
       projectRootMessage: () => 'Open exactly one project and reconnect.',
@@ -71,7 +91,7 @@ describe('MCP ask_codebase catalog', () => {
 
 describe('MCP live workspace evidence catalog', () => {
   const catalog = () => buildToolCatalog({
-    semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+    semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
     readIndexStatus: () => indexStatus(),
   });
 
@@ -82,12 +102,13 @@ describe('MCP live workspace evidence catalog', () => {
     expect(search?.inputSchema.query).toBeDefined();
     expect(search?.inputSchema.path).toBeDefined();
     expect(search?.description).toContain('not semantic ranking');
-    expect(inventory?.inputSchema).toEqual({});
+    // Its only input is the optional worktree selection (ADR-038).
+    expect(Object.keys(inventory?.inputSchema ?? {})).toEqual(['worktree']);
   });
 
   it('blocks literal search at the same pinned-root boundary as other workspace tools', async () => {
     const search = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
       readIndexStatus: () => indexStatus(),
       projectRootReady: () => false,
       projectRootMessage: () => 'Open exactly one project and reconnect.',
@@ -103,7 +124,7 @@ describe('MCP live workspace evidence catalog', () => {
 describe('MCP GraphRAG Detective catalog', () => {
   it('publishes a deterministic, opt-in GraphRAG investigation without a promotion input', () => {
     const tool = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
       readIndexStatus: () => indexStatus(),
     }).find((candidate) => candidate.name === 'investigate_graphrag');
 
@@ -116,21 +137,34 @@ describe('MCP GraphRAG Detective catalog', () => {
 
   it('returns a typed retryable refusal while semantic retrieval is unavailable', async () => {
     const tool = buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: false, message: 'indexing 23% (12/52 files)' }),
+      semanticSearchReadiness: () => ({ ready: false, message: 'indexing 23% (12/52 files)', retryable: true }),
       readIndexStatus: () => indexStatus('indexing'),
     }).find((candidate) => candidate.name === 'investigate_graphrag');
 
+    // It used to declare `retryable: true` on an `error`, which the client can
+    // never act on: the exception is raised before the flag is ever read.
     await expect(tool?.invoke({ query: 'where is AGENT_TOKEN injected?' })).resolves.toMatchObject({
-      isError: true,
-      structuredContent: { status: 'error', code: 'GRAPHRAG_INVESTIGATION_ERROR', retryable: true },
+      structuredContent: { status: 'abstained', code: 'GRAPHRAG_INVESTIGATION_ERROR', retryable: true },
     });
+  });
+
+  it('publishes list_adrs as what it is: a tool that writes its own cache', () => {
+    const adrs = buildToolCatalog({
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
+      readIndexStatus: () => indexStatus('ready'),
+    }).find((candidate) => candidate.name === 'list_adrs');
+
+    // `readOnlyHint` is the assertion an Auto-mode client uses to skip its own
+    // approval gate, and `buildAdrIndex` writes `.umbra/adr-index.json` on a
+    // cache miss — with or without the `refresh` argument.
+    expect(adrs?.annotations?.readOnlyHint).toBe(false);
   });
 });
 
 describe('MCP query_nest_graph', () => {
   const catalog = () =>
     buildToolCatalog({
-      semanticSearchReadiness: () => ({ ready: true, message: 'ready' }),
+      semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
       readIndexStatus: () => indexStatus(),
     });
 
@@ -161,5 +195,39 @@ describe('MCP query_nest_graph', () => {
     const tool = catalog().find((candidate) => candidate.name === 'query_nest_graph');
 
     await expect(tool?.invoke({ name: 'AI_AGENT', direction: 'exports' })).rejects.toBeDefined();
+  });
+});
+
+describe('MCP worktree selection (ADR-038)', () => {
+  const catalog = () => buildToolCatalog({
+    semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
+    readIndexStatus: () => indexStatus(),
+  });
+
+  it('offers an optional worktree exactly on the tools that can answer about one', () => {
+    const selecting = catalog()
+      .filter((tool) => tool.inputSchema.worktree !== undefined)
+      .map((tool) => tool.name)
+      .sort();
+
+    expect(selecting).toEqual([
+      'ask_codebase', 'get_index_status', 'inspect_project', 'query_dependency_graph', 'query_nest_graph', 'search_workspace',
+    ]);
+    for (const tool of catalog().filter((candidate) => candidate.inputSchema.worktree !== undefined)) {
+      expect(z.object({ worktree: tool.inputSchema.worktree! }).safeParse({}).success).toBe(true);
+    }
+  });
+});
+
+describe('MCP handshake imports', () => {
+  it('does not load the writable tool barrel or indexer when publishing tools', () => {
+    jest.doMock('../../core/tools', () => { throw new Error('writable tools loaded before handshake'); });
+    jest.doMock('../../core/rag/indexer', () => { throw new Error('indexer loaded before handshake'); });
+    try {
+      expect(() => jest.isolateModules(() => { require('./tool-catalog'); })).not.toThrow();
+    } finally {
+      jest.dontMock('../../core/tools');
+      jest.dontMock('../../core/rag/indexer');
+    }
   });
 });

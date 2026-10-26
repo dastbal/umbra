@@ -1,12 +1,10 @@
 import { z } from 'zod';
-import { HumanMessage } from '@langchain/core/messages';
 import {
   clearSessionOverhead,
   recordSessionOverhead,
   sessionOverhead,
   toCountableTool,
 } from './session-overhead';
-import { ContextCompressor } from './context-compressor';
 
 describe('toCountableTool', () => {
   it('converts a zod schema to the JSON Schema the provider is actually sent', () => {
@@ -67,39 +65,5 @@ describe('sessionOverhead', () => {
 
     expect(sessionOverhead().system).toBe('second');
     expect(sessionOverhead().tools).toHaveLength(2);
-  });
-});
-
-describe('ContextCompressor reads the recorded overhead by default', () => {
-  afterEach(() => clearSessionOverhead());
-
-  // The point of the registry: no call site changed, and every caller's count
-  // became correct — including `ChatSession#checkAndCompressContext`, which has
-  // only ever had the message list.
-  it('charges the fixed cost without the caller passing anything', () => {
-    const messages = [new HumanMessage('where is the retriever?')];
-
-    clearSessionOverhead();
-    const withoutOverhead = ContextCompressor.estimateTokens(messages);
-
-    recordSessionOverhead('You are Umbra. '.repeat(200), [
-      {
-        name: 'ask_codebase',
-        description: 'Answers a question about the indexed repository.',
-        schema: z.object({ query: z.string().describe('The question') }),
-      },
-    ]);
-    const withOverhead = ContextCompressor.estimateTokens(messages);
-
-    expect(withOverhead).toBeGreaterThan(withoutOverhead + 400);
-  });
-
-  it('lets an explicit argument win over the recorded value', () => {
-    recordSessionOverhead('You are Umbra. '.repeat(200), []);
-
-    const explicit = ContextCompressor.estimateTokens([new HumanMessage('hi')], {});
-    const recordedValue = ContextCompressor.estimateTokens([new HumanMessage('hi')]);
-
-    expect(explicit).toBeLessThan(recordedValue);
   });
 });

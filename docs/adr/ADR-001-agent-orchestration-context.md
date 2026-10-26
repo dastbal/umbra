@@ -31,3 +31,23 @@ El agente debe trabajar sobre proyectos NestJS/NextJS con calidad alta, costo co
 - Se necesita validar los artefactos de handoff y medir tokens, latencia y reintentos.
 - El análisis basado en evidencia sacrifica algo de alcance RAG a cambio de latencia determinista y estabilidad del proveedor en auditorías amplias.
 - Worktrees y escritura paralela quedan fuera de esta primera etapa.
+
+---
+
+## Amendment — 2026-09-21: decision 6 had one unrecorded exception
+
+Decision 6 — *los subagentes se comunican mediante artefactos estructurados y
+compactos* — described two of the three roles. The Researcher and the Verifier
+carried a `responseFormat`; the Coder did not, and returned prose.
+
+That was not a harmless gap. `readArtifactStatus` in
+`src/core/agent/orchestration-guard.middleware.ts` recovers a delegation status
+by searching the result text for a literal `"status": "..."`, so a successful
+Coder produced none, was classified as an infrastructure failure, and left
+`coderCalls` at zero — which made `src/core/agent/orchestration-policy.ts` refuse
+the Verifier and throw. The full chain is in the 2026-09-21 amendment to
+`ADR-023-interlocking-triage-readback-and-balanced-books.md`.
+
+`implementationArtifactSchema` in `src/core/agent/contracts.ts` is now bound to
+the Coder profile in `src/core/subagents/coder.subagent.ts`, so decision 6
+describes all three roles rather than the two that happened to comply.

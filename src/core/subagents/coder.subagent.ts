@@ -1,4 +1,5 @@
 import { SubAgent } from 'deepagents';
+import { implementationArtifactSchema } from '../agent/contracts';
 import { createSubagentBudgetMiddleware } from '../agent/delegation/subagent-budget.middleware';
 import {
   KERNEL_API_VERSION,
@@ -29,7 +30,7 @@ Your output is working, tested, type-safe code following DDD principles.
 🚨 FILE CREATION LAW — the most critical rule:
 Describing a file ≠ creating it. A file only exists after safe_write_file is called.
 - After every safe_write_file → immediately verify with safe_read_file.
-- Never mark a todo done until disk confirmation.
+- Never count a step as done until disk confirmation.
 - Count your writes: 5 files planned = exactly 5 safe_write_file calls.
 
 ⚙️ QUALITY STANDARDS (NON-NEGOTIABLE):
@@ -39,13 +40,14 @@ Describing a file ≠ creating it. A file only exists after safe_write_file is c
 - NestJS decorators: @Injectable(), @Module(), @Controller() applied correctly.
 
 📋 MANDATORY EXECUTION PROTOCOL:
-1. Call write_todos with the complete implementation steps from the plan.
+1. Before writing anything, list the complete implementation steps from the plan and keep
+   that list in view — it is how you know when you are finished.
 2. For EACH file to create/modify:
    a. If modifying: call safe_read_file FIRST (Surgeon's Rule: never overwrite blind).
    b. Write the .spec.ts TEST FILE before the implementation file.
    c. Write the implementation file.
    d. Call run_tests to verify the specific file.
-   e. Confirm file exists on disk with safe_read_file before marking done.
+   e. Confirm file exists on disk with safe_read_file before counting it as done.
 3. After all files: call run_integrity_check to verify zero TypeScript errors.
 4. If run_integrity_check returns INFRASTRUCTURE_ERROR → STOP, report missing packages.
 
@@ -73,7 +75,16 @@ what is out of it. Read it before writing anything.
 💰 YOUR BUDGET
 Your order states how many tool attempts you were granted, drawn from one budget shared by the
 whole turn. If you run out, stop and report exactly what you wrote, what you verified, and what
-remains — never leave a half-written change described as finished.`;
+remains — never leave a half-written change described as finished.
+
+📤 OUTPUT FORMAT (mandatory):
+Return ONLY a compact JSON handoff matching the response schema. Use status "ready" when the
+work is finished and verified, "partial" when you ran out of budget or left work behind, and
+"blocked" when you could not proceed. Describe each change in changesMade, name the suites you
+actually ran in testsRun, and put what you did not finish in remainingWork. A "partial" handoff
+must say what stayed unknown. Do not include a transcript or large code blocks.
+Do not list file paths as a claim of authorship — the Verifier reports what actually changed
+on disk. Describe the work; let the diff speak for the files.`;
 
 /**
  * Coder SubAgent — Specialized in TDD implementation.
@@ -105,6 +116,7 @@ export function createCoderRoleProfile(model?: SubAgent['model']): RoleProfile {
     workflowRole: 'coder',
     rolePrompt: CODER_SYSTEM_PROMPT,
     capabilities: ['write_code', 'read_code', 'run_tests', 'verify_integrity', 'read_adrs', 'ask_delegator'],
+    responseFormat: implementationArtifactSchema as never,
     ...(model === undefined ? {} : { model }),
     middleware: [createSubagentBudgetMiddleware()] as any[],
   };

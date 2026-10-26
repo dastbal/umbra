@@ -22,7 +22,7 @@ export interface WorkspaceEvidence {
 const DEFAULT_MANIFEST: EvidenceManifestEntry[] = [
   { path: 'package.json', patterns: ['"scripts"', '"dependencies"', '"deepagents"', '"jest"', 'type-check', 'langsmith'] },
   { path: 'src/bin/cli.ts', patterns: ['.command("init")', '.command("deep")', '.command("orchestrate")', 'DeepAgentFactory'] },
-  { path: 'src/core/agent/deep-agent-factory.ts', patterns: ['export class DeepAgentFactory', 'public static async create', 'createAnalysis', 'createOrchestrator', 'subagents:', 'buildCheckpointer', 'enableContextCompression', 'ContextCompressor'] },
+  { path: 'src/core/agent/deep-agent-factory.ts', patterns: ['export class DeepAgentFactory', 'public static async create', 'createAnalysis', 'createOrchestrator', 'subagents:', 'buildCheckpointer', 'enableContextCompression', 'createContextEditingMiddleware'] },
   { path: 'src/core/agent/factory.ts', patterns: ['export class AgentFactory', 'public static async create'] },
   { path: 'src/core/agent/graph-factory.ts', patterns: ['export class GraphAgentFactory', 'public static async create'] },
   { path: 'src/core/config/agent-config.ts', patterns: ['agent.config.json', 'supervisor:', 'researcher:', 'coder:', 'verifier:', 'maxRetries', 'maxDelegationDepth', 'singleWriter'] },

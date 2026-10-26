@@ -1,4 +1,4 @@
-import { fuseRankings, hasGroundedEvidence } from './hybrid-ranking';
+import { preferExecutableEvidence, fuseRankings, hasGroundedEvidence } from './hybrid-ranking';
 
 describe('hybrid retrieval ranking', () => {
   it('fuses rank positions without comparing lexical and semantic scores', () => {
@@ -44,5 +44,14 @@ describe('hybrid retrieval ranking', () => {
         fuseRankings([], [{ id: 'path-match', lexicalExact: true }], 4),
       ),
     ).toBe(true);
+  });
+
+  it('prefers executable evidence over an equally grounded class signature', () => {
+    const ordered = preferExecutableEvidence([
+      { id: 'swagger-class', type: 'class_signature', score: 0.9, evidence: 'hybrid' },
+      { id: 'payment-callback', type: 'method', score: 0.1, evidence: 'hybrid' },
+    ]);
+
+    expect(ordered.map((candidate) => candidate.id)).toEqual(['payment-callback', 'swagger-class']);
   });
 });

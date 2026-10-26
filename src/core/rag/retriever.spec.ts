@@ -53,7 +53,7 @@ describe('contextual retrieval retry', () => {
   it('runs exactly one contextual retry after an ungrounded first result', async () => {
     // Every term is known, so the gate lets the question through and what this
     // test measures is the retry itself.
-    gate.mockReturnValue({ strict: [], ignoredModifiers: [] });
+    gate.mockReturnValue({ strict: [], ignoredModifiers: [], droppedTerms: [] });
 
     const retriever = new RetrieverService({
       identity: { provider: 'ollama', model: 'test', dimensions: 3, column: 'vector_ollama_json' },
@@ -82,7 +82,7 @@ describe('contextual retrieval retry', () => {
   it('does not retry when no clarification was supplied', async () => {
     // The question names something the repository never wrote. Declared here
     // rather than inherited from whatever this machine happens to have indexed.
-    gate.mockReturnValue({ strict: ['saturn', 'payroll'], ignoredModifiers: [] });
+    gate.mockReturnValue({ strict: ['saturn', 'payroll'], ignoredModifiers: [], droppedTerms: [] });
 
     const retriever = new RetrieverService({
       identity: { provider: 'ollama', model: 'test', dimensions: 3, column: 'vector_ollama_json' },

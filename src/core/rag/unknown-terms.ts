@@ -117,11 +117,26 @@ const INFLECTIONS = ['ing', 'ed', 'es', 's'];
  * truncation of identifiers — a much larger change than the cases beyond these
  * four endings justify.
  *
+ * ## The one spelling change inflection makes
+ *
+ * English writes a final consonant-plus-`y` as `i` before `-es` and `-ed`:
+ * `apply`, `applies`, `applied`. Stripping an ending cannot see that, so without
+ * {@link alternationRoot} the rule abstained on it in both directions — a
+ * question saying **apply** against source that says only `applied`, and one
+ * saying **applies** against source that says only `apply`. Measured on the
+ * gate fixture on 2026-09-23, this was one of its two false abstentions.
+ *
+ * The examples are deliberately not corpus questions. An earlier draft of this
+ * comment paraphrased one, and the live benchmark ranked this file above the
+ * case's expected answer — the hazard the module header describes, reached
+ * through a positive instead of a negative.
+ *
  * @param term - A lowercased subject term.
- * @returns One or two FTS5 match expressions.
+ * @returns One to three FTS5 match expressions.
  */
 export function termProbes(term: string): readonly string[] {
   const quoted = `"${term.replaceAll('"', '""')}"`;
+  const prefix = (stem: string): string => `"${stem.replaceAll('"', '""')}"*`;
 
   for (const ending of INFLECTIONS) {
     if (!term.endsWith(ending)) continue;
@@ -130,10 +145,37 @@ export function termProbes(term: string): readonly string[] {
     // `uses` -> `use*` is fine, `is` -> `i*` would make the rule meaningless.
     if (stem.length < MIN_TERM_LENGTH - 1) continue;
 
-    return [quoted, `"${stem.replaceAll('"', '""')}"*`];
+    const root = alternationRoot(stem, true);
+    return root === undefined ? [quoted, prefix(stem)] : [quoted, prefix(stem), prefix(root)];
   }
 
-  return [quoted];
+  const root = alternationRoot(term, false);
+  return root === undefined ? [quoted] : [quoted, prefix(root)];
+}
+
+/**
+ * Removes the letter that alternates between `y` and `i` under inflection, so
+ * one prefix reaches every spelling: `appl*` matches `apply`, `applies`,
+ * `applied` and `applying`.
+ *
+ * Only after a consonant — `deploy` keeps its `y` in `deployed`, so there is
+ * nothing to reach. An `i` is removed only from a stem that lost an ending,
+ * because a base word ending in `i` did not come from a `y`.
+ *
+ * The root must be a full term long. A three-letter consonant-final prefix is
+ * promiscuous — `deny` would probe `den*` and find `dense` — and a term found by
+ * accident fails towards answering, which is the failure this module exists to
+ * prevent. Those short words keep the exact probe they had before.
+ *
+ * @param stem - A lowercased term, or a term with its ending removed.
+ * @param inflected - Whether an inflectional ending was removed.
+ * @returns The root to probe as a prefix, or `undefined` when none applies.
+ */
+function alternationRoot(stem: string, inflected: boolean): string | undefined {
+  const alternating = inflected ? /[^aeiou][yi]$/ : /[^aeiou]y$/;
+  if (!alternating.test(stem)) return undefined;
+  const root = stem.slice(0, -1);
+  return root.length >= MIN_TERM_LENGTH ? root : undefined;
 }
 
 /** Terms examined per query, matching the lexical index's own cap. */
@@ -145,6 +187,13 @@ export interface UnknownTermAssessment {
   readonly strict: readonly string[];
   /** Repeated manner modifiers omitted from the absence gate, never from retrieval. */
   readonly ignoredModifiers: readonly string[];
+  /**
+   * Unknown subject terms retrieval went on without. Always empty since 2.3.0:
+   * dropping one whenever another subject was grounded answered every
+   * nonexistent-feature case (see {@link assessUnknownTerms}). Kept because the
+   * MCP output schema publishes it.
+   */
+  readonly droppedTerms: readonly string[];
 }
 
 /**
@@ -213,6 +262,26 @@ export function findUnknownTerms(
  * to hybrid retrieval; this only prevents the pre-query absence gate from
  * refusing a question because of an idiom.
  *
+ * ## Why a grounded subject does not excuse an unknown one
+ *
+ * From 2026-09-18 to 2026-09-23 it did: an unknown term was moved to
+ * `droppedTerms` whenever any other subject was known, and retrieval went on.
+ * That answered the two false abstentions on the gate fixture, and it answered
+ * all ten nonexistent-feature cases as well — correct abstention fell from 1 to
+ * 0, and `@dastbal/umbra@2.2.11` shipped with it. A question about a missing
+ * integration almost always pairs the missing name with grounded words —
+ * *"where does Umbra expose a <product> metrics endpoint?"* — so "another
+ * subject is known" is true of nearly every negative, and the grounding check
+ * that runs next is the one ADR-028 measured answering all of them.
+ *
+ * The index cannot tell a word the code spells differently from a feature the
+ * code does not have: both are absent. What it can do is stop missing words it
+ * does contain, which is what {@link termProbes} fixed for one of those two
+ * false abstentions. For the other, the vocabulary gap is real, and teaching the
+ * alias with `/learn-search` (ADR-029) is the remedy that does not reopen the
+ * gate. `droppedTerms` stays in the contract, empty, because the MCP output
+ * schema publishes it.
+ *
  * @param db - The connection owning `code_chunks_fts`.
  * @param query - Original user wording, preserved for retrieval.
  * @param exempt - Locally approved aliases that are known by definition.
@@ -233,6 +302,7 @@ export function assessUnknownTerms(
   return {
     strict: unknown.filter((term) => !ignoredModifiers.includes(term)),
     ignoredModifiers,
+    droppedTerms: [],
   };
 }
 

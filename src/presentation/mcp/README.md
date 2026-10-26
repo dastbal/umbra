@@ -4,7 +4,8 @@ Umbra's third presentation adapter, beside `cli/` and `http/`. It publishes what
 Umbra knows about **one** repository to any Model Context Protocol client —
 Claude Code, Codex, Cursor, Gemini CLI — over stdio.
 
-Decided in [ADR-024](../../../docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
+Decided in [ADR-024](../../../docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md)
+and extended by [ADR-036](../../../docs/adr/ADR-036-persistent-read-only-mcp-conversations.md).
 Pluggable embeddings, which is what lets `ask_codebase` be published without a
 Google account, are [ADR-025](../../../docs/adr/ADR-025-embeddings-are-chosen-not-assumed.md).
 
@@ -36,6 +37,7 @@ keeps only its local, gitignored `.umbra/` cache and `.gitignore` rule.
 | Tool | `run_integrity_check` | free (runs `tsc --noEmit`) |
 | Tool | `ask_codebase` | embeds the query after durable vector coverage is proven |
 | Tool | `get_index_status` | free lifecycle and durable coverage evidence |
+| Tool | `continue_conversation` | configured chat provider; read-only persistent advisor |
 | Resource | `umbra://adr-index` | free |
 | Resource | `umbra://index-status` | free |
 | Prompt | one per `skills/*.md` | free |
@@ -47,9 +49,10 @@ partial index can answer.
 
 ## The five constraints this module exists to honour
 
-1. **No chat model.** Nothing here instantiates a chat model, builds a prompt,
-   or runs an agent loop. Embedding calls are limited to background index warm-up
-   and semantic retrieval.
+1. **One constrained chat-model exception.** `continue_conversation` runs only
+   the `mcp-advisor`, a persisted advisory graph with read capabilities. The
+   deterministic evidence tools remain model-free; no MCP path gains a writer,
+   shell, approval, or caller-selected root.
 2. **No write tools.** No MCP tool can write, request approval, or choose a
    filesystem path. After a trusted root is accepted, startup may create its
    local index state and protect it in `.gitignore`; that activation is not
@@ -57,10 +60,41 @@ partial index can answer.
 3. **The root is pinned before any root-bound tool runs**, never read from a tool argument. That is
    why `run_integrity_check` has an empty schema: accepting a path would reopen
    the traversal surface ADR-011 closed and hand it to a remote caller.
+   *Narrowed 2026-10-22 (ADR-038, ADR-024's amendment of that date):* six tools
+   accept an optional `worktree` that **selects** one of the pinned repository's
+   own git worktrees — never another repository, never an arbitrary path. See
+   [Worktrees](#worktrees-adr-038) below.
 4. **`stdout` belongs to the protocol.** See below.
 5. **Semantic results require durable coverage.** The MCP handshake and status
    tool never wait for warm-up; only `ask_codebase` is retryable until coverage
    is proven.
+
+## Worktrees (ADR-038)
+
+Claude Code gives this server the session's main checkout, even when the agent
+asking works in `.claude/worktrees/<name>/`, and no tool call says where its
+caller works. So the caller says it: `ask_codebase`, `search_workspace`,
+`inspect_project`, `query_dependency_graph`, `query_nest_graph` and
+`get_index_status` take an optional `worktree`. Its value is the caller's
+current working directory, and the server instructions say so.
+
+- **Selection** is `selectWorktree` in `worktree-arguments.ts`, over
+  `resolveWorktree` in `src/core/config/git-worktrees.ts`. It accepts the
+  pinned repository's worktrees and its initialised submodules' worktrees, and
+  refuses anything else as `blocked`.
+- **Index reads** go through `WorktreeViewService` in
+  `src/core/rag/worktree-view.ts`. The worktree's changed files are stacked on
+  the base index inside a transaction that is always rolled back, so the index
+  is never written. The module is required lazily, which keeps the overlay
+  modules off the startup path; the indexer itself is already loaded at startup
+  through the `core/tools` barrel, a cost older than this feature.
+- **Live reads** (`search_workspace`, `inspect_project`) read the worktree's
+  files directly.
+- **Provenance**: every such result carries `worktree` (`toolWorktreeSchema`):
+  path, branch, head, `indexPrefix` for a submodule, change counts and cost.
+- **Busy**: a window that cannot take the index's write lock within 1,000 ms
+  is an abstention with `retryable: true`, like a warming index.
+- **Without `worktree`**, every tool behaves exactly as before.
 
 ## `stdout` discipline — read this before adding anything
 
@@ -167,6 +201,7 @@ improvement, the third trades a helpful message for a standard one.
 | `sdk-loader.ts` | Lazy `require` of the required SDK, plus the damaged-install hint |
 | `sdk-server.ts` | Registers the catalogs on the SDK's `McpServer` |
 | `tool-catalog.ts` | The five stable tools, with zod shapes the SDK turns into JSON Schema |
+| `worktree-arguments.ts` | The optional `worktree` argument and its lazy selection (ADR-038) |
 | `resource-catalog.ts` | `umbra://adr-index`, `umbra://index-status` |
 | `prompt-catalog.ts` | `skills/*.md` as prompts |
 | `dto-mapper.ts` | The boundary: refusals translated, hints stripped, provenance added |

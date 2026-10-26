@@ -105,6 +105,13 @@ export interface McpServerLike {
 
   connect(transport: unknown): Promise<void>;
 
+  /** Sends a post-handshake diagnostic through the MCP logging capability. */
+  sendLoggingMessage(params: {
+    level: 'debug' | 'info' | 'notice' | 'warning' | 'error' | 'critical' | 'alert' | 'emergency';
+    data: string;
+    logger?: string;
+  }): Promise<void>;
+
   close(): Promise<void>;
 }
 

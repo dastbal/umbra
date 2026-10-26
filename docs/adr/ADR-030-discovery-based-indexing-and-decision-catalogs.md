@@ -520,3 +520,26 @@ One correction to the amendment above: it lists dynamic `import()` among the
 uncaptured constructs, which is true of the indexer and irrelevant to this
 repository — there are **zero** such calls here. A grep suggests two; one is a
 `typeof import('fs')` type position and the other is inside a TSDoc comment.
+
+## Amendment — 2026-09-18 · Incomplete derived scans name the affected source
+
+The durable status already distinguished an indexed file from an intentionally
+skipped one, but MCP and the GraphRAG readiness receipt exposed only counts for
+some omissions. That left an operator with “one file lacks a current NestJS
+scan” and no way to know which source should be refreshed or inspected.
+
+`inspectIndexIntegrity` now returns a bounded list of skipped paths with each
+stored reason. `GraphProjectionReadiness` likewise carries bounded
+`affectedPaths` for stale dependency or NestJS projections, and its human-safe
+reason names those paths. The status remains read-only; this adds diagnosis, not
+an implicit reindex or a broader discovery scope.
+
+GraphRAG reserves one small context slot when traversal has accepted a graph
+file, so seed chunks cannot consume the entire answer while a valid routed file
+is silently omitted. The reserve is bounded by the existing chunk and token
+ceilings.
+
+Verification on 2026-09-18: focused GraphRAG, index-integrity, MCP catalog and
+SDK server suites passed, alongside strict TypeScript compilation. The full
+suite was started but its environment model-discovery step did not return a
+conclusive completion receipt, so no full-suite result is claimed here.

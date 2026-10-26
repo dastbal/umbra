@@ -75,6 +75,21 @@ describe('ADR index', () => {
     expect(fs.existsSync(path.join(rootDir, AGENT_DIR_NAME, 'adr-index.json'))).toBe(true);
   });
 
+  it('indexes a Nygard-style numeric ADR filename without requiring a rename', () => {
+    fs.writeFileSync(
+      path.join(rootDir, 'docs', 'adr', '0001-financing-bounded-context.md'),
+      '# Financing bounded context\n\n## Status\n\nAccepted\n\n## Context\n\nKeep financing decisions bounded.\n',
+    );
+
+    expect(buildAdrIndex(rootDir).entries).toEqual([
+      expect.objectContaining({
+        id: 'ADR-0001',
+        path: 'docs/adr/0001-financing-bounded-context.md',
+        title: 'Financing bounded context',
+      }),
+    ]);
+  });
+
   it('reuses the cache until an ADR changes', () => {
     const adrPath = path.join(rootDir, 'docs', 'adr', 'ADR-001-context.md');
     fs.writeFileSync(adrPath, '# ADR-001: Context\n\n## Estado\n\nPropuesta\n');

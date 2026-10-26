@@ -82,6 +82,8 @@ which makes writes technically unavailable in this mode.
    a root from an argument would reopen the whole path-traversal surface of
    ADR-011 and hand it to a remote caller. This is the single security decision
    the mode depends on.
+   *(Narrowed 2026-10-22, see the amendment of that date: a tool may select one
+   of the pinned repository's own git worktrees; the root itself stays pinned.)*
 4. **`stdout` belongs to the protocol.** Over stdio, JSON-RPC travels on stdout.
    Any log written there corrupts the connection.
 5. **The index must be warm.** `askCodebaseTool` reads from SQLite via `AgentDB`;
@@ -1073,3 +1075,128 @@ The deferred design for a client-visible warm-up wait remains separate.
 asserts that the protocol notification precedes the typed result. Its companion
 case proves a call without the token emits none, preserving clients that do not
 implement progress handling.
+
+---
+
+## Amendment — 2026-09-21: a warming index was reported as a transport failure, and one tool claimed a read-only it does not honour
+
+Two claims this record makes about the published surface were not true of the
+code, and both are visible to a foreign client rather than to us.
+
+### The recovery instruction never reached the model
+
+Amendments 12 and 16 both state that `ask_codebase` returns a retryable result
+directing the caller to `get_index_status`. The catalog did the opposite:
+`publishAskCodebase` in `src/presentation/mcp/tool-catalog.ts` returned
+`status: 'blocked'` with `retryable: false`, and `isToolResultError` in
+`src/core/tools/tool-result.ts` turns `blocked` into MCP `isError: true`.
+
+`@langchain/mcp-adapters` raises a `ToolException` on `isError` and — unlike the
+Python client — does not hand the failure back to the model. So on the single
+most common first contact, a cold start, this server destroyed its own recovery
+sentence for the client family it is built for.
+
+The refusal is now decided per lifecycle phase rather than by one predicate over
+*is it unavailable*: `SemanticSearchReadiness` carries a `retryable` flag,
+`semanticSearchReadiness` in `src/presentation/mcp/start-mcp-server.ts` sets it
+only for `WARMING_PHASES` (`awaiting-root`, `starting`, `probing`, `indexing`),
+and a warming index answers `abstained` with `retryable: true` and its
+`nextAction` intact. A refusal that will not change on its own — a failed
+warm-up, an index that cannot serve — stays `blocked`, because there it is the
+truth. `investigate_graphrag` carried the same defect in a worse form: it
+declared `retryable: true` on an `error`, a combination the client can never act
+on because the exception is raised before the flag is read.
+
+`.agents/skills/umbra-tool-usage/SKILL.md` told conforming clients the wrong
+thing too — *`blocked` … do not retry automatically* was the only guidance for a
+state that is now an abstention — and is corrected in the same commit.
+
+### `list_adrs` published a read-only hint it does not honour
+
+Amendment 14 draws the line at *bootstrap actions are not MCP tool
+capabilities*. `list_adrs` reaches `buildAdrIndex` in
+`src/core/tools/adr-index.ts`, which on a cache miss calls `fs.mkdirSync` and
+`fs.writeFileSync` on `.umbra/adr-index.json`. That is a write reached through a
+published tool, and `readOnlyHint` is exactly the assertion a client uses to skip
+its own approval gate.
+
+The `refresh` argument is not the cause and removing it would not have fixed
+anything: a cold or stale cache writes on a plain `list_adrs({})` too. The tool
+now declares its own annotations — `readOnlyHint: false`, `destructiveHint:
+false`, `idempotentHint: true`, `openWorldHint: false` — through the
+`PublishedTool.annotations` field that already existed and only
+`continue_conversation` was using.
+
+The alternative was to compute without persisting over MCP, which keeps the
+read-only claim intact. It was not taken: it spends the cache ADR-003 and ADR-004
+exist to keep, on the startup path this record already documents as painful.
+Declaring the truth costs one approval prompt for a metadata listing. **The
+server's read-only nature is unchanged** — no tool writes to the consumer's
+source, and none became writable. What changed is that the published metadata now
+matches what the tool does.
+
+---
+
+## Amendment — 2026-09-23: the SDK pin was considered and held
+
+When the LangChain family was upgraded, `@modelcontextprotocol/sdk` had a patch
+release available: 1.30.0 → 1.30.1. It was **not** taken.
+
+This record made the SDK a pinned production dependency after amendment 6
+verified that it loads from CommonJS through its dual `exports` map —
+amendment 1 had rejected it on the opposite belief. A version change can alter
+exactly that layout, and `src/core/config/mcp-config.spec.ts` fails on any pin
+other than 1.30.0 so that a bump is always a decision rather than a side effect.
+The trial upgrade tripped that guard, which is what it is for.
+
+Nothing in 1.30.1 was needed. An exact pin that a test guards and a record
+explains is a decision that needs a reason to reopen, and "a newer version
+exists" is not one. When there is a reason, the check to repeat is amendment
+6's: `node -e "require('@modelcontextprotocol/sdk/server/mcp.js')"` from the
+compiled output, then the handshake timing.
+
+---
+
+## Amendment — 2026-10-22: constraint 3's boundary is the repository, not one directory
+
+Constraint 3 says the root is pinned at launch and **"never read from a tool
+argument"**, because an argument would reopen ADR-011's path-traversal surface
+and hand it to a remote caller. The first half still holds without exception.
+The second half is narrowed by [ADR-038](./ADR-038-a-worktree-is-an-overlay-on-one-index.md),
+and this amendment records how, so the narrowing is not read as the constraint
+being dropped.
+
+**Why it had to move.** Claude Code starts one server per session and its
+subagents share it, and the server's only root sources all name the session's
+main checkout. That holds even for a desktop worktree session. An agent
+working in a git worktree therefore had no way to be answered about its own
+files. Measured on 2026-10-22: three servers for one repository, every one
+rooted at the main checkout, while ten worktrees of that repository had no
+index.
+
+**What a tool may now do.** `ask_codebase`, `search_workspace`,
+`inspect_project`, `query_dependency_graph`, `query_nest_graph` and
+`get_index_status` accept an optional `worktree`. The argument **selects**, it
+does not authorise. `resolveWorktree` in `src/core/config/git-worktrees.ts`
+accepts only a worktree that `git worktree list` reports for the pinned root or
+for one of its initialised submodules, plus the submodule's own checkout. It
+compares both sides after `realpath`, and it requires the selection to share
+that repository's `--git-common-dir`. A submodule counts only when its path is
+a real directory inside the root, not a symlink, and its git data lives in this
+repository. A root that is a subdirectory of its repository refuses every
+selection, because every worktree root lies above it. Any other path is
+refused, however it is spelt. The pinned root itself cannot change, so no argument can make the server
+answer about another repository.
+
+**What it may read there.** The selected worktree is read only as discovery
+reads a root. The live tools search it under `WorkspaceEvidenceService`'s
+existing containment rules. The index overlay reads only regular files whose
+`realpath` stays inside the worktree, and never a symlink. Nothing is written:
+the overlay lives in a transaction that is always rolled back (ADR-038 §4), so
+constraint 2, *no writes*, is unchanged.
+
+**What did not change.** `run_integrity_check` still takes no argument and still
+runs in the pinned root. `continue_conversation`, `list_adrs` and
+`investigate_graphrag` still read the pinned root. The server instructions now
+say a worktree may be named, and still say the repository cannot be changed by
+a tool argument, which remains true.

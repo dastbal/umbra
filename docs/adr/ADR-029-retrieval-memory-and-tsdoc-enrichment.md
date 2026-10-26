@@ -80,3 +80,21 @@ read-only under ADR-024.
 - `src/core/tools/rag-tools.ts` — `askCodebaseTool`.
 - `src/presentation/cli/slash-commands.ts` — `buildSlashCommands`.
 - `src/presentation/mcp/tool-catalog.ts` — `publishAskCodebase`.
+
+## Amendment — 2026-09-18 · Documentation stays metadata, not duplicate class evidence
+
+`NestChunker#extractClassContext` previously copied TSDoc and every import
+statement into every `class_signature` chunk. A review showed that descriptive
+TSDoc and Swagger-heavy declarations could then outrank the executable method
+that actually implements the answer.
+
+The chunker now retains TSDoc exclusively in `ChunkMetadata.documentation`, as
+this record originally intended, and leaves imports to the bounded dependency
+presentation. A class-context header is reconstructed from parsed modifiers,
+type parameters, `extends`, and `implements` clauses; it is never replaced with
+a generic `export class` template. This preserves `abstract` ports and inherited
+error classes without storing duplicate import noise.
+
+Verification on 2026-09-18: the AST regression fixture covers an abstract,
+generic, extending and implementing class with `super(message)`; the focused
+retrieval suites and strict TypeScript compilation passed.

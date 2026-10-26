@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-23T14:43:17.172Z",
+  "commit": "e6efc5e",
+  "dirtyWorkingTree": false,
+  "model": "gemini-2.5-flash-lite",
+  "arm": "compact",
+  "counter": {
+    "method": "bpe",
+    "encoding": "cl100k_base",
+    "source": "encoder"
+  },
+  "measured": {
+    "system": 3904,
+    "tools": 976,
+    "total": 4880,
+    "systemChars": 16499
+  },
+  "believed": {
+    "system": 2464,
+    "tools": 843,
+    "total": 3307
+  },
+  "unseen": {
+    "tokens": 1573,
+    "shareOfFloor": 0.3223360655737705
+  },
+  "tools": [
+    {
+      "name": "write_todos",
+      "tokens": 291
+    },
+    {
+      "name": "search_workspace",
+      "tokens": 130
+    },
+    {
+      "name": "list_adrs",
+      "tokens": 101
+    },
+    {
+      "name": "ask_codebase",
+      "tokens": 92
+    },
+    {
+      "name": "safe_write_file",
+      "tokens": 76
+    },
+    {
+      "name": "safe_read_file",
+      "tokens": 62
+    },
+    {
+      "name": "delete_file",
+      "tokens": 50
+    },
+    {
+      "name": "list_files",
+      "tokens": 42
+    },
+    {
+      "name": "inspect_project",
+      "tokens": 35
+    },
+    {
+      "name": "refresh_project_index",
+      "tokens": 34
+    },
+    {
+      "name": "run_integrity_check",
+      "tokens": 32
+    },
+    {
+      "name": "run_tests",
+      "tokens": 31
+    }
+  ]
+}

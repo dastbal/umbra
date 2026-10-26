@@ -29,8 +29,15 @@ import { colors, buildWelcomeBanner } from './theme';
 import { showModelMenu } from './model-menu';
 import { isInteractive, selectOutcome, type SelectChoice } from './interactive-select';
 import { askText } from './prompts';
+import { answerSuspension, type SuspensionPrompt } from './hitl-prompt';
 import { DELEGATE_QUESTION_KIND } from '../../core/tools/interaction/ask-delegator.tool';
-import { readPendingInterrupts, type PendingInterrupt } from './pending-interrupts';
+import {
+  buildResumePayload,
+  canCorrelateResume,
+  readPendingInterrupts,
+  type AnsweredInterrupt,
+  type PendingInterrupt,
+} from './pending-interrupts';
 import { describeErrorOrigin } from './error-origin';
 import { readVisibleText } from '../../core/llm/visible-text';
 import { diagnoseOffline } from './offline-diagnosis'; import { toolExecutionError } from './tool-event-result';
@@ -233,13 +240,6 @@ export class ChatSession {
   private currentModel: string;
   /** Whether deep mentor mode is active for this session. */
   private mentorModeActive = false;
-  /**
-   * Message count at the time of the last proactive compression.
-   * Used as an anti-thrash guard: compression only fires again after
-   * at least MIN_MESSAGES_BETWEEN_COMPRESSIONS new messages have been added
-   * since the last compression (ADR-024).
-   */
-  private lastCompressedMessageCount = 0;
   /**
    * The slash command registry for this session.
    *
@@ -673,92 +673,43 @@ export class ChatSession {
     }
   }
 
-  private async handleHITL(interrupts: unknown[]): Promise<void> {
-    const interrupt = (interrupts as any[])[0]?.value;
-    if (!interrupt) return;
+  private async handleHITL(interrupts: PendingInterrupt[]): Promise<void> {
+    const pending = interrupts.filter((entry) => entry?.value !== undefined);
+    if (pending.length === 0) return;
 
-    // A question from a delegate is not an approval request. Without this
-    // branch it would render as one — see handleDelegateQuestion.
-    if (interrupt.kind === DELEGATE_QUESTION_KIND) {
-      await this.handleDelegateQuestion(interrupt);
-      return;
+    // Every suspension is answered, not just the first. Two writes gated in one
+    // assistant message are two tasks with two interrupts, and rendering `[0]`
+    // alone left the operator authorizing an action they were never shown.
+    //
+    // Whether they can be correlated is asked before the operator is prompted:
+    // a set that cannot be answered one by one is not worth three questions and
+    // two discarded answers. The ids are read fresh every round — an interrupt
+    // id is `XXH3(checkpoint_ns)` for this run, never a name to cache.
+    const toAnswer = canCorrelateResume(pending.map((entry) => entry.id)) ? pending : [pending[0]!];
+
+    const answered: AnsweredInterrupt[] = [];
+    for (const entry of toAnswer) {
+      answered.push({ id: entry.id, answer: await answerSuspension(entry.value, this.suspensionPrompt()) });
     }
 
-    const actionRequests: any[] = interrupt.actionRequests ?? [];
-    const reviewConfigs: any[]  = interrupt.reviewConfigs ?? [];
-    const decisions: any[] = [];
-
-    for (let i = 0; i < actionRequests.length; i++) {
-      const action = actionRequests[i];
-      this.renderer.showHITLRequest(action.name, action.args);
-
-      const allowed: string[] = reviewConfigs[i]?.allowedDecisions ?? ['approve', 'reject'];
-      const decision = await this.askDecision(allowed);
-
-      if (decision.type === 'approve') {
-        process.stdout.write(colors.accent('  ✓ Approved\n'));
-      } else if (decision.type === 'edit') {
-        process.stdout.write(colors.warning('  ✎ Sent back with feedback\n'));
-      } else {
-        process.stdout.write(colors.danger('  ✗ Rejected\n'));
-      }
-      decisions.push(decision);
-    }
-
-    // Resume the agent with decisions (streaming continues from resumed state)
-    await this.resumeAgent({ decisions });
+    await this.resumeAgent(buildResumePayload(answered));
   }
 
   /**
-   * Renders a subagent question and resumes the run with the answer.
+   * Wires the screen and the operator into {@link answerSuspension}.
    *
-   * A question is not an approval, and before this branch existed every
-   * interrupt was read as one — `actionRequests` plus `reviewConfigs`. Without
-   * the discriminator a delegate asking what "improve the skills" meant would
-   * have rendered as an authorization to perform an action, which is a worse
-   * outcome than not having the feature.
+   * Rendering a suspension lives in its own module; this session owns the run
+   * it belongs to. The split is what keeps `chat-session.ts` under the ceiling
+   * ADR-031 set for it.
    *
-   * Cancelling is deliberately not an answer. Escape on the security gate means
-   * reject; here it means the operator declined to answer, and the delegate is
-   * told exactly that so it records an unknown instead of inventing a reply.
-   *
-   * @param request - The question raised by a delegate.
+   * @returns The prompt surface the HITL module asks for.
    */
-  private async handleDelegateQuestion(request: {
-    question: string;
-    options?: string[];
-  }): Promise<void> {
-    this.renderer.clearThinking();
-    process.stdout.write(`\n  ${colors.accent('?')} ${chalk.bold('A subagent is asking:')}\n`);
-    process.stdout.write(`  ${request.question}\n\n`);
-
-    const answer = await this.readAnswer(request.options);
-
-    if (answer === undefined) {
-      process.stdout.write(colors.muted('  — not answered; the subagent will record it as unknown\n'));
-    }
-
-    await this.resumeAgent({ answer });
-  }
-
-  /**
-   * Collects the operator answer, as a menu when choices were offered.
-   *
-   * @param options - Choices supplied by the delegate, when it supplied any.
-   * @returns The answer, or `undefined` when the operator did not give one.
-   */
-  private async readAnswer(options?: string[]): Promise<string | undefined> {
-    if (options && options.length > 0 && isInteractive()) {
-      const outcome = await selectOutcome<string>({
-        title: 'Answer',
-        choices: options.map((option): SelectChoice<string> => ({ label: option, value: option })),
-      });
-      return outcome.status === 'selected' ? outcome.value : undefined;
-    }
-
-    const typed = await askText({ prompt: '  Your answer (empty to skip): ' });
-    const trimmed = typed?.trim();
-    return trimmed === undefined || trimmed === '' ? undefined : trimmed;
+  private suspensionPrompt(): SuspensionPrompt {
+    return {
+      showAction: (name, args) => this.renderer.showHITLRequest(name, args),
+      clearThinking: () => this.renderer.clearThinking(),
+      askDecision: (allowed) => this.askDecision(allowed),
+    };
   }
 
   /**
@@ -837,9 +788,9 @@ export class ChatSession {
       if (handleSmallTalk(trimmed)) continue;
 
       await this.sendMessage(trimmed);
-      // Phase 2: proactive compression — check token budget after each turn.
-      // Fires silently after the agent's response is fully streamed (ADR-024).
-      await this.checkAndCompressContext();
+      // No compression step follows the turn. Stale tool results are cleared
+      // inside the model call by the context-editing middleware (ADR-037); the
+      // summary this used to append grew the thread it was meant to shrink.
     }
   }
 
@@ -1023,62 +974,6 @@ export class ChatSession {
     // and a session that ended on an error is exactly the one worth reading.
     await flushPendingTraces();
     process.exit(0);
-  }
-
-  // ── Private: Auto-Compression ──────────────────────────────────────────────
-
-  /**
-   * Proactively checks the context token budget after each turn and silently
-   * compresses conversation history if the budget is exceeded (ADR-024).
-   *
-   * ## How it works
-   * 1. Reads the current LangGraph state via `getState()` (ADR-021 try/catch).
-   * 2. Calls `ContextCompressor.isOverBudget()` (chars / 4 heuristic, 80k default).
-   * 3. If over budget AND enough new messages since last compression:
-   *    → compresses history and injects a silent `[CONTEXT HANDOFF]` message.
-   *
-   * ## Anti-thrash guard
-   * Tracks `lastCompressedMessageCount`. Compression only fires again after at
-   * least `MIN_MESSAGES_BETWEEN_COMPRESSIONS` new messages have been added,
-   * preventing repeated compression on every turn when hovering at the threshold.
-   *
-   * ## Graceful degradation
-   * If `getState()` is unavailable (deepagents version mismatch) or compression
-   * fails, the error is silently swallowed — the session must continue regardless.
-   */
-  private async checkAndCompressContext(): Promise<void> {
-    /** Minimum new messages since last compression before we compress again. */
-    const MIN_MESSAGES_BETWEEN_COMPRESSIONS = 10;
-
-    try {
-      const state = await this.agent.getState(this.graphConfig);
-      const messages: unknown[] = state?.values?.messages ?? [];
-
-      // Anti-thrash: skip if not enough new messages since last compression
-      const newMessagesSinceLastCompression = messages.length - this.lastCompressedMessageCount;
-      if (newMessagesSinceLastCompression < MIN_MESSAGES_BETWEEN_COMPRESSIONS) return;
-
-      if (!ContextCompressor.isOverBudget(messages)) return;
-
-      // Over budget — compress silently
-      const summarizerModel = resolveSummarizerModel();
-      const summary = await ContextCompressor.compress(messages, summarizerModel);
-
-      if (summary) {
-        this.lastCompressedMessageCount = messages.length;
-        // Inject the summary as a context handoff — no user-visible console output
-        await this.sendMessage(
-          `[CONTEXT HANDOFF — AUTO COMPRESSION]\n\n` +
-          `The conversation history has grown large and was silently compressed.\n` +
-          `The following is a technical summary of all work done so far:\n\n` +
-          `${summary}\n\n` +
-          `Acknowledge this context briefly, then wait for the next instruction.`,
-        );
-      }
-    } catch {
-      // ADR-021: getState() or compression may not be available in all contexts.
-      // Silently degrade — the session must continue regardless.
-    }
   }
 
   /**

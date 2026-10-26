@@ -25,8 +25,11 @@ import {
 import { AgentSecurityPolicy } from '../security';
 import { AgentDB } from '../state/db';
 import { clearPendingRetrievalAlias, stageRetrievalAlias } from '../rag/retrieval-memory';
+import { RetrieverService } from '../rag/retriever';
+import type { OverlayView } from '../rag/overlay-scope';
+import type Database from 'better-sqlite3';
 import { AdrIndexEntry, buildAdrIndex } from './adr-index';
-import { createToolResultSchema, ToolResult } from './tool-result';
+import { createToolResultSchema, ToolResult, type ToolWorktree } from './tool-result';
 import { wrapUntrustedFileContent } from './utils/untrusted-content';
 
 const execFileAsync = promisify(execFile);
@@ -99,7 +102,7 @@ const retrievalChunkSchema = z.object({
   artifactKind: z.literal('prisma-schema').optional(),
 });
 const graphReadinessSchema = z.object({
-  ready: z.boolean(), reason: z.string(), pendingFiles: z.number().int().nonnegative(),
+  ready: z.boolean(), reason: z.string(), pendingFiles: z.number().int().nonnegative(), affectedPaths: z.array(z.string()),
 });
 const retrievalRecommendationSchema = z.object({
   state: z.enum(['sufficient', 'follow-up', 'clarify']),
@@ -126,6 +129,7 @@ export const codebaseSearchDataSchema = z.object({
   abstentionReason: z.enum(['unknown_terms', 'ungrounded']).optional(),
   unknownTerms: z.array(z.string()),
   ignoredModifiers: z.array(z.string()),
+  droppedTerms: z.array(z.string()),
   files: z.array(z.object({
     path: z.string(), origin: z.enum(['seed', 'graph']), evidence: z.enum(['semantic', 'lexical', 'hybrid', 'graph']),
     score: z.number(), relations: z.array(z.string()),
@@ -216,7 +220,7 @@ const indexPhaseSchema = z.enum(['awaiting-root', 'starting', 'probing', 'indexi
 export const indexStatusDataSchema = z.object({
   lifecycle: z.object({ phase: indexPhaseSchema, message: z.string(), startedAt: z.number().optional() }),
   stamp: z.object({ provider: z.string(), model: z.string(), dimensions: z.number(), indexedAt: z.number(), filesIndexed: z.number(), status: z.enum(['complete', 'partial', 'empty']) }).optional(),
-  integrity: z.object({ healthy: z.boolean(), databaseExists: z.boolean(), schemaValid: z.boolean(), discoveryValid: z.boolean(), discoveredFiles: z.number(), files: z.number(), indexedFiles: z.number(), skippedFiles: z.number(), chunks: z.number(), missingVectors: z.number(), pendingPaths: z.array(z.string()), stalePaths: z.array(z.string()), diagnostic: z.string().optional() }).optional(),
+  integrity: z.object({ healthy: z.boolean(), databaseExists: z.boolean(), schemaValid: z.boolean(), discoveryValid: z.boolean(), discoveredFiles: z.number(), files: z.number(), indexedFiles: z.number(), skippedFiles: z.number(), skipped: z.array(z.object({ path: z.string(), reason: z.string() })), chunks: z.number(), missingVectors: z.number(), pendingPaths: z.array(z.string()), stalePaths: z.array(z.string()), diagnostic: z.string().optional() }).optional(),
 });
 export const indexStatusResultSchema = createToolResultSchema(z.enum(['INDEX_STATUS_READY', 'INDEX_STATUS_AWAITING_ROOT', 'INDEX_STATUS_DEGRADED', 'INDEX_STATUS_ERROR']), indexStatusDataSchema);
 export type IndexStatusData = z.infer<typeof indexStatusDataSchema>;
@@ -230,7 +234,7 @@ export function executeIndexStatus(rootDir: string | undefined, lifecycle: Index
     const stamp = readIndexStamp(rootDir);
     const integrity = inspectIndexIntegrity(rootDir, stamp === undefined ? undefined : { provider: stamp.provider, model: stamp.model });
     if (stamp !== undefined) data.stamp = { provider: stamp.provider, model: stamp.model, dimensions: stamp.dimensions, indexedAt: stamp.indexedAt, filesIndexed: stamp.filesIndexed, status: stamp.status };
-    data.integrity = { healthy: integrity.healthy, databaseExists: integrity.databaseExists, schemaValid: integrity.schemaValid, discoveryValid: integrity.discoveryValid, discoveredFiles: integrity.discoveredFiles, files: integrity.files, indexedFiles: integrity.indexedFiles, skippedFiles: integrity.skippedFiles, chunks: integrity.chunks, missingVectors: integrity.missingVectors, pendingPaths: [...integrity.pendingPaths], stalePaths: [...integrity.stalePaths], ...(integrity.diagnostic === undefined ? {} : { diagnostic: integrity.diagnostic }) };
+    data.integrity = { healthy: integrity.healthy, databaseExists: integrity.databaseExists, schemaValid: integrity.schemaValid, discoveryValid: integrity.discoveryValid, discoveredFiles: integrity.discoveredFiles, files: integrity.files, indexedFiles: integrity.indexedFiles, skippedFiles: integrity.skippedFiles, skipped: [...integrity.skipped], chunks: integrity.chunks, missingVectors: integrity.missingVectors, pendingPaths: [...integrity.pendingPaths], stalePaths: [...integrity.stalePaths], ...(integrity.diagnostic === undefined ? {} : { diagnostic: integrity.diagnostic }) };
     return { schemaVersion: 1, status: integrity.healthy ? 'success' : 'partial', code: integrity.healthy ? 'INDEX_STATUS_READY' : 'INDEX_STATUS_DEGRADED', summary: integrity.healthy ? 'The code index has complete usable coverage.' : 'The code index is inspectable but has coverage or integrity limitations.', data, evidence: [], diagnostics: integrity.diagnostic === undefined ? [] : [{ severity: 'warning', code: 'INDEX_INTEGRITY', message: integrity.diagnostic }], truncated: false, retryable: false };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -243,7 +247,7 @@ export function formatIndexStatusForModel(result: IndexStatusResult): string {
   const lines = [`state:         ${result.data.lifecycle.phase}`, `message:       ${result.data.lifecycle.message}`];
   if (result.data.lifecycle.startedAt !== undefined) lines.push(`started at:    ${new Date(result.data.lifecycle.startedAt).toISOString()}`);
   if (result.data.stamp !== undefined) lines.push(`provider:      ${result.data.stamp.provider}`, `model:         ${result.data.stamp.model}`, `stamp status:  ${result.data.stamp.status}`, `files indexed: ${result.data.stamp.filesIndexed}`);
-  if (result.data.integrity !== undefined) lines.push(`healthy:       ${result.data.integrity.healthy}`, `discovered:    ${result.data.integrity.discoveredFiles}`, `indexed:       ${result.data.integrity.indexedFiles}`, `chunks:        ${result.data.integrity.chunks}`, `pending:       ${result.data.integrity.pendingPaths.length}`, `stale:         ${result.data.integrity.stalePaths.length}`);
+  if (result.data.integrity !== undefined) lines.push(`healthy:       ${result.data.integrity.healthy}`, `discovered:    ${result.data.integrity.discoveredFiles}`, `indexed:       ${result.data.integrity.indexedFiles}`, `chunks:        ${result.data.integrity.chunks}`, `pending:       ${result.data.integrity.pendingPaths.length}`, `stale:         ${result.data.integrity.stalePaths.length}`, `skipped:       ${result.data.integrity.skipped.map((file) => `${file.path} (${file.reason})`).join(', ') || 'none'}`);
   return lines.join('\n');
 }
 
@@ -308,10 +312,11 @@ export function formatAdrCatalogForModel(result: AdrCatalogResult): string {
 /** Queries the persisted file dependency graph without formatting it. */
 export function executeDependencyGraph(input: {
   filePath: string; direction: 'inbound' | 'outbound';
-}): DependencyGraphResult {
-  const data: DependencyGraphData = { ...input, relations: [] };
+}, options: { readonly db?: Database.Database } = {}): DependencyGraphResult {
+  const data: DependencyGraphData = { filePath: input.filePath, direction: input.direction, relations: [] };
   try {
-    const db = AgentDB.getInstance();
+    // A worktree read (ADR-038) passes the connection that carries its overlay.
+    const db = options.db ?? AgentDB.getInstance();
     const normalizedPath = input.filePath.split(path.sep).join('/');
     const sql = input.direction === 'inbound'
       ? 'SELECT source AS path, relation FROM dependency_graph WHERE target = ? OR target = ?'
@@ -347,11 +352,12 @@ export function formatDependencyGraphForModel(result: DependencyGraphResult): st
 /** Queries NestJS bindings and injections without presentation markup. */
 export function executeNestGraph(input: {
   name: string; direction: 'provides' | 'injects' | 'module';
-}): NestGraphResult {
+}, options: { readonly db?: Database.Database } = {}): NestGraphResult {
   const normalizedName = normalizeToken(input.name);
-  const data: NestGraphData = { ...input, normalizedName, bindings: [], injections: [] };
+  const data: NestGraphData = { name: input.name, direction: input.direction, normalizedName, bindings: [], injections: [] };
   try {
-    const db = AgentDB.getInstance();
+    // A worktree read (ADR-038) passes the connection that carries its overlay.
+    const db = options.db ?? AgentDB.getInstance();
     if (input.direction === 'provides') data.bindings = [...findBindingsForToken(db, input.name)];
     else if (input.direction === 'injects') data.injections = [...findInjectionsForToken(db, input.name)];
     else data.bindings = [...findBindingsForModule(db, input.name)];
@@ -569,13 +575,27 @@ export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): st
   return `🔎 LIVE WORKSPACE SEARCH (literal matches; not semantic ranking)\n${matches.join('\n')}${suffix}`;
 }
 
+/**
+ * Runs an index read against one worktree's view of the index (ADR-038).
+ *
+ * The read must await nothing but the view's embeddings: it runs inside a
+ * window that holds the index's write lock.
+ */
+export interface WorktreeIndexScope {
+  /**
+   * @param read - The read to run on the worktree's view.
+   * @returns Its result, with the worktree's provenance.
+   */
+  read<T>(read: (view: OverlayView) => Promise<T>): Promise<{ result: T; worktree: ToolWorktree }>;
+}
+
 /** Searches the code index and retains evidence before model formatting. */
 export async function executeCodebaseSearch(input: {
   query: string; context?: string;
-}): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
+}, scope?: WorktreeIndexScope): Promise<{ result: CodebaseSearchResult; modelContent: string }> {
   const emptyData: CodebaseSearchData = {
     query: input.query, ...(input.context === undefined ? {} : { clarification: input.context }),
-    recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], files: [], retrieval: emptyRetrievalStrategy(),
+    recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
   };
   try {
     const stamp = readIndexStamp(runtimeRoot());
@@ -588,18 +608,31 @@ export async function executeCodebaseSearch(input: {
       return { result, modelContent: `Code index unavailable: ${message}` };
     }
     clearPendingRetrievalAlias();
-    const graphRag = new GraphRagService();
-    const contextResult = await graphRag.search(input.query, input.context);
+    let contextResult: GraphRagSearchResult;
+    let worktree: ToolWorktree | undefined;
+    if (scope === undefined) {
+      contextResult = await new GraphRagService().search(input.query, input.context);
+    } else {
+      const scoped = await scope.read((view) => new GraphRagService(
+        new RetrieverService(view.embeddings, { db: view.db, vectorSearchAvailable: view.vectorSearchAvailable }),
+        view.db,
+      ).search(input.query, input.context));
+      contextResult = scoped.result;
+      worktree = scoped.worktree;
+    }
     const candidate = contextResult.status === 'success' ? contextResult.learningCandidate : undefined;
-    if (candidate !== undefined) stageRetrievalAlias(candidate);
+    // An alias learned from a worktree's answer could name paths only that
+    // worktree has; it is never staged for the base index.
+    if (candidate !== undefined && worktree === undefined) stageRetrievalAlias(candidate);
     const data = toCodebaseSearchData(contextResult);
+    const scoped = worktree === undefined ? {} : { worktree };
     if (contextResult.status === 'abstained') {
       const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_NO_EVIDENCE',
         summary: contextResult.reason === 'unknown_terms'
           ? `No indexed evidence contains: ${contextResult.unknownTerms.join(', ')}.`
           : 'The nearest results lacked independent grounding evidence.',
         data, evidence: [], diagnostics: [], truncated: false, retryable: input.context === undefined,
-        nextAction: input.context === undefined ? 'Clarify once with a repository symbol, path, or domain term.' : undefined };
+        nextAction: input.context === undefined ? 'Clarify once with a repository symbol, path, or domain term.' : undefined, ...scoped };
       return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
     }
     const evidence = contextResult.files.flatMap((file) => file.chunks.map((chunk) => ({
@@ -612,10 +645,20 @@ export async function executeCodebaseSearch(input: {
       ...(recommendationNextAction(contextResult.strategy.recommendation) === undefined ? {} : {
         nextAction: recommendationNextAction(contextResult.strategy.recommendation),
       }),
+      ...scoped,
     };
     return { result, modelContent: formatGraphRagContextForLLM(contextResult) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
+    if (scope !== undefined && isRetryableRead(error)) {
+      // A worktree read that could not take the index's write lock in time: a
+      // peer is writing for a bounded time, so this is "come back", not a fault.
+      const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_INDEX_UNAVAILABLE',
+        summary: 'The worktree view of the index is briefly unavailable.', data: emptyData, evidence: [],
+        diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }],
+        truncated: false, retryable: true, nextAction: 'Retry the same call in a moment.' };
+      return { result, modelContent: `Worktree view unavailable: ${message}` };
+    }
     const result: CodebaseSearchResult = { schemaVersion: 1, status: 'error', code: 'CODEBASE_SEARCH_ERROR',
       summary: 'The codebase search failed.', data: emptyData, evidence: [],
       diagnostics: [{ severity: 'error', code: 'CODEBASE_SEARCH_ERROR', message }],
@@ -697,13 +740,13 @@ function emptyGraphRagBudget(): GraphRagInvestigationData['budget'] {
 function toCodebaseSearchData(result: GraphRagSearchResult): CodebaseSearchData {
   if (result.status === 'abstained') {
     return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
-    recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], ignoredModifiers: [...result.ignoredModifiers], files: [],
+    recoveredWithContext: false, abstentionReason: result.reason, unknownTerms: [...result.unknownTerms], ignoredModifiers: [...result.ignoredModifiers], droppedTerms: [], files: [],
       ...(result.provenance === undefined ? {} : { provenance: result.provenance }),
       retrieval: toToolRetrievalStrategy(result.strategy),
     };
   }
   return { query: result.query, ...(result.clarification === undefined ? {} : { clarification: result.clarification }),
-    recoveredWithContext: result.recoveredWithContext, unknownTerms: [], ignoredModifiers: [...result.ignoredModifiers],
+    recoveredWithContext: result.recoveredWithContext, unknownTerms: [], ignoredModifiers: [...result.ignoredModifiers], droppedTerms: [...result.droppedTerms],
     files: result.files.map((file) => ({ path: file.filePath, origin: file.origin, evidence: file.evidence, score: file.score, relations: [...file.relations], imports: [...file.imports],
       chunks: file.chunks.map((chunk) => ({ type: chunk.type, content: chunk.content,
         startLine: chunk.metadata.startLine, endLine: chunk.metadata.endLine,
@@ -732,8 +775,8 @@ function emptyRetrievalStrategy(): NonNullable<CodebaseSearchData['retrieval']> 
     relationsInspected: 0, stopReason: 'not-applicable', marginalEvidence: [],
     discardedBranches: 0, estimatedTokens: 0, elapsedMs: 0,
     readiness: {
-      dependency: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0 },
-      nest: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0 },
+      dependency: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0, affectedPaths: [] },
+      nest: { ready: false, reason: 'Retrieval did not run.', pendingFiles: 0, affectedPaths: [] },
     },
     recommendation: { state: 'clarify', reason: 'Retrieval did not run.' },
   };
@@ -748,4 +791,9 @@ function recommendationNextAction(
     return `Call query_dependency_graph for ${recommendation.subject ?? 'the grounded file'} if relationship detail is needed.`;
   }
   return `Call query_nest_graph for ${recommendation.subject ?? 'the grounded symbol'} if runtime wiring detail is needed.`;
+}
+
+/** Whether a read failed for a reason that asking again will clear, such as the overlay's write lock (ADR-038). */
+export function isRetryableRead(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { retryable?: unknown }).retryable === true;
 }

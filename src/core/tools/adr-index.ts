@@ -4,7 +4,7 @@ import { agentPath } from '../config/agent-directory';
 import { WorkspaceDiscoveryService } from '../config/workspace-discovery';
 
 const CACHE_VERSION = 2;
-const ADR_FILE_PATTERN = /^(ADR[-_]\d{3,})[-_].+\.md$/i;
+const ADR_FILE_PATTERN = /^((?:ADR[-_])?\d{3,})[-_].+\.md$/i;
 const MAX_CONTEXT_LENGTH = 220;
 
 /** A compact, project-relative description of one Architecture Decision Record. */
@@ -136,7 +136,9 @@ function discoverAdrs(rootDir: string): AdrCandidate[] {
       const absolutePath = path.resolve(catalog.absolutePath, entry.name);
       const stat = fs.statSync(absolutePath);
       candidates.push({
-        id: match[1].replace('_', '-').toUpperCase(),
+        id: match[1].match(/^\d/) === null
+          ? match[1].replace('_', '-').toUpperCase()
+          : `ADR-${match[1]}`,
         module: catalog.module,
         path: path.relative(rootDir, absolutePath).split(path.sep).join('/'),
         absolutePath,

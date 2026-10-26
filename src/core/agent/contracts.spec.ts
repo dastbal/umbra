@@ -1,6 +1,8 @@
+import { classifyDelegationOutcome } from './delegation/delegation-outcome';
 import {
   AgentRole,
   AgentTaskResult,
+  implementationArtifactSchema,
   ResearchArtifact,
   researchArtifactSchema,
   TaskComplexity,
@@ -152,5 +154,57 @@ describe('partial research handoffs', () => {
 
     expect(parsed.unknowns).toEqual([]);
     expect(parsed.openQuestions).toEqual([]);
+  });
+});
+
+describe('implementationArtifactSchema', () => {
+  const ready = {
+    status: 'ready',
+    objective: 'Add the UsersModule',
+    changesMade: ['created src/users/users.module.ts with the DDD layers'],
+    testsRun: ['src/users/users.service.spec.ts'],
+    nextAction: 'Hand over to the Verifier.',
+  };
+
+  it('accepts a finished implementation', () => {
+    const parsed = implementationArtifactSchema.parse(ready);
+
+    expect(parsed.status).toBe('ready');
+    expect(parsed.remainingWork).toEqual([]);
+    expect(parsed.unknowns).toEqual([]);
+  });
+
+  // This is the coupling that makes the schema worth having. The orchestration
+  // guard recovers a delegation's status from the artifact, and
+  // `classifyDelegationOutcome` only counts an attempt for a status it knows. A
+  // truer-sounding vocabulary — "implemented", "done" — would parse, validate,
+  // and still leave coderCalls at zero, which is exactly the bug this schema
+  // exists to close.
+  it('speaks the status vocabulary the orchestration policy decides on', () => {
+    for (const status of ['ready', 'blocked', 'partial'] as const) {
+      const outcome = classifyDelegationOutcome({ artifactStatus: status });
+
+      expect(outcome.consumesAttempt).toBe(true);
+    }
+  });
+
+  it('refuses a finished implementation that changed nothing', () => {
+    expect(() => implementationArtifactSchema.parse({ ...ready, changesMade: [] })).toThrow();
+  });
+
+  it('refuses a partial implementation that states no unknown', () => {
+    expect(() => implementationArtifactSchema.parse({ ...ready, status: 'partial' })).toThrow();
+    expect(() => implementationArtifactSchema.parse({
+      ...ready,
+      status: 'partial',
+      unknowns: ['whether the repository port should be generic'],
+    })).not.toThrow();
+  });
+
+  // The Verifier reports what actually changed on disk. A writer that also
+  // declares its files can claim one it never wrote, which is the FILE CREATION
+  // LAW failure in artifact form.
+  it('does not ask the writer to declare the files it wrote', () => {
+    expect(Object.keys(implementationArtifactSchema.parse(ready))).not.toContain('filesWritten');
   });
 });

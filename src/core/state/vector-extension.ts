@@ -81,6 +81,43 @@ export function loadVectorExtension(db: Database): VectorExtensionStatus {
 }
 
 /**
+ * Loads the extension into a second connection of the same process.
+ *
+ * {@link loadVectorExtension} memoizes per process, which is right for the one
+ * connection it was written for and wrong for any other: an extension is
+ * loaded per connection, so a memoized "available" would let a second
+ * connection call `vec_distance_cosine` that it does not have. The worktree
+ * overlay (ADR-038) opens such a connection.
+ *
+ * @param db - An additional open connection.
+ * @returns Whether `vec_distance_cosine` is now callable on `db`.
+ */
+export function loadVectorExtensionInto(db: Database): boolean {
+  const status = loadVectorExtension(db);
+  if (!status.available) return false;
+  // The first connection of a process is loaded by the call above itself.
+  if (hasVectorFunctions(db)) return true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const sqliteVec = require('sqlite-vec') as { load: (connection: Database) => void };
+    sqliteVec.load(db);
+    return hasVectorFunctions(db);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `db` already has sqlite-vec's functions registered. */
+function hasVectorFunctions(db: Database): boolean {
+  try {
+    db.prepare('SELECT vec_version() AS version').get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reports the status without attempting a load.
  *
  * @returns The memoized status, or `undefined` when no load has been attempted.

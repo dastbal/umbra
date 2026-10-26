@@ -104,6 +104,15 @@ describe('WorkspaceDiscoveryService', () => {
     expect(result.adrCatalogs[1]?.readmePath).toBe('docs/payments/adr/README.md');
   });
 
+  it('discovers a Nygard-style ADR catalog without requiring a filename rename', () => {
+    write('src/anchor.ts', 'export const anchor = true;');
+    write('docs/adr/0001-financing-bounded-context.md', '# Financing bounded context');
+
+    const result = new WorkspaceDiscoveryService(rootDir).discover();
+
+    expect(result.adrCatalogs.map((catalog) => catalog.relativePath)).toContain('docs/adr');
+  });
+
   // A git worktree under `.claude/worktrees/` is a complete second checkout of
   // the same repository. Indexing it does not add noise, it doubles the corpus:
   // every symbol exists twice, at two paths, and retrieval starts returning the

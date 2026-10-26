@@ -8,6 +8,12 @@ export interface LexicalCandidate {
 
 const MAX_QUERY_TERMS = 12;
 
+/** TypeScript syntax words that occur in most source files but name no subject. */
+const TYPESCRIPT_SYNTAX_FILLERS = new Set([
+  'import', 'imports', 'export', 'exports', 'class', 'classes', 'type', 'types',
+  'interface', 'interfaces', 'default',
+]);
+
 /**
  * Creates and backfills the local full-text index for code chunks.
  *
@@ -69,14 +75,9 @@ export function ensureLexicalIndex(db: Database.Database): void {
  * @returns An OR expression, or `undefined` when no searchable terms remain.
  */
 export function toLexicalMatchExpression(query: string): string | undefined {
-  const terms = query
-    .match(/[\p{L}\p{N}_]+/gu)
-    ?.map((term) => term.toLocaleLowerCase())
-    .filter((term) => term.length >= 2)
-    .filter((term, index, all) => all.indexOf(term) === index)
-    .slice(0, MAX_QUERY_TERMS);
+  const terms = lexicalTerms(query, 2).slice(0, MAX_QUERY_TERMS);
 
-  if (terms === undefined || terms.length === 0) return undefined;
+  if (terms.length === 0) return undefined;
 
   return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(' OR ');
 }
@@ -96,13 +97,9 @@ export function hasExactLexicalEvidence(
   filePath: string,
   metadata: string,
 ): boolean {
-  const queryTerms = query
-    .match(/[\p{L}\p{N}_]+/gu)
-    ?.map((term) => term.toLocaleLowerCase())
-    .filter((term) => term.length >= 3)
-    .filter((term, index, all) => all.indexOf(term) === index);
+  const queryTerms = lexicalTerms(query, 3);
 
-  if (queryTerms === undefined || queryTerms.length === 0) return false;
+  if (queryTerms.length === 0) return false;
 
   const evidenceTerms = new Set(
     `${filePath} ${metadata}`
@@ -172,4 +169,22 @@ export function findLexicalCandidates(
     .all(expression, limit) as { chunkId: string; rank: number }[];
 
   return rows;
+}
+
+/**
+ * Keeps TypeScript syntax searchable when it is the whole question, but strips
+ * it when concrete terms are available to identify what the operator means.
+ *
+ * @param query - Operator wording to normalize for lexical retrieval.
+ * @param minimumLength - Shortest useful term for the consuming FTS operation.
+ * @returns Distinct subject terms, or syntax terms when no subject was supplied.
+ */
+function lexicalTerms(query: string, minimumLength: number): string[] {
+  const terms = query
+    .match(/[\p{L}\p{N}_]+/gu)
+    ?.map((term) => term.toLocaleLowerCase())
+    .filter((term) => term.length >= minimumLength)
+    .filter((term, index, all) => all.indexOf(term) === index) ?? [];
+  const subjects = terms.filter((term) => !TYPESCRIPT_SYNTAX_FILLERS.has(term));
+  return subjects.length > 0 ? subjects : terms;
 }

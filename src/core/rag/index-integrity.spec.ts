@@ -94,6 +94,17 @@ describe('inspectIndexIntegrity', () => {
     expect(report.healthy).toBe(false);
   });
 
+  it('names intentionally skipped files and their reason instead of reporting only a count', () => {
+    const db = new Database(path.join(rootDir, '.umbra', 'memory.db'));
+    db.prepare(`UPDATE file_registry SET index_state = 'skipped', skip_reason = ? WHERE path = ?`)
+      .run('Whitespace-only source.', 'src/b.ts');
+    db.close();
+
+    const report = inspectIndexIntegrity(rootDir, { provider: 'ollama', model: 'nomic-embed-text' });
+
+    expect(report.skipped).toEqual([{ path: 'src/b.ts', reason: 'Whitespace-only source.' }]);
+  });
+
   it('reports an absent workspace database as an invalid index instead of an empty valid one', () => {
     fs.rmSync(path.join(rootDir, '.umbra', 'memory.db'));
     const report = inspectIndexIntegrity(rootDir, { provider: 'ollama', model: 'nomic-embed-text' });

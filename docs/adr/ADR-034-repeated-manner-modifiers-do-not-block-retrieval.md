@@ -68,3 +68,19 @@ absence gate is relaxed. The typed `ask_codebase` result carries
 - `src/core/rag/graphrag.ts` — `GraphRagSearchResult`, `GraphRagService#executePlan`.
 - `src/core/tools/read-only-executions.ts` — `codebaseSearchDataSchema`, `toCodebaseSearchData`.
 - `src/presentation/mcp/tool-catalog.ts` — `publishAskCodebase`.
+
+## Amendment — 2026-09-23 · The code left this record's decision for five days
+
+From `09154c1` (2026-09-18) until this amendment, `assessUnknownTerms` did not do
+what this record decides. *"All other unknown terms remain strict"* became "every
+unknown term is dropped once any other subject is grounded", and the test this
+record cites as evidence — `bytes` stays strict when it is the only possible
+subject — was rewritten to expect the opposite. Measured on the live
+calibration split, correct abstention fell to 0.1.
+
+The decision above stands and the code is back on it. `droppedTerms`, added by
+that commit, remains in the result schema and is always empty. The measurement
+and the reasoning are in ADR-028's amendment of the same date.
+
+The `X by X` rule itself was never affected: it still needs two grounded
+subjects, and its test was unchanged throughout.

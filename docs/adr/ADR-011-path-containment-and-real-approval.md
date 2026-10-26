@@ -381,3 +381,75 @@ what is stored, not what is rendered**: the retriever's output can filter and ca
 what it emits without touching `skeleton_signature`, which is the cheap path and
 needs no reindex. Anything that changes `generateSkeleton` itself still carries
 the blast radius this record weighed.
+
+---
+
+## Amendment — 2026-09-21: one approval authorized more than one action
+
+The gate raises an interrupt and the CLI renders it — the 2026-08-27 amendment
+fixed that. What neither this record nor the CLI accounted for is that LangGraph
+matches an answer to a suspension in **two** different ways, and the gate was
+wrong under both.
+
+### Across tasks: the answer was a broadcast
+
+`mapCommand` in `@langchain/langgraph/dist/pregel/io.js` treats `Command.resume`
+as a per-task map **only** when every key passes `isXXH3` — literally
+`/^[0-9a-f]{32}$/` in `dist/hash.js`. Any other shape falls to the
+`NULL_TASK_ID` branch, which writes the same value to every task waiting in that
+super-step.
+
+`ChatSession#handleHITL` resumed with `{ decisions: [...] }`. Those keys are not
+digests, so every resume this CLI has ever sent took the broadcast branch. Two
+writes gated in one assistant message suspend as two tasks, and the handler
+rendered `interrupts[0]` alone — so the operator approved one action and
+authorized a second one they were never shown. The sixth amendment to
+`ADR-012-arrow-key-selection-prompts.md` spent a whole round making a carried
+Enter unable to approve; this defeated it by a different route.
+
+### Within one task: the answer was positional
+
+`interrupt()` in `@langchain/langgraph/dist/interrupt.js` numbers its calls with
+`scratchpad.interruptCounter` and returns `scratchpad.resume[idx]`, and the id it
+carries is `XXH3(checkpoint_ns)` — **one per task**, not one per call. So a
+digest-keyed map cannot separate two sequential questions inside one tool either.
+`requestApproval` read `decisions[0]` with nothing tying that decision to
+`toolName` or `args`.
+
+### What changed
+
+- `canCorrelateResume` and `buildResumePayload` in
+  `src/presentation/cli/pending-interrupts.ts` carry LangGraph's own predicate.
+  Correlation is all-or-nothing: a set where any id is missing or malformed
+  answers the first suspension alone rather than broadcasting to the rest.
+- `ChatSession#handleHITL` answers every pending suspension, and asks whether it
+  can correlate *before* prompting, so the operator is never asked a question
+  whose answer will be discarded.
+- `fingerprintInterrupt` in `src/core/tools/utils/interrupt-fingerprint.ts` gives
+  each request an `actionId`; `requestApproval` requires it back and treats a
+  mismatch as **not approved**.
+
+The fingerprint is derived from the request, never generated. `interrupt()`
+suspends by throwing and the whole tool body re-runs on resume — this record's
+own *Re-execution* section — so a generated id would differ on the second pass
+and would refuse every approval the operator actually gave.
+
+### What does not change
+
+Everything this record says about containment, about framing file content as
+untrusted data, and about failing closed. A decision that names no action is
+refused, which is the same direction as an Escape.
+
+Rendering one suspension moved to `src/presentation/cli/hitl-prompt.ts`
+(`answerSuspension`), because the ratchet in
+`src/presentation/cli/module-size-ceiling.spec.ts` will not let `chat-session.ts`
+grow. Its ceiling was lowered from 1,418 to 1,355 in the same commit, as that
+spec requires.
+
+### Verification evidence
+
+`npx jest --runInBand src/core/tools/utils/approval.spec.ts` — 11 passed,
+including an approval naming a different action (refused), an approval naming no
+action (refused), and a fingerprint proven identical across two passes over the
+same request. `src/presentation/cli/pending-interrupts.spec.ts` — 17 passed,
+including a keyed answer never being mixed with an unkeyed one.
