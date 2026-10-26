@@ -7,7 +7,7 @@ import {
   graphRagInvestigationResultSchema,
   indexStatusResultSchema, type IndexStatusResult, workspaceInventoryResultSchema, workspaceSearchResultSchema,
   isRetryableRead, type WorktreeIndexScope,
-} from '../../core/tools';
+} from '../../core/tools/read-only-executions';
 import { McpToolResult } from './mcp.contracts';
 import { toStructuredToolResult } from './dto-mapper';
 import { McpConversationService } from './conversation-service';

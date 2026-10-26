@@ -218,3 +218,16 @@ describe('MCP worktree selection (ADR-038)', () => {
     }
   });
 });
+
+describe('MCP handshake imports', () => {
+  it('does not load the writable tool barrel or indexer when publishing tools', () => {
+    jest.doMock('../../core/tools', () => { throw new Error('writable tools loaded before handshake'); });
+    jest.doMock('../../core/rag/indexer', () => { throw new Error('indexer loaded before handshake'); });
+    try {
+      expect(() => jest.isolateModules(() => { require('./tool-catalog'); })).not.toThrow();
+    } finally {
+      jest.dontMock('../../core/tools');
+      jest.dontMock('../../core/rag/indexer');
+    }
+  });
+});

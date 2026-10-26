@@ -271,10 +271,9 @@ argument, each tool behaves exactly as before.
 - An alias learned from a worktree answer is never staged for the base index,
   because it could name paths only that worktree has.
 - `worktree-view.ts` is required lazily (`loadWorktreeViews`), which keeps the
-  overlay modules off the path to the handshake (ADR-024 amendment 15). Review
-  found that this does not keep the *indexer* off it: the `core/tools` barrel
-  already reaches it at startup through `file-tools.ts`. That is older than
-  this decision and is left to its own change.
+  overlay modules off the path to the handshake (ADR-024 amendment 15). The
+  eager indexer import through the MCP catalog's `core/tools` barrel was closed
+  in the 2026-10-26 amendment below.
 
 ```mermaid
 flowchart LR
@@ -484,3 +483,10 @@ making graph-only reads wait for embedding.
 This removes the repeated cost after the first successful embedding of an exact
 input. A genuinely new chunk still needs its first provider call; the remaining
 cold cost is the subject of the deferred warming measurement.
+
+The MCP tool catalog also now imports `read-only-executions` directly. Its old
+`core/tools` barrel import loaded `file-tools.ts`, then `indexer.ts` and provider
+SDKs before the MCP handshake, even though the catalog only uses read-only
+operations. A module-load check before the change confirmed `indexer.ts` was
+present in `require.cache`; the direct import removes that path. Index warm-up
+still starts after transport connection.

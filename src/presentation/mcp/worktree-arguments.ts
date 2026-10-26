@@ -47,9 +47,8 @@ let viewModule: typeof WorktreeViewModule | undefined;
  *
  * Required lazily, like the indexing modules in `start-mcp-server.ts`, so the
  * overlay modules stay off the path to the MCP handshake (ADR-024 amendment
- * 15). This does not keep the indexer itself off that path: it is already
- * reached at startup through the `core/tools` barrel, which `file-tools.ts`
- * imports it into — a cost that predates worktree selection.
+ * 15). The MCP catalog imports its read-only operations directly, so the
+ * `core/tools` barrel no longer pulls the indexer into that handshake.
  */
 function loadWorktreeViews(): typeof WorktreeViewModule {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
