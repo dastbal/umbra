@@ -2418,14 +2418,11 @@ it across processes, and extend `worktree` to the remaining tools.
 
 ### What is actually missing
 
-- **A persistent, content-keyed vector cache.** The overlay's memo lives in one
-  process. On a superproject worktree with 86 changed files, the first call
-  embedded 590 chunks in 22.5 s with Ollama. Three processes on one repository
-  each pay that once, and every restart pays it again. Keying `chunk_vectors`
-  (or a side table) by provider, model and embedding input would let any
-  process, any worktree and the base indexer reuse a vector. It is Cursor's
-  *"caches embeddings by chunk content"*. It needs a schema change, and so an
-  explicit decision.
+- **The very first embedding of new content can still be slow.** A measured
+  superproject worktree with 86 changed files needed 590 embeddings in 22.5 s
+  with Ollama. The persistent cache added in ADR-038's October 2026 amendment
+  makes subsequent processes reuse those vectors, but new content still needs
+  one provider call. Measure that remaining cold cost before choosing warming.
 - **One server per repository.** gopls runs *"the gopls daemon"* that every
   editor's process forwards to (`-remote=auto`), because *"many processes means
   having many caches"*. On 2026-10-22, three Umbra processes served one
@@ -2440,13 +2437,13 @@ it across processes, and extend `worktree` to the remaining tools.
 
 ### The mechanism to reuse
 
-`WorktreeOverlayBuilder.vectorsFor` already separates *which inputs need a
-vector* from *where a vector comes from*; a persistent cache is a third source
-beside the base lookup and the memo. `start-mcp-server.ts` already isolates the
+`WorktreeOverlayBuilder.vectorsFor` now checks the base index, the process memo
+and a persistent content cache. `start-mcp-server.ts` already isolates the
 startup order a daemon would have to keep.
 
 ### Plan
 
-Measure first, as ADR-031 asks. Count how often a first worktree call exceeds
-a few seconds in real use before building either the cache or the daemon.
+Count how often genuinely new content keeps a first worktree call above a few
+seconds before building warming or a daemon. Repeated embedding across sessions
+was reported as a recurring defect and was fixed by the persistent cache.
 

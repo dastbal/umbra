@@ -18,6 +18,7 @@ import { ensureLexicalIndex } from '../rag/lexical-index';
 import { ensureIndexLeaseSchema } from '../rag/index-run-lease';
 import { ensureNestGraphSchema } from '../rag/nest-graph-store';
 import { ensureDependencyGraphSchema } from '../rag/dependency-graph-store';
+import { ensureEmbeddingCacheSchema } from '../rag/embedding-cache';
 import { ensureRetrievalMemory } from '../rag/retrieval-memory';
 import { enrichExistingTSDoc } from '../rag/tsdoc-enrichment';
 
@@ -215,6 +216,7 @@ export class AgentDB {
       `CREATE INDEX IF NOT EXISTS idx_chunk_vectors_identity
          ON chunk_vectors(provider, model)`,
     ).run();
+    ensureEmbeddingCacheSchema(db);
 
     // One root owns one writer at a time, even when two MCP clients start the
     // same global Umbra command concurrently.

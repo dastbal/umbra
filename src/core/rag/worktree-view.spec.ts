@@ -269,6 +269,24 @@ describe('WorktreeViewService', () => {
     expect(second.worktree.chunksReused).toBe(first.worktree.chunksReused + first.worktree.chunksEmbedded);
   });
 
+  it('reuses worktree embeddings after the overlay service is recreated', async () => {
+    const worktree = await views.resolve(linked);
+    const first = await views.read(worktree, { embed: true }, () => 'ok');
+    expect(first.worktree.chunksEmbedded).toBeGreaterThan(0);
+    views.close();
+    views = new WorktreeViewService({
+      pinnedRoot: repo,
+      baseDb: AgentDB.getInstance(),
+      dbPath,
+      embeddings,
+      isIndexing: () => IndexerService.running,
+    });
+    const documentsBefore = embeddings.documents;
+    const second = await views.read(worktree, { embed: true }, () => 'ok');
+    expect(second.worktree.chunksEmbedded).toBe(0);
+    expect(embeddings.documents).toBe(documentsBefore);
+  });
+
   it('runs a search inside one macrotask once its query embedding is known', async () => {
     const worktree = await views.resolve(linked);
     const search = (scopeRead: WorktreeIndexScope['read']) => executeCodebaseSearch({ query: 'chargeback' }, { read: scopeRead });
@@ -332,6 +350,32 @@ describe('WorktreeViewService', () => {
 
     release();
     expect((await pendingSearch).result.status).toBe('success');
+  });
+
+  it('does not make a graph-only build wait for a pending vector build', async () => {
+    const worktree = await views.resolve(linked);
+    let began!: () => void;
+    const embeddingBegan = new Promise<void>((resolve) => { began = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = embeddings.embedDocuments;
+    embeddings.embedDocuments = async (texts: string[]) => {
+      began();
+      await gate;
+      return original(texts);
+    };
+
+    const vectorRead = views.read(worktree, { embed: true }, () => 'vectors');
+    await embeddingBegan;
+    const graphRead = views.read(worktree, { embed: false }, () => 'graph');
+    const graphFinished = await Promise.race([
+      graphRead.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+    ]);
+    release();
+    await vectorRead;
+    expect(graphFinished).toBe(true);
+    expect((await graphRead).result).toBe('graph');
   });
 
   it('rolls back when the read throws', async () => {

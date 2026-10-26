@@ -464,3 +464,23 @@ flowchart LR
 - `src/presentation/mcp/tool-catalog.ts` — the six tools' `worktree` handling
 - `src/presentation/mcp/start-mcp-server.ts` — the server instructions
 - `src/core/config/git-worktrees.spec.ts`, `src/core/rag/worktree-delta.spec.ts`, `src/core/rag/worktree-view.spec.ts`, `src/presentation/mcp/tool-catalog.spec.ts`
+
+## Amendment — 2026-10-26 · Reuse vectors across Claude Code sessions
+
+The measured 590-chunk overlay took 22.5 seconds with Ollama, and David reported
+that a new session repeatedly waits for Umbra. The overlay's process memo could
+not survive a server restart. A side table, `embedding_cache`, now stores vectors
+by `(provider, model, dimensions, sha256(embeddingInputFor(chunk)))`. The base
+indexer and worktree overlay both check it before calling the provider and store
+new results there. A new process can reuse a previous session's embeddings;
+overlay rows themselves remain transient.
+
+The table keeps at most 50,000 vectors per repository, evicting oldest insertions
+when full. Reads do not write, so repeated tool calls do not contend with the
+indexer. The in-process overlay memo and the base-vector lookup also include
+dimensions, and concurrent vector builds for one delta share one promise without
+making graph-only reads wait for embedding.
+
+This removes the repeated cost after the first successful embedding of an exact
+input. A genuinely new chunk still needs its first provider call; the remaining
+cold cost is the subject of the deferred warming measurement.

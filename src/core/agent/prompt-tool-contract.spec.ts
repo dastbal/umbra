@@ -186,9 +186,13 @@ describe('a subagent prompt only names tools that subagent declares', () => {
    * check would pass vacuously on exactly the case it should catch.
    */
   function promptText(subagent: (typeof SUBAGENTS)[number]): string {
-    const prompt = subagent.systemPrompt;
+    const prompt: unknown = subagent.systemPrompt;
     if (prompt === undefined) throw new Error(`${subagent.name} has no system prompt`);
-    return typeof prompt === 'string' ? prompt : prompt.text;
+    if (typeof prompt === 'string') return prompt;
+    if (typeof prompt === 'object' && prompt !== null && 'text' in prompt && typeof prompt.text === 'string') {
+      return prompt.text;
+    }
+    throw new Error(`${subagent.name} has an unsupported system prompt`);
   }
 
 

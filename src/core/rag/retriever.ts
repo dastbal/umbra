@@ -373,11 +373,11 @@ export class RetrieverService {
                 vec_distance_cosine(v.vector, ?) AS distance
            FROM chunk_vectors v
            JOIN code_chunks c ON c.id = v.chunk_id
-          WHERE v.provider = ? AND v.model = ?
+          WHERE v.provider = ? AND v.model = ? AND v.dimensions = ?
           ORDER BY distance
           LIMIT ?`,
       )
-      .all(encodeVector(queryVector), identity.provider, identity.model, limit) as any[];
+      .all(encodeVector(queryVector), identity.provider, identity.model, dimensions, limit) as any[];
 
     this.lastProvenance = {
       provider: identity.provider,
@@ -419,9 +419,9 @@ export class RetrieverService {
                 c.content AS content, c.metadata AS metadata, v.vector AS vector
            FROM chunk_vectors v
            JOIN code_chunks c ON c.id = v.chunk_id
-          WHERE v.provider = ? AND v.model = ?`,
+          WHERE v.provider = ? AND v.model = ? AND v.dimensions = ?`,
       )
-      .all(identity.provider, identity.model) as any[];
+      .all(identity.provider, identity.model, dimensions) as any[];
 
     this.lastProvenance = {
       provider: identity.provider,

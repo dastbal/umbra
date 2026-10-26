@@ -7,6 +7,7 @@ import { NestChunker } from '../tools/ast/chunker';
 import type { ChunkMetadata, ChunkType } from '../types';
 import type { EmbeddingsIdentity, EmbeddingsPort } from './embeddings/embeddings.port';
 import { embeddingInputFor } from './embedding-input';
+import { EmbeddingCache } from './embedding-cache';
 import { analyzeSourceFile, type AnalyzedSourceFile } from './indexed-file-rows';
 import { PrismaSchemaChunker } from './prisma-schema-chunker';
 import { decodeVector } from './vector-codec';
@@ -75,8 +76,13 @@ const EMBED_BATCH_SIZE = 10;
 export class WorktreeOverlayBuilder {
   private readonly overlays = new Map<string, WorktreeOverlay>();
 
+  /** Concurrent tool calls for one delta share a single build. */
+  private readonly inflight = new Map<string, Promise<WorktreeOverlay>>();
+
   /** Kept as float32, the precision the index stores, at half the memory of a number array. */
   private readonly memo = new Map<string, Float32Array>();
+
+  private readonly persistentCache: EmbeddingCache;
 
   /**
    * @param embeddings - Provider whose identity the overlay's vectors must share with the base index.
@@ -85,7 +91,9 @@ export class WorktreeOverlayBuilder {
   public constructor(
     private readonly embeddings: EmbeddingsPort,
     private readonly baseDb: Database.Database,
-  ) {}
+  ) {
+    this.persistentCache = new EmbeddingCache(baseDb);
+  }
 
   /**
    * Returns the overlay for a delta, building only what the cache lacks.
@@ -102,13 +110,41 @@ export class WorktreeOverlayBuilder {
     options: { readonly embed: boolean },
   ): Promise<WorktreeOverlay> {
     const identity = this.embeddings.identity;
-    const key = `${identity.provider}/${identity.model}\0${delta.signature}`;
+    const key = `${identity.provider}/${identity.model}/${identity.dimensions}\0${delta.signature}`;
     const cached = this.overlays.get(key);
     if (cached !== undefined && (cached.embedded || !options.embed)) {
       this.touch(key, cached);
       // Nothing was built for this call: every vector came from the cache.
       return { ...cached, stats: { chunks: cached.stats.chunks, reused: cached.embedded ? cached.stats.chunks : 0, embedded: 0, buildMs: 0 } };
     }
+
+    // A graph-only read must never wait for a slow vector build.
+    const pendingKey = `${key}\0${options.embed ? 'vectors' : 'graph'}`;
+    const pending = this.inflight.get(pendingKey);
+    if (pending !== undefined) {
+      const result = await pending;
+      if (result.embedded || !options.embed) {
+        return { ...result, stats: { chunks: result.stats.chunks, reused: result.embedded ? result.stats.chunks : 0, embedded: 0, buildMs: 0 } };
+      }
+    }
+    const build = this.buildFresh(worktree, delta, options, identity, key);
+    this.inflight.set(pendingKey, build);
+    try {
+      return await build;
+    } finally {
+      if (this.inflight.get(pendingKey) === build) this.inflight.delete(pendingKey);
+    }
+  }
+
+  /** Parses, embeds and records one uncached overlay. */
+  private async buildFresh(
+    worktree: ResolvedWorktree,
+    delta: WorktreeDelta,
+    options: { readonly embed: boolean },
+    identity: EmbeddingsIdentity,
+    key: string,
+  ): Promise<WorktreeOverlay> {
+    const cached = this.overlays.get(key);
 
     const startedAt = Date.now();
     const chunkers = { typescript: new NestChunker(delta.worktreeRoot), prisma: new PrismaSchemaChunker() };
@@ -175,11 +211,12 @@ export class WorktreeOverlayBuilder {
     const inputs = file.chunks.map((chunk) => embeddingInputFor(chunk));
     const keys = inputs.map((input) => memoKey(identity, input));
     const fromBase = this.baseVectorsByInput(file.relativePath, identity);
+    const fromPersistent = this.persistentCache.get(identity, inputs);
 
     const vectors: (readonly number[] | undefined)[] = inputs.map((input, index) => {
-      const known = this.memo.get(keys[index]!) ?? fromBase.get(input);
+      const known = this.memo.get(keys[index]!) ?? fromBase.get(input) ?? fromPersistent.get(input);
       if (known === undefined) return undefined;
-      this.remember(keys[index]!, known);
+      this.remember(keys[index]!, known instanceof Float32Array ? known : Float32Array.from(known));
       return Array.from(known);
     });
     const reused = vectors.filter((vector) => vector !== undefined).length;
@@ -188,9 +225,10 @@ export class WorktreeOverlayBuilder {
     for (let start = 0; start < missing.length; start += EMBED_BATCH_SIZE) {
       const batch = missing.slice(start, start + EMBED_BATCH_SIZE);
       const result = await this.embeddings.embedDocuments(batch.map((index) => inputs[index]!));
-      if (result.length !== batch.length) {
-        throw new Error(`Embedding provider returned ${result.length} vectors for ${batch.length} worktree chunks of ${file.relativePath}.`);
+      if (result.length !== batch.length || result.some((vector) => vector.length !== identity.dimensions)) {
+        throw new Error(`Embedding provider returned incompatible vectors for ${batch.length} worktree chunks of ${file.relativePath}.`);
       }
+      this.persistentCache.put(identity, batch.map((index) => inputs[index]!), result);
       batch.forEach((index, position) => {
         vectors[index] = result[position]!;
         this.remember(keys[index]!, Float32Array.from(result[position]!));
@@ -205,9 +243,9 @@ export class WorktreeOverlayBuilder {
     const rows = this.baseDb.prepare(`
       SELECT c.id, c.chunk_type, c.content, c.metadata, v.vector
         FROM code_chunks c
-        JOIN chunk_vectors v ON v.chunk_id = c.id AND v.provider = ? AND v.model = ?
+        JOIN chunk_vectors v ON v.chunk_id = c.id AND v.provider = ? AND v.model = ? AND v.dimensions = ?
        WHERE c.file_path = ?
-    `).all(identity.provider, identity.model, relativePath) as Array<{
+    `).all(identity.provider, identity.model, identity.dimensions, relativePath) as Array<{
       id: string; chunk_type: ChunkType; content: string; metadata: string; vector: Buffer;
     }>;
     const byInput = new Map<string, Float32Array>();
@@ -262,5 +300,5 @@ export function relocate(file: AnalyzedSourceFile, prefix: string): AnalyzedSour
 
 /** A vector is reusable exactly when the identity and the embedded text are equal. */
 function memoKey(identity: EmbeddingsIdentity, input: string): string {
-  return crypto.createHash('sha256').update(identity.provider).update('\0').update(identity.model).update('\0').update(input).digest('hex');
+  return crypto.createHash('sha256').update(identity.provider).update('\0').update(identity.model).update('\0').update(String(identity.dimensions)).update('\0').update(input).digest('hex');
 }

@@ -20,6 +20,7 @@ import { analyzeSourceFile, commitIndexedFile, commitSkippedFile } from './index
 import { captureIndexedGitState, mergeIndexedGitState } from './indexed-git-state';
 import { IndexRunLease } from './index-run-lease';
 import { encodeVector } from './vector-codec';
+import { EmbeddingCache } from './embedding-cache';
 import {
   assertStoredInputsAreSafe,
   embeddingInputFor,
@@ -28,7 +29,7 @@ import {
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { GraphEdge, ProcessedChunk } from '../types';
+import { ChunkMetadata, ChunkType, GraphEdge, ProcessedChunk } from '../types';
 import {
   WorkspaceDiscovery,
   WorkspaceDiscoveryService,
@@ -114,6 +115,9 @@ export class IndexerService {
   /** The embedding provider whose `chunk_vectors` rows this run writes. */
   private readonly embeddings: EmbeddingsPort;
 
+  /** Content-keyed vectors shared by indexing and worktree reads. */
+  private readonly embeddingCache: EmbeddingCache;
+
   /** Timestamp used only for a stable elapsed-time and ETA progress display. */
   private indexingStartedAt = 0;
 
@@ -135,6 +139,7 @@ export class IndexerService {
     this.chunker = new NestChunker(runtimeRoot());
     this.db = AgentDB.getInstance();
     this.embeddings = embeddings;
+    this.embeddingCache = new EmbeddingCache(this.db);
     this.progressObserver = progressObserver;
   }
 
@@ -400,7 +405,7 @@ export class IndexerService {
           this.reportProgress(filePath, filePosition, fileTotal, vectors.length, `${label} · embedding ${batch.length}`);
           const startedAt = Date.now();
           const result = await this.awaitEmbeddingWithHeartbeat(
-            this.embeddings.embedDocuments(batch.map(embeddingInputFor)),
+            this.embedInputsWithCache(batch.map(embeddingInputFor)),
             (elapsed) => this.reportProgress(
               filePath,
               filePosition,
@@ -428,6 +433,22 @@ export class IndexerService {
       }
     }
     return vectors;
+  }
+
+  /** Reuses persisted vectors before asking the provider for missing inputs. */
+  private async embedInputsWithCache(inputs: readonly string[]): Promise<number[][]> {
+    const identity = this.embeddings.identity;
+    const cached = this.embeddingCache.get(identity, inputs);
+    const missing = [...new Set(inputs.filter((input) => !cached.has(input)))];
+    if (missing.length > 0) {
+      const generated = await this.embeddings.embedDocuments(missing);
+      if (generated.length !== missing.length || generated.some((vector) => vector.length !== identity.dimensions)) {
+        throw new Error(`Embedding provider returned incompatible vectors for ${identity.provider}/${identity.model}.`);
+      }
+      this.embeddingCache.put(identity, missing, generated);
+      missing.forEach((input, index) => cached.set(input, generated[index]!));
+    }
+    return inputs.map((input) => cached.get(input)!);
   }
 
   /** Emits a visible heartbeat while an embedding request is pending. */
@@ -532,25 +553,25 @@ export class IndexerService {
     // column design could not represent at all.
     const pending = this.db
       .prepare(
-        `SELECT c.id AS id, c.content AS content
+        `SELECT c.id AS id, c.content AS content, c.chunk_type AS chunk_type, c.metadata AS metadata
            FROM code_chunks c
            WHERE c.content IS NOT NULL
              AND NOT EXISTS (
                SELECT 1 FROM chunk_vectors v
-                WHERE v.chunk_id = c.id AND v.provider = ? AND v.model = ?
+                WHERE v.chunk_id = c.id AND v.provider = ? AND v.model = ? AND v.dimensions = ?
              )`,
       )
-      .all(identity.provider, identity.model) as { id: string; content: string }[];
+      .all(identity.provider, identity.model, identity.dimensions) as { id: string; content: string; chunk_type: ChunkType; metadata: string }[];
 
     if (pending.length === 0) return 0;
 
-    assertStoredInputsAreSafe(
-      pending.map((row) => ({
-        ...row,
-        type: 'file',
-        metadata: { startLine: 1, endLine: 1 },
-      })),
-    );
+    const pendingChunks: ProcessedChunk[] = pending.map((row) => ({
+      id: row.id,
+      content: row.content,
+      type: row.chunk_type,
+      metadata: JSON.parse(row.metadata) as ChunkMetadata,
+    }));
+    assertStoredInputsAreSafe(pendingChunks);
 
     IndexerService.log(
       `Embedding ${pending.length} existing chunks for ${identity.provider}/${identity.model}...`,
@@ -585,17 +606,11 @@ export class IndexerService {
     let embedded = 0;
     const failures: string[] = [];
 
-    for (let i = 0; i < pending.length; i += this.BATCH_SIZE) {
-      const batch = pending.slice(i, i + this.BATCH_SIZE);
+    for (let i = 0; i < pendingChunks.length; i += this.BATCH_SIZE) {
+      const batch = pendingChunks.slice(i, i + this.BATCH_SIZE);
 
       try {
-        const vectors = await this.embeddings.embedDocuments(
-          batch.map((row) => embeddingInputFor({
-            ...row,
-            type: 'file',
-            metadata: { startLine: 1, endLine: 1 },
-          })),
-        );
+        const vectors = await this.embedInputsWithCache(batch.map(embeddingInputFor));
         if (vectors.length !== batch.length || vectors.some((vector) => vector.length === 0)) {
           throw new Error(
             `Embedding provider returned ${vectors.length} unusable vectors for ${batch.length} stored chunks.`,
@@ -690,7 +705,7 @@ export class IndexerService {
       while (retries > 0 && !success) {
         try {
           // 2. Call the active embedding provider (Vertex, or local Ollama)
-          const vectors = await this.embeddings.embedDocuments(textsToEmbed);
+          const vectors = await this.embedInputsWithCache(textsToEmbed);
 
           // 3. Save to DB (Transaction for performance)
           //
