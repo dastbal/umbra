@@ -24,7 +24,10 @@ import {
   FileAnalysisResult,
 } from '../../types';
 import * as path from 'path';
-import * as fs from 'fs'; // Necesario para verificar si existe el archivo .ts o index.ts
+import * as fs from 'fs';
+import * as ts from 'typescript';
+
+const MODULE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'] as const;
 /**
  * The Brain Surgeon 🩺
  * Analyzes TypeScript files using AST to extract intelligent code chunks and dependency graphs.
@@ -33,6 +36,7 @@ import * as fs from 'fs'; // Necesario para verificar si existe el archivo .ts o
 export class NestChunker {
   private project: Project;
   private readonly rootDir: string;
+  private readonly compilerOptions = new Map<string, ts.CompilerOptions>();
 
   constructor(rootDir: string = process.cwd()) {
     this.rootDir = path.resolve(rootDir);
@@ -290,7 +294,6 @@ export class NestChunker {
     // Necesitamos el directorio absoluto para resolver, así que combinamos CWD + sourcePath
     // Nota: Asumimos que sourcePath entra como relativa, ej: 'src/users/users.service.ts'
     const absoluteSourcePath = path.resolve(this.rootDir, sourcePath);
-    const sourceDir = path.dirname(absoluteSourcePath);
 
     /**
      * Records one edge for a module specifier, when it names a file on disk.
@@ -307,11 +310,10 @@ export class NestChunker {
       moduleSpecifier: string | undefined,
       relation: DependencyRelation,
     ): void => {
-      // 1. Filter: We only care about internal relative imports (starting with '.')
-      if (moduleSpecifier === undefined || !moduleSpecifier.startsWith('.')) return;
+      if (moduleSpecifier === undefined) return;
 
       // 2. Resolution: Find the physical .ts file on disk
-      const resolvedPath = this.resolveModulePath(sourceDir, moduleSpecifier);
+      const resolvedPath = this.resolveModulePath(absoluteSourcePath, moduleSpecifier);
 
       // 3. Validation: Only link if the file actually exists
       if (!resolvedPath) return;
@@ -410,34 +412,55 @@ export class NestChunker {
    * // Returns: '/src/users/dto/index.ts'
    */
   private resolveModulePath(
-    sourceDir: string,
+    sourcePath: string,
     importPath: string,
   ): string | null {
-    // 1. Construct the potential absolute path
-    const absoluteBase = path.join(sourceDir, importPath);
-
-    // Case A: Explicit file extension (rare in imports, but valid)
-    // import ... from './file.ts'
-    if (fs.existsSync(absoluteBase) && fs.statSync(absoluteBase).isFile()) {
-      return absoluteBase;
+    const sourceDir = path.dirname(sourcePath);
+    const options = this.optionsFor(sourceDir);
+    if (importPath.startsWith('.')) {
+      const base = path.resolve(sourceDir, importPath);
+      const candidates = [base, ...MODULE_EXTENSIONS.map((extension) => `${base}${extension}`),
+        ...MODULE_EXTENSIONS.map((extension) => path.join(base, `index${extension}`))];
+      for (const candidate of candidates) {
+        if (this.isInternalFile(candidate)) return candidate;
+      }
+      return null;
     }
+    if (options.baseUrl === undefined && options.paths === undefined) return null;
+    const resolved = ts.resolveModuleName(importPath, sourcePath, options, ts.sys).resolvedModule?.resolvedFileName;
+    return resolved !== undefined && this.isInternalFile(resolved) ? resolved : null;
+  }
 
-    // Case B: Implicit .ts extension (Most common)
-    // import ... from './users.service' -> checks users.service.ts
-    const tsPath = `${absoluteBase}.ts`;
-    if (fs.existsSync(tsPath)) {
-      return tsPath;
+  /** Reads the nearest package tsconfig so aliases belong to the importing file. */
+  private optionsFor(sourceDir: string): ts.CompilerOptions {
+    let directory = sourceDir;
+    for (;;) {
+      const configPath = path.join(directory, 'tsconfig.json');
+      if (fs.existsSync(configPath)) {
+        const cached = this.compilerOptions.get(configPath);
+        if (cached !== undefined) return cached;
+        const config = ts.readConfigFile(configPath, ts.sys.readFile);
+        const parsed = config.error === undefined
+          ? ts.parseJsonConfigFileContent(config.config, ts.sys, directory, undefined, configPath)
+          : undefined;
+        const options: ts.CompilerOptions = {
+          ...parsed?.options,
+          allowJs: true,
+          moduleResolution: parsed?.options.moduleResolution ?? ts.ModuleResolutionKind.Node10,
+        };
+        this.compilerOptions.set(configPath, options);
+        return options;
+      }
+      if (directory === this.rootDir || directory === path.dirname(directory)) break;
+      directory = path.dirname(directory);
     }
+    return { allowJs: true, moduleResolution: ts.ModuleResolutionKind.Node10 };
+  }
 
-    // Case C: Directory Index (Barrel Files)
-    // import ... from './dto' -> checks dto/index.ts
-    const indexPath = path.join(absoluteBase, 'index.ts');
-    if (fs.existsSync(indexPath)) {
-      return indexPath;
-    }
-
-    // Case D: Resolution failed
-    // Could be a node_module, a path alias (@src/...), or a non-existent file.
-    return null;
+  /** Rejects packages, symlink escapes, and directories as graph targets. */
+  private isInternalFile(candidate: string): boolean {
+    if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return false;
+    const real = fs.realpathSync(candidate);
+    return real.startsWith(`${this.rootDir}${path.sep}`) && !real.split(path.sep).includes('node_modules');
   }
 }

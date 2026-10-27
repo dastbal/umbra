@@ -54,6 +54,18 @@ describe('WorkspaceDiscoveryService', () => {
     expect(result.sourceOrigin).toBe('legacy-src');
   });
 
+  it('discovers JavaScript and JSX files declared by a project for dependency edges', () => {
+    write('tsconfig.json', JSON.stringify({ compilerOptions: { allowJs: true }, include: ['src/**/*'] }));
+    write('src/ToursManager.jsx', "import './ToursDesignPanel';");
+    write('src/ToursDesignPanel.js', 'export const panel = true;');
+
+    const result = new WorkspaceDiscoveryService(rootDir).discover();
+
+    expect(result.sourceFiles.map((file) => file.relativePath)).toEqual([
+      'src/ToursDesignPanel.js', 'src/ToursManager.jsx',
+    ]);
+  });
+
   it('uses the version-controlled source override instead of automatic discovery', () => {
     write('umbra.json', JSON.stringify({ indexing: { sources: ['custom/**/*.ts'] } }));
     write('custom/visible.ts', 'export const visible = true;');
@@ -128,6 +140,31 @@ describe('WorkspaceDiscoveryService', () => {
     expect(result.adrCatalogs.map((catalog) => catalog.relativePath)).not.toContain(
       '.claude/worktrees/spike/docs/adr',
     );
+  });
+
+  it('excludes a registered submodule worktree nested under the index root', () => {
+    write('umbra.json', JSON.stringify({ indexing: { sources: ['src/service.ts', '.worktrees/feature/src/service.ts'] } }));
+    write('src/service.ts', 'export class Service {}');
+    write('.worktrees/feature/src/service.ts', 'export class DuplicateService {}');
+    const marker = path.join(rootDir, '.worktrees/feature/.git');
+    const gitdir = path.join(rootDir, '.git/modules/DASHBOARD/worktrees/feature');
+    write('.worktrees/feature/.git', `gitdir: ${gitdir}\n`);
+    write('.git/modules/DASHBOARD/worktrees/feature/gitdir', `${marker}\n`);
+
+    const result = new WorkspaceDiscoveryService(rootDir).discover();
+
+    expect(result.sourceFiles.map((file) => file.relativePath)).toEqual(['src/service.ts']);
+  });
+
+  it('honors indexing.ignore without excluding unrelated source', () => {
+    write('tsconfig.json', JSON.stringify({ include: ['**/*.ts'] }));
+    write('umbra.json', JSON.stringify({ indexing: { ignore: ['copies/**'] } }));
+    write('src/service.ts', 'export class Service {}');
+    write('copies/src/service.ts', 'export class DuplicateService {}');
+
+    const result = new WorkspaceDiscoveryService(rootDir).discover();
+
+    expect(result.sourceFiles.map((file) => file.relativePath)).toEqual(['src/service.ts']);
   });
 
   function write(relativePath: string, content: string): void {

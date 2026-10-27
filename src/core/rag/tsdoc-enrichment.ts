@@ -35,30 +35,33 @@ export function enrichExistingTSDoc(db: Database.Database, rootDir: string): num
   const resolvedRoot = path.resolve(rootDir);
   const update = db.prepare(`UPDATE code_chunks SET metadata = ? WHERE id = ?`);
   let changed = 0;
-  const apply = db.transaction(() => {
-    for (const [filePath, stored] of byPath) {
-      if (!filePath.endsWith('.ts')) continue;
-      const absolutePath = path.resolve(resolvedRoot, filePath);
-      const relativeToRoot = path.relative(resolvedRoot, absolutePath);
-      if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot) || !fs.existsSync(absolutePath)) continue;
-      const content = fs.readFileSync(absolutePath, 'utf8');
-      const generated = chunker.analyze(filePath, content, '').chunks;
-      for (const row of stored) {
-        const original = parseMetadata(row.metadata);
-        const source = generated.find((chunk) => sameChunk(chunk, row.chunk_type, original));
-        if (source?.metadata.documentation === undefined || original.documentation === source.metadata.documentation) {
-          continue;
-        }
-        update.run(JSON.stringify({ ...original, documentation: source.metadata.documentation }), row.id);
-        changed++;
+  for (const [filePath, stored] of byPath) {
+    if (!filePath.endsWith('.ts')) continue;
+    const absolutePath = path.resolve(resolvedRoot, filePath);
+    const relativeToRoot = path.relative(resolvedRoot, absolutePath);
+    if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot) || !fs.existsSync(absolutePath)) continue;
+    const content = fs.readFileSync(absolutePath, 'utf8');
+    const generated = chunker.analyze(filePath, content, '').chunks;
+    const changes: Array<{ metadata: string; id: string }> = [];
+    for (const row of stored) {
+      const original = parseMetadata(row.metadata);
+      const source = generated.find((chunk) => sameChunk(chunk, row.chunk_type, original));
+      if (source?.metadata.documentation === undefined || original.documentation === source.metadata.documentation) {
+        continue;
       }
+      changes.push({ metadata: JSON.stringify({ ...original, documentation: source.metadata.documentation }), id: row.id });
     }
-    db.prepare(`INSERT INTO rag_metadata_state (key, value) VALUES (?, ?)`).run(
-      TSDOC_ENRICHMENT_KEY,
-      String(Date.now()),
-    );
-  });
-  apply();
+    if (changes.length > 0) {
+      db.transaction(() => {
+        for (const change of changes) update.run(change.metadata, change.id);
+      })();
+      changed += changes.length;
+    }
+  }
+  db.prepare(`INSERT INTO rag_metadata_state (key, value) VALUES (?, ?)`).run(
+    TSDOC_ENRICHMENT_KEY,
+    String(Date.now()),
+  );
   return changed;
 }
 

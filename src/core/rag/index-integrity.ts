@@ -167,7 +167,6 @@ export function inspectIndexIntegrity(
       pendingPaths.length === 0 &&
       stalePaths.length === 0 &&
       dimensionConflictIdentities.length === 0 &&
-      !lease.active &&
       stampConsistent;
     return {
       databasePath,
@@ -287,11 +286,6 @@ export function inspectIndexServeability(
         serveable: false,
         reason: 'The index schema is missing required tables. Run `umbra index` to migrate it.',
       };
-    }
-
-    const lease = inspectIndexLease(db);
-    if (lease.active) {
-      return { serveable: false, reason: 'Another Umbra process holds this root index lease.' };
     }
 
     if (count(db, 'SELECT COUNT(*) AS total FROM file_registry') === 0) {

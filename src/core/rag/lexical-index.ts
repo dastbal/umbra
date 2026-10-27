@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { isOverlayDatabase } from './overlay-database';
 
 /** A lexical candidate returned by the local FTS index. */
 export interface LexicalCandidate {
@@ -127,6 +128,22 @@ export function findLexicalCandidates(
 ): readonly LexicalCandidate[] {
   const expression = toLexicalMatchExpression(query);
   if (expression === undefined) return [];
+
+  if (isOverlayDatabase(db)) {
+    const search = (schema: 'main' | 'base'): { chunkId: string; rank: number }[] => db.prepare(`
+      SELECT chunk_id AS chunkId, bm25(code_chunks_fts, 0.0, 5.0, 1.0, 1.0) AS rank
+        FROM ${schema}.code_chunks_fts
+       WHERE code_chunks_fts MATCH ?
+         ${schema === 'base' ? 'AND file_path NOT IN (SELECT path FROM main.hidden_paths)' : ''}
+       ORDER BY rank LIMIT ?
+    `).all(expression, limit) as { chunkId: string; rank: number }[];
+    const seen = new Set<string>();
+    return [...search('main'), ...search('base')].filter((row) => {
+      if (seen.has(row.chunkId)) return false;
+      seen.add(row.chunkId);
+      return true;
+    }).slice(0, limit);
+  }
 
   const rows = db
     .prepare(

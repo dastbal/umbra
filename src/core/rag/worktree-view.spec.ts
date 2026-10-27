@@ -13,7 +13,7 @@ import type { EmbeddingsPort } from './embeddings';
 import { GraphRagService } from './graphrag';
 import { IndexerService } from './indexer';
 import { RetrieverService } from './retriever';
-import { OverlayBusyError, OverlayScope } from './overlay-scope';
+import { OverlayScope } from './overlay-scope';
 import { resetWorktreeDeltaCache } from './worktree-delta';
 import { WorktreeViewService } from './worktree-view';
 
@@ -388,7 +388,7 @@ describe('WorktreeViewService', () => {
     expect(baseFingerprint(dbPath)).toEqual(before);
   });
 
-  it('reports busy, retryably, when a peer holds the write lock', async () => {
+  it('answers an overlay graph read while a peer holds the base write lock', async () => {
     const worktree = await views.resolve(linked);
     const delta = await views.delta(worktree);
     const overlay = { worktree, delta, files: [], embedded: true, stats: { chunks: 0, reused: 0, embedded: 0, buildMs: 0 } };
@@ -396,7 +396,11 @@ describe('WorktreeViewService', () => {
     const peer = new Database(dbPath);
     peer.exec('BEGIN IMMEDIATE');
     try {
-      await expect(scope.run(overlay, () => 'never')).rejects.toBeInstanceOf(OverlayBusyError);
+      const started = Date.now();
+      await expect(scope.run(overlay, (view) => view.db.prepare('SELECT COUNT(*) AS total FROM file_registry').get())).resolves.toMatchObject({
+        result: { total: expect.any(Number) },
+      });
+      expect(Date.now() - started).toBeLessThan(2_000);
     } finally {
       peer.exec('ROLLBACK');
       peer.close();
@@ -411,6 +415,24 @@ describe('WorktreeViewService', () => {
     // The edit to user.service.ts was indexed, so the checkout matches its index.
     expect(delta.changed).toEqual([]);
     expect(delta.deleted).toEqual([]);
+  });
+
+  it('reads the pinned checkout without opening an overlay under a peer writer', async () => {
+    const worktree = await views.resolve(repo);
+    const overlayRun = jest.spyOn(OverlayScope.prototype, 'run');
+    const peer = new Database(dbPath);
+    peer.exec('BEGIN IMMEDIATE');
+    try {
+      const result = await views.read(worktree, { embed: false }, (view) =>
+        (view.db.prepare('SELECT COUNT(*) AS total FROM file_registry').get() as { total: number }).total);
+      expect(result.result).toBeGreaterThan(0);
+      expect(result.worktree).toMatchObject({ isPinnedRoot: true, changedFiles: 0, deletedFiles: 0 });
+      expect(overlayRun).not.toHaveBeenCalled();
+    } finally {
+      overlayRun.mockRestore();
+      peer.exec('ROLLBACK');
+      peer.close();
+    }
   });
 });
 

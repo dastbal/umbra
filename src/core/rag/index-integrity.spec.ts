@@ -229,7 +229,7 @@ describe('inspectIndexServeability', () => {
     expect(result.reason).toMatch(/no vector for the active provider/);
   });
 
-  it('refuses while another process holds the index lease', () => {
+  it('serves complete durable coverage while another process owns the index lease', () => {
     completeCoverage();
     const db = openDb();
     // `semantic-index` is the name `IndexRunLease` writes; any other row is a
@@ -241,8 +241,7 @@ describe('inspectIndexServeability', () => {
 
     const result = inspectIndexServeability(rootDir, IDENTITY);
 
-    expect(result.serveable).toBe(false);
-    expect(result.reason).toMatch(/lease/);
+    expect(result.serveable).toBe(true);
   });
 
   it('refuses on a stamp that does not claim complete coverage', () => {

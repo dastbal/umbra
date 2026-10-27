@@ -1,8 +1,9 @@
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { agentPath } from '../config/agent-directory';
 import { resolveWorktree, runGit, type GitRunner, type ResolvedWorktree } from '../config/git-worktrees';
 import { runtimeRoot } from '../config/runtime-root';
 import { AgentDB } from '../state/db';
+import { loadVectorExtensionInto } from '../state/vector-extension';
 import type { ToolWorktree } from '../tools/tool-result';
 import type { EmbeddingsPort } from './embeddings/embeddings.port';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
@@ -108,6 +109,22 @@ export class WorktreeViewService {
   ): Promise<WorktreeReadResult<T>> {
     const startedAt = Date.now();
     const delta = await this.delta(worktree);
+    if (worktree.isPinnedRoot || (delta.changed.length === 0 && delta.deleted.length === 0)) {
+      const db = new Database(this.dependencies.dbPath, { readonly: true, fileMustExist: true });
+      try {
+        const vectorSearchAvailable = loadVectorExtensionInto(db);
+        db.exec('BEGIN');
+        const result = await read({ db, vectorSearchAvailable, embeddings: this.dependencies.embeddings });
+        return {
+          result,
+          window: { attempts: 1, windowMs: Date.now() - startedAt, windowOutlivedMacrotask: false },
+          worktree: provenanceOf(worktree, delta, { elapsedMs: Date.now() - startedAt }),
+        };
+      } finally {
+        if (db.inTransaction) db.exec('ROLLBACK');
+        db.close();
+      }
+    }
     const overlay = await this.builder.build(worktree, delta, options);
     const { result, stats } = await this.scope.run(overlay, read);
     return {

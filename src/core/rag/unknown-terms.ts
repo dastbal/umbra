@@ -56,6 +56,7 @@
  */
 
 import type Database from 'better-sqlite3';
+import { isOverlayDatabase } from './overlay-database';
 
 /**
  * English function words, excluded because they carry grammar rather than
@@ -235,16 +236,21 @@ export function findUnknownTerms(
   const terms = subjectTerms(query).filter((term) => !exempt.has(term));
   if (terms.length === 0) return [];
 
-  const probe = db.prepare(
-    `SELECT 1 FROM code_chunks_fts WHERE code_chunks_fts MATCH ? LIMIT 1`,
-  );
+  const overlay = isOverlayDatabase(db);
+  const probes = overlay
+    ? [
+      db.prepare('SELECT 1 FROM main.code_chunks_fts WHERE code_chunks_fts MATCH ? LIMIT 1'),
+      db.prepare(`SELECT 1 FROM base.code_chunks_fts WHERE code_chunks_fts MATCH ?
+        AND file_path NOT IN (SELECT path FROM main.hidden_paths) LIMIT 1`),
+    ]
+    : [db.prepare('SELECT 1 FROM code_chunks_fts WHERE code_chunks_fts MATCH ? LIMIT 1')];
 
   const matches = (expression: string): boolean => {
     // A malformed expression must not take down retrieval; an unanswerable
     // probe is treated as a match, which fails towards answering rather than
     // towards silence.
     try {
-      return probe.get(expression) !== undefined;
+      return probes.some((probe) => probe.get(expression) !== undefined);
     } catch {
       return true;
     }
