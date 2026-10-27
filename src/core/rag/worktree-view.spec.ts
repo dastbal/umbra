@@ -68,6 +68,7 @@ function baseFingerprint(dbPath: string): Record<string, unknown> {
       files: count('file_registry'),
       chunks: count('code_chunks'),
       vectors: count('chunk_vectors'),
+      embeddingCache: count('embedding_cache'),
       fts: count('code_chunks_fts'),
       edges: count('dependency_graph'),
       trigger: db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'trigger' AND name = 'code_chunks_fts_delete'").get() !== undefined,
