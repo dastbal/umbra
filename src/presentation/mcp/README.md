@@ -43,9 +43,9 @@ keeps only its local, gitignored `.umbra/` cache and `.gitignore` rule.
 | Prompt | one per `skills/*.md` | free |
 
 The catalog is fixed before handshake. `ask_codebase` is therefore always
-advertised, but returns a typed retryable status until `get_index_status` shows
-durable coverage. This avoids a stale client tool list while never pretending a
-partial index can answer.
+advertised. It returns a typed retryable status until the active provider has
+durable vectors. Partial coverage is searchable and explicitly labelled in
+the answer; `get_index_status` reports the gaps.
 
 ## The five constraints this module exists to honour
 
@@ -83,17 +83,16 @@ current working directory, and the server instructions say so.
   pinned repository's worktrees and its initialised submodules' worktrees, and
   refuses anything else as `blocked`.
 - **Index reads** go through `WorktreeViewService` in
-  `src/core/rag/worktree-view.ts`. The worktree's changed files are stacked on
-  the base index inside a transaction that is always rolled back, so the index
-  is never written. The module is required lazily, which keeps the overlay
-  modules off the startup path; the indexer itself is already loaded at startup
-  through the `core/tools` barrel, a cost older than this feature.
+  `src/core/rag/worktree-view.ts`. Unchanged worktrees read the base index
+  directly. Changed files are written only to a disposable in-memory database;
+  the durable base is attached for reads. The module is required lazily, which
+  keeps the overlay modules off the startup path.
 - **Live reads** (`search_workspace`, `inspect_project`) read the worktree's
   files directly.
 - **Provenance**: every such result carries `worktree` (`toolWorktreeSchema`):
   path, branch, head, `indexPrefix` for a submodule, change counts and cost.
-- **Busy**: a window that cannot take the index's write lock within 1,000 ms
-  is an abstention with `retryable: true`, like a warming index.
+- **Busy**: a read snapshot that cannot open within 1,000 ms returns a typed
+  abstention with `retryable: true`, like a warming index.
 - **Without `worktree`**, every tool behaves exactly as before.
 
 ## `stdout` discipline — read this before adding anything

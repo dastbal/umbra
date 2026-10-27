@@ -112,10 +112,12 @@ recorded it from the AST. And a re-export barrel like `src/index.ts` passes a
 module's whole surface through, so "what breaks if I change this" has to know
 that edge exists.
 
-`ask_codebase` is always visible in the catalog, but it cannot search until the
-selected provider has produced durable vector coverage. Until then it returns a
-retryable status directing the client to `get_index_status`; the other read-only
-tools remain available once the project root is validated.
+`ask_codebase` is always visible in the catalog. It searches once the selected
+provider has at least one durable vector. If indexing is partial, it searches
+the covered files and labels the answer `INDEX INCOMPLETE`; `get_index_status`
+shows the missing coverage. With no durable vectors it returns a retryable
+status while warm-up is running. The other read-only tools remain available
+once the project root is validated.
 
 ### GraphRAG, without a hidden agent
 
@@ -275,7 +277,7 @@ It waits for a client and prints its startup to **stderr**:
 
 ```
 [umbra mcp] umbra mcp — serving /path/to/repo
-[umbra mcp] publishing 7 tools: ask_codebase, investigate_graphrag, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check
+[umbra mcp] publishing 10 tools: ask_codebase, search_workspace, inspect_project, investigate_graphrag, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check, continue_conversation
 [umbra mcp] MCP transport connected; index warm-up continues in the background.
 ```
 
@@ -303,9 +305,12 @@ discovery, it also finds each authoritative `prisma/schema.prisma` under the
 served root, because database constraints are executable business evidence
 rather than incidental configuration. An explicit `indexing.sources` override
 remains authoritative and replaces that automatic scope. Umbra ignores
-dependency and build trees, indexes `.ts` and `.tsx` including classless utility
-and configuration modules, and keeps every stored path relative to the fixed
-root.
+dependency and build trees, registered worktrees inside the root, and paths in
+`umbra.json#indexing.ignore`. It indexes TypeScript and JavaScript source
+(`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) including classless
+utility and configuration modules, and keeps every stored path relative to the
+fixed root. Dependency extraction resolves those extensions, `index.*`, and
+`tsconfig` path aliases and `baseUrl`.
 
 Prisma models are returned as labelled `prisma-schema` configuration evidence.
 Umbra does **not** infer current truth from migration SQL, arbitrary `.prisma`
@@ -316,7 +321,7 @@ If a repository's declared source boundary needs an explicit override, commit an
 `umbra.json` at its root:
 
 ```json
-{ "indexing": { "sources": ["apps/*/src/**/*.ts", "apps/web/features/**/*.tsx"] } }
+{ "indexing": { "sources": ["apps/*/src/**/*.ts", "apps/web/features/**/*.tsx"], "ignore": ["scratch/**"] } }
 ```
 
 `list_adrs` also discovers module catalogs such as `docs/payments/adr/`; its
