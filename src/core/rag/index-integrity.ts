@@ -227,11 +227,10 @@ export interface IndexServeability {
  *
  * Those two answer *is the index current?* The gate needs *can the index
  * answer?*, and they are different questions with different remedies. Chunks
- * that exist with no vector for the active identity would rank wrongly, so that
- * must refuse. A file edited since the last run means one answer may be
- * slightly out of date — which is what an index always is between runs, and
- * which used to make `ask_codebase` refuse **entirely**, in the middle of a
- * refactor, at exactly the moment somebody asks.
+ * without an active vector cannot rank, but the existing vector subset can.
+ * A file edited since the last run means one answer may be slightly out of
+ * date — which is what an index always is between runs, and which used to
+ * make `ask_codebase` refuse **entirely** in the middle of a refactor.
  *
  * Serving it is the better answer, and it is only honest because the answer
  * already says when the index was built: `withProvenance` carries `indexedAt`,
@@ -244,12 +243,11 @@ export interface IndexServeability {
  *
  * ## The invariant
  *
- * Its conjuncts are a strict subset of `inspectIndexIntegrity`'s, so a healthy
- * index is always serveable. That relationship is asserted in the spec, because
- * two predicates about one index are exactly the shape that drifts.
+ * A healthy index is always serveable. A partial index can also answer from
+ * its durable vector subset; the stamp and full status retain the gap.
  *
  * @param rootDir - Root owning the `.umbra` workspace.
- * @param selectedIdentity - Provider/model whose vector coverage must be complete.
+ * @param selectedIdentity - Provider/model that must have at least one durable vector.
  * @returns Whether a search may proceed, with the reason when it may not.
  */
 export function inspectIndexServeability(
@@ -266,11 +264,10 @@ export function inspectIndexServeability(
   if (stamp === undefined) {
     return { serveable: false, reason: 'No durable index stamp exists yet.' };
   }
-  // The free half of the full report's stamp check. Comparing the discovered
-  // and covered counts needs the tree walk and is therefore deliberately not
-  // done here; reading the status is a field lookup.
-  if (stamp.status !== 'complete') {
-    return { serveable: false, reason: `The index stamp reports \`${stamp.status}\` coverage.` };
+  // A partial stamp is explicit provenance, not a reason to hide usable
+  // vectors. An empty stamp has no durable source coverage to serve.
+  if (stamp.status === 'empty') {
+    return { serveable: false, reason: 'The index stamp reports empty coverage.' };
   }
 
   let db: Database.Database | undefined;
@@ -295,39 +292,12 @@ export function inspectIndexServeability(
       return { serveable: false, reason: 'No code chunks are stored.' };
     }
 
-    const missingWhere = selectedIdentity === undefined
-      ? 'NOT EXISTS (SELECT 1 FROM chunk_vectors v WHERE v.chunk_id = c.id)'
-      : 'NOT EXISTS (SELECT 1 FROM chunk_vectors v WHERE v.chunk_id = c.id AND v.provider = ? AND v.model = ?)';
-    const parameters = selectedIdentity === undefined
-      ? []
-      : [selectedIdentity.provider, selectedIdentity.model];
-    const missingVectors = count(
-      db,
-      `SELECT COUNT(*) AS total FROM code_chunks c WHERE ${missingWhere}`,
-      parameters,
-    );
-    if (missingVectors > 0) {
-      // The one that must refuse. A chunk with no vector for the active
-      // identity cannot be ranked, so the result set would be wrong rather
-      // than merely dated.
-      return {
-        serveable: false,
-        reason: `${missingVectors} chunk(s) have no vector for the active provider.`,
-      };
-    }
-
-    const chunkless = paths(
-      db,
-      `SELECT f.path AS path FROM file_registry f
-       WHERE f.index_state = 'indexed'
-         AND NOT EXISTS (SELECT 1 FROM code_chunks c WHERE c.file_path = f.path)
-       ORDER BY f.path LIMIT 1`,
-    );
-    if (chunkless.length > 0) {
-      return {
-        serveable: false,
-        reason: `A file is recorded as indexed but holds no chunks: ${chunkless[0]}.`,
-      };
+    const usableVector = selectedIdentity === undefined
+      ? db.prepare('SELECT 1 FROM chunk_vectors LIMIT 1').get()
+      : db.prepare('SELECT 1 FROM chunk_vectors WHERE provider = ? AND model = ? LIMIT 1')
+        .get(selectedIdentity.provider, selectedIdentity.model);
+    if (usableVector === undefined) {
+      return { serveable: false, reason: 'The index has no vectors for the active provider.' };
     }
 
     const vectors = db.prepare(

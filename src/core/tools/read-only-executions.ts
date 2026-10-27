@@ -597,8 +597,8 @@ export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): st
 /**
  * Runs an index read against one worktree's view of the index (ADR-038).
  *
- * The read must await nothing but the view's embeddings: it runs inside a
- * window that holds the index's write lock.
+ * The read must await nothing but the view's embeddings: it runs against a
+ * short lived in-memory worktree view of the durable index.
  */
 export interface WorktreeIndexScope {
   /**
@@ -670,8 +670,8 @@ export async function executeCodebaseSearch(input: {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     if (scope !== undefined && isRetryableRead(error)) {
-      // A worktree read that could not take the index's write lock in time: a
-      // peer is writing for a bounded time, so this is "come back", not a fault.
+      // A worktree read that could not open its base snapshot in time is
+      // retryable; the caller receives a typed response instead of raw SQLite text.
       const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_INDEX_UNAVAILABLE',
         summary: 'The worktree view of the index is briefly unavailable.', data: emptyData, evidence: [],
         diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }],
