@@ -147,7 +147,14 @@ async function setupDetectedMcpClients(): Promise<void> {
  * Ensures clean exit and database closing
  */
 const cleanupAndExit = async () => {
-  log.sys("Shutting down... Closing DB connections.");
+  // A client may terminate MCP with SIGTERM while stdout is still a live
+  // JSON-RPC pipe. Route this signal diagnostic without relying on logger
+  // initialization order during shutdown.
+  if (process.argv[2] === 'mcp') {
+    process.stderr.write('[umbra mcp] Shutting down... Closing DB connections.\n');
+  } else {
+    log.sys("Shutting down... Closing DB connections.");
+  }
   AgentDB.close();
   // Pending LangSmith batches upload in the background; process.exit() would
   // discard them, which is why failing runs left no trace to read.
