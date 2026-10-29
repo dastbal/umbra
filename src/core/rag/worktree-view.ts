@@ -1,8 +1,8 @@
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { agentPath } from '../config/agent-directory';
 import { resolveWorktree, runGit, type GitRunner, type ResolvedWorktree } from '../config/git-worktrees';
 import { runtimeRoot } from '../config/runtime-root';
-import { AgentDB } from '../state/db';
+import { loadVectorExtensionInto } from '../state/vector-extension';
 import type { ToolWorktree } from '../tools/tool-result';
 import type { EmbeddingsPort } from './embeddings/embeddings.port';
 import { resolveEmbeddings } from './embeddings/embeddings-resolver';
@@ -28,6 +28,8 @@ export interface WorktreeViewDependencies {
   readonly pinnedRoot: string;
   /** The base index connection. */
   readonly baseDb: Database.Database;
+  /** Whether this service should close its own read-only base connection. */
+  readonly ownsBaseDb?: boolean;
   /** Path of the base index's SQLite file. */
   readonly dbPath: string;
   /** The process's embedding provider. */
@@ -108,6 +110,22 @@ export class WorktreeViewService {
   ): Promise<WorktreeReadResult<T>> {
     const startedAt = Date.now();
     const delta = await this.delta(worktree);
+    if (worktree.isPinnedRoot || (delta.changed.length === 0 && delta.deleted.length === 0)) {
+      const db = new Database(this.dependencies.dbPath, { readonly: true, fileMustExist: true });
+      try {
+        const vectorSearchAvailable = loadVectorExtensionInto(db);
+        db.exec('BEGIN');
+        const result = await read({ db, vectorSearchAvailable, embeddings: this.dependencies.embeddings });
+        return {
+          result,
+          window: { attempts: 1, windowMs: Date.now() - startedAt, windowOutlivedMacrotask: false },
+          worktree: provenanceOf(worktree, delta, { elapsedMs: Date.now() - startedAt }),
+        };
+      } finally {
+        if (db.inTransaction) db.exec('ROLLBACK');
+        db.close();
+      }
+    }
     const overlay = await this.builder.build(worktree, delta, options);
     const { result, stats } = await this.scope.run(overlay, read);
     return {
@@ -124,6 +142,7 @@ export class WorktreeViewService {
   /** Closes the overlay connection. */
   public close(): void {
     this.scope.close();
+    if (this.dependencies.ownsBaseDb) this.dependencies.baseDb.close();
   }
 }
 
@@ -165,13 +184,14 @@ let processView: WorktreeViewService | undefined;
 export function worktreeViews(): WorktreeViewService {
   if (processView === undefined) {
     const pinnedRoot = runtimeRoot();
-    // Opened first, outside any window: the singleton's schema initialisation
-    // writes, and must never wait on the overlay's lock (ADR-038).
-    const baseDb = AgentDB.getInstance();
+    // A worktree read never initializes schema or writes the durable index.
+    const dbPath = agentPath(pinnedRoot, 'memory.db');
+    const baseDb = new Database(dbPath, { readonly: true, fileMustExist: true });
     processView = new WorktreeViewService({
       pinnedRoot,
       baseDb,
-      dbPath: agentPath(pinnedRoot, 'memory.db'),
+      ownsBaseDb: true,
+      dbPath,
       embeddings: resolveEmbeddings().port,
       isIndexing: () => IndexerService.running,
     });

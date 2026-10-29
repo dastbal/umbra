@@ -36,4 +36,21 @@ describe('executeWorkspaceSearch', () => {
 
     expect(formatWorkspaceSearchForModel(result)).toContain('BEGIN UNTRUSTED FILE CONTENT: prisma/schema.prisma:1');
   });
+
+  it('does not call a truncated zero-match scan complete', () => {
+    const directory = path.join(rootDir, 'src');
+    fs.mkdirSync(directory);
+    for (let index = 0; index <= 1000; index += 1) {
+      fs.writeFileSync(path.join(directory, `${String(index).padStart(4, '0')}.ts`),
+        index === 1000 ? 'rareNeedle' : 'ordinary content');
+    }
+
+    const result = executeWorkspaceSearch({ query: 'rareNeedle' }, rootDir);
+
+    expect(result).toMatchObject({
+      status: 'partial', code: 'WORKSPACE_SCAN_INCOMPLETE', truncated: true,
+      data: { scannedFiles: 1000, matches: [] },
+      nextAction: expect.stringContaining('path'),
+    });
+  });
 });

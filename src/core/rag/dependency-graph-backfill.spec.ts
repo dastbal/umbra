@@ -77,6 +77,16 @@ describe('backfillDependencyGraph', () => {
     expect(backfillDependencyGraph(db, files, extract, readsNothing)).toBe(0);
   });
 
+  it('re-extracts existing indexes marked by the pre-React resolver generation', () => {
+    const db = store();
+    register(db, 'src/a.ts');
+    db.exec("CREATE TABLE rag_metadata_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    db.prepare('INSERT INTO rag_metadata_state (key, value) VALUES (?, ?)')
+      .run('dependency-graph-extractor-v4', '1');
+
+    expect(backfillDependencyGraph(db, [candidate('src/a.ts')], extractorReturning({}), readsNothing)).toBe(1);
+  });
+
   // The reason it replaces rather than merges. `INSERT OR IGNORE` on a
   // `(source, target)` primary key keeps whichever relation landed first, so a
   // pair whose relation changed between generations would keep the stale one

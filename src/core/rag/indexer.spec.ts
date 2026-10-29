@@ -8,6 +8,7 @@ import { AgentDB } from '../state/db';
 import { NestChunker } from '../tools/ast/chunker';
 import { EmbeddingsPort } from './embeddings';
 import { readIndexStamp } from './index-stamp';
+import { IndexFileLease } from './index-file-lease';
 import { IndexerService } from './indexer';
 
 describe('IndexerService durable file outcomes', () => {
@@ -41,6 +42,34 @@ describe('IndexerService durable file outcomes', () => {
     expect(result).toMatchObject({ disposition: 'completed', status: 'partial', filesIndexed: 0 });
     expect(files.total).toBe(0);
     expect(readIndexStamp(rootDir)).toMatchObject({ status: 'partial', coveredFiles: 0 });
+  });
+
+  it('defers to a peer lease before opening SQLite for writes', async () => {
+    const peer = IndexFileLease.acquire(rootDir);
+    const open = jest.spyOn(AgentDB, 'getInstance');
+    try {
+      const result = await new IndexerService(successfulEmbeddings()).indexProject();
+      expect(result.disposition).toBe('already-running');
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      open.mockRestore();
+      peer?.release();
+    }
+  });
+
+  it('removes previously indexed files after an ignore rule excludes them', async () => {
+    fs.writeFileSync(path.join(rootDir, 'src', 'ignored.ts'), 'export const ignored = 1;\n');
+    await new IndexerService(successfulEmbeddings()).indexProject();
+    fs.writeFileSync(path.join(rootDir, 'umbra.json'), JSON.stringify({ indexing: { ignore: ['src/ignored.ts'] } }));
+
+    const result = await new IndexerService(successfulEmbeddings()).indexProject();
+    const db = new Database(path.join(rootDir, '.umbra', 'memory.db'), { readonly: true });
+    const paths = db.prepare('SELECT path FROM file_registry ORDER BY path').all() as Array<{ path: string }>;
+    const orphanChunks = db.prepare("SELECT COUNT(*) AS total FROM code_chunks WHERE file_path = 'src/ignored.ts'").get() as { total: number };
+    db.close();
+    expect(result).toMatchObject({ disposition: 'completed', status: 'complete' });
+    expect(paths.map((row) => row.path)).toEqual(['src/sample.ts']);
+    expect(orphanChunks.total).toBe(0);
   });
 
   it('never records nonempty zero-chunk input as fresh', async () => {

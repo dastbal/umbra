@@ -64,6 +64,8 @@ const MAX_CACHED_OVERLAYS = 16;
 
 /** How many chunk vectors the process memo keeps across overlays. */
 const MAX_MEMO_VECTORS = 20_000;
+/** Reuse vectors across views sharing one base connection without durable writes. */
+const memoByConnection = new WeakMap<Database.Database, Map<string, Float32Array>>();
 
 /** Same batch size the base indexer embeds with. */
 const EMBED_BATCH_SIZE = 10;
@@ -80,7 +82,7 @@ export class WorktreeOverlayBuilder {
   private readonly inflight = new Map<string, Promise<WorktreeOverlay>>();
 
   /** Kept as float32, the precision the index stores, at half the memory of a number array. */
-  private readonly memo = new Map<string, Float32Array>();
+  private readonly memo: Map<string, Float32Array>;
 
   private readonly persistentCache: EmbeddingCache;
 
@@ -93,6 +95,8 @@ export class WorktreeOverlayBuilder {
     private readonly baseDb: Database.Database,
   ) {
     this.persistentCache = new EmbeddingCache(baseDb);
+    this.memo = memoByConnection.get(baseDb) ?? new Map<string, Float32Array>();
+    memoByConnection.set(baseDb, this.memo);
   }
 
   /**
@@ -228,7 +232,6 @@ export class WorktreeOverlayBuilder {
       if (result.length !== batch.length || result.some((vector) => vector.length !== identity.dimensions)) {
         throw new Error(`Embedding provider returned incompatible vectors for ${batch.length} worktree chunks of ${file.relativePath}.`);
       }
-      this.persistentCache.put(identity, batch.map((index) => inputs[index]!), result);
       batch.forEach((index, position) => {
         vectors[index] = result[position]!;
         this.remember(keys[index]!, Float32Array.from(result[position]!));

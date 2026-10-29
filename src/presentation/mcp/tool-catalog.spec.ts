@@ -1,5 +1,10 @@
 import { z } from 'zod';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { buildToolCatalog } from './tool-catalog';
+import * as worktreeArguments from './worktree-arguments';
+import type { WorktreeSelection } from './worktree-arguments';
 import type { IndexStatusResult } from '../../core/tools';
 
 const indexStatus = (phase: 'ready' | 'indexing' | 'unavailable' | 'awaiting-root' = 'ready'): IndexStatusResult => {
@@ -199,6 +204,34 @@ describe('MCP query_nest_graph', () => {
 });
 
 describe('MCP worktree selection (ADR-038)', () => {
+  it('uses index-prefixed live paths and omits counts a live scan did not compute', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-live-worktree-'));
+    fs.mkdirSync(path.join(root, 'components'));
+    fs.writeFileSync(path.join(root, 'components', 'ToursDesignPanel.tsx'), 'pumpkin theme');
+    const selection = {
+      ok: true,
+      worktree: { root, repositoryRoot: root, indexPrefix: 'DASHBOARD', isPinnedRoot: false },
+      views: { delta: async () => ({ changed: [{}], deleted: [] }) },
+      provenanceOf: (_worktree: unknown, delta: { changed: unknown[]; deleted: unknown[] } | undefined) => ({
+        path: root, indexPrefix: 'DASHBOARD', isPinnedRoot: false,
+        changedFiles: delta?.changed.length ?? 0, deletedFiles: delta?.deleted.length ?? 0,
+        chunksEmbedded: 0, chunksReused: 0, elapsedMs: 0,
+      }),
+    } as unknown as WorktreeSelection;
+    const selected = jest.spyOn(worktreeArguments, 'selectWorktree').mockResolvedValue(selection);
+    try {
+      const tool = catalog().find((candidate) => candidate.name === 'search_workspace');
+      const answer = await tool?.invoke({ query: 'pumpkin', worktree: root });
+      expect(answer?.structuredContent).toMatchObject({
+        data: { matches: [{ path: 'DASHBOARD/components/ToursDesignPanel.tsx' }] },
+        evidence: [{ path: 'DASHBOARD/components/ToursDesignPanel.tsx' }],
+      });
+      expect((answer?.structuredContent as { worktree?: { changedFiles?: number } })?.worktree?.changedFiles).toBeUndefined();
+    } finally {
+      selected.mockRestore();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
   const catalog = () => buildToolCatalog({
     semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
     readIndexStatus: () => indexStatus(),

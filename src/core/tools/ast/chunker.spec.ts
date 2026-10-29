@@ -177,4 +177,37 @@ describe('NestChunker dependency edges', () => {
       { sourcePath: 'src/barrel.ts', targetPath: 'src/re-exported.ts', relation: 're-export' },
     ]);
   });
+
+  it('resolves React, JavaScript, and module-format extensions plus directory indexes', () => {
+    for (const relative of ['src/Panel.tsx', 'src/Copy.jsx', 'src/entry.mjs', 'src/config.cts', 'src/widgets/index.tsx']) {
+      fs.mkdirSync(path.dirname(path.join(rootDir, relative)), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, relative), 'export const marker = 1;');
+    }
+    const edges = chunker.analyze('src/use.jsx', [
+      "import './Panel';",
+      "import './Copy';",
+      "import './entry';",
+      "import './config';",
+      "import './widgets';",
+    ].join('\n'), 'fixture-hash').dependencies;
+    expect(edges.map((edge) => edge.targetPath)).toEqual([
+      'src/Panel.tsx', 'src/Copy.jsx', 'src/entry.mjs', 'src/config.cts', 'src/widgets/index.tsx',
+    ]);
+  });
+
+  it('resolves paths and baseUrl from the nearest tsconfig without following package imports', () => {
+    fs.mkdirSync(path.join(rootDir, 'app', 'components'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'app', 'tsconfig.json'), JSON.stringify({
+      compilerOptions: { baseUrl: '.', paths: { '@/*': ['./*'] }, allowJs: true },
+    }));
+    fs.writeFileSync(path.join(rootDir, 'app', 'components', 'ToursDesignPanel.tsx'), 'export const panel = 1;');
+    const edges = chunker.analyze('app/ToursManager.tsx', [
+      "import { panel } from '@/components/ToursDesignPanel';",
+      "import { panel as local } from 'components/ToursDesignPanel';",
+      "import { x } from '@external/package';",
+    ].join('\n'), 'fixture-hash').dependencies;
+    expect(edges.map((edge) => edge.targetPath)).toEqual([
+      'app/components/ToursDesignPanel.tsx', 'app/components/ToursDesignPanel.tsx',
+    ]);
+  });
 });

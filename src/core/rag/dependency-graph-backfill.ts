@@ -20,7 +20,7 @@ import { ensureDependencyGraphSchema, replaceDependencyGraphForFile } from './de
  * lazily. The graph arm reported the three new gaps on the next run, which is
  * what a per-construct recall report is for.
  */
-const EXTRACTOR_GENERATION_KEY = 'dependency-graph-extractor-v4';
+const EXTRACTOR_GENERATION_KEY = 'dependency-graph-extractor-v5';
 
 /** One discovered source file, as `WorkspaceDiscoveryService` reports it. */
 export interface BackfillCandidate {

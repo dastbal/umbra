@@ -9,6 +9,7 @@ import { WorkspaceDiscoveryError, WorkspaceDiscoveryService } from '../config/wo
 import { WorkspaceEvidenceError, WorkspaceEvidenceService } from '../config/workspace-evidence';
 import { readIndexStamp } from '../rag/index-stamp';
 import { inspectIndexIntegrity } from '../rag/index-integrity';
+import { inspectIndexFileLease } from '../rag/index-file-lease';
 import {
   formatGraphRagContextForLLM,
   DetectiveTrace,
@@ -169,7 +170,7 @@ export const workspaceSearchDataSchema = z.object({
   excludedByReason: z.record(z.string(), z.number().int().nonnegative()),
 });
 export const workspaceSearchResultSchema = createToolResultSchema(
-  z.enum(['WORKSPACE_MATCHES_FOUND', 'WORKSPACE_NO_MATCHES', 'WORKSPACE_SEARCH_ERROR']),
+  z.enum(['WORKSPACE_MATCHES_FOUND', 'WORKSPACE_NO_MATCHES', 'WORKSPACE_SCAN_INCOMPLETE', 'WORKSPACE_SEARCH_ERROR']),
   workspaceSearchDataSchema,
 );
 export type WorkspaceSearchData = z.infer<typeof workspaceSearchDataSchema>;
@@ -218,7 +219,8 @@ export type GraphRagInvestigationResult = ToolResult<
 
 const indexPhaseSchema = z.enum(['awaiting-root', 'starting', 'probing', 'indexing', 'ready', 'unavailable', 'failed', 'skipped']);
 export const indexStatusDataSchema = z.object({
-  lifecycle: z.object({ phase: indexPhaseSchema, message: z.string(), startedAt: z.number().optional() }),
+  lifecycle: z.object({ phase: indexPhaseSchema, message: z.string(), startedAt: z.number().optional(), lastError: z.string().optional(), retryAt: z.number().optional() }),
+  indexer: z.object({ active: z.boolean(), stale: z.boolean().optional(), pid: z.number().optional(), startedAt: z.number().optional(), heartbeatAt: z.number().optional(), phase: z.string().optional() }).optional(),
   stamp: z.object({ provider: z.string(), model: z.string(), dimensions: z.number(), indexedAt: z.number(), filesIndexed: z.number(), status: z.enum(['complete', 'partial', 'empty']) }).optional(),
   integrity: z.object({ healthy: z.boolean(), databaseExists: z.boolean(), schemaValid: z.boolean(), discoveryValid: z.boolean(), discoveredFiles: z.number(), files: z.number(), indexedFiles: z.number(), skippedFiles: z.number(), skipped: z.array(z.object({ path: z.string(), reason: z.string() })), chunks: z.number(), missingVectors: z.number(), pendingPaths: z.array(z.string()), stalePaths: z.array(z.string()), diagnostic: z.string().optional() }).optional(),
 });
@@ -231,6 +233,7 @@ export function executeIndexStatus(rootDir: string | undefined, lifecycle: Index
   const data: IndexStatusData = { lifecycle };
   if (rootDir === undefined) return { schemaVersion: 1, status: 'blocked', code: 'INDEX_STATUS_AWAITING_ROOT', summary: lifecycle.message, data, evidence: [], diagnostics: [{ severity: 'error', code: 'INDEX_STATUS_AWAITING_ROOT', message: lifecycle.message }], truncated: false, retryable: false };
   try {
+    data.indexer = inspectIndexFileLease(rootDir);
     const stamp = readIndexStamp(rootDir);
     const integrity = inspectIndexIntegrity(rootDir, stamp === undefined ? undefined : { provider: stamp.provider, model: stamp.model });
     if (stamp !== undefined) data.stamp = { provider: stamp.provider, model: stamp.model, dimensions: stamp.dimensions, indexedAt: stamp.indexedAt, filesIndexed: stamp.filesIndexed, status: stamp.status };
@@ -246,6 +249,14 @@ export function executeIndexStatus(rootDir: string | undefined, lifecycle: Index
 export function formatIndexStatusForModel(result: IndexStatusResult): string {
   const lines = [`state:         ${result.data.lifecycle.phase}`, `message:       ${result.data.lifecycle.message}`];
   if (result.data.lifecycle.startedAt !== undefined) lines.push(`started at:    ${new Date(result.data.lifecycle.startedAt).toISOString()}`);
+  if (result.data.lifecycle.lastError !== undefined) lines.push(`last error:    ${result.data.lifecycle.lastError}`);
+  if (result.data.lifecycle.retryAt !== undefined) lines.push(`retry at:      ${new Date(result.data.lifecycle.retryAt).toISOString()}`);
+  if (result.data.indexer !== undefined) {
+    lines.push(`writer active: ${result.data.indexer.active}`);
+    if (result.data.indexer.pid !== undefined) lines.push(`writer pid:    ${result.data.indexer.pid}`);
+    if (result.data.indexer.startedAt !== undefined) lines.push(`writer since:  ${new Date(result.data.indexer.startedAt).toISOString()}`);
+    if (result.data.indexer.phase !== undefined) lines.push(`writer phase:  ${result.data.indexer.phase}`);
+  }
   if (result.data.stamp !== undefined) lines.push(`provider:      ${result.data.stamp.provider}`, `model:         ${result.data.stamp.model}`, `stamp status:  ${result.data.stamp.status}`, `files indexed: ${result.data.stamp.filesIndexed}`);
   if (result.data.integrity !== undefined) lines.push(`healthy:       ${result.data.integrity.healthy}`, `discovered:    ${result.data.integrity.discoveredFiles}`, `indexed:       ${result.data.integrity.indexedFiles}`, `chunks:        ${result.data.integrity.chunks}`, `pending:       ${result.data.integrity.pendingPaths.length}`, `stale:         ${result.data.integrity.stalePaths.length}`, `skipped:       ${result.data.integrity.skipped.map((file) => `${file.path} (${file.reason})`).join(', ') || 'none'}`);
   return lines.join('\n');
@@ -533,6 +544,14 @@ export function executeWorkspaceSearch(input: {
       excludedByReason: { ...search.excludedByReason },
     };
     if (data.matches.length === 0) {
+      if (search.truncated) {
+        return {
+          schemaVersion: 1, status: 'partial', code: 'WORKSPACE_SCAN_INCOMPLETE',
+          summary: `The bounded workspace scan ended before it could rule out matches for '${search.query}'.`, data,
+          evidence: [], diagnostics: [], truncated: true, retryable: false,
+          nextAction: 'Narrow search_workspace with a path to search the remaining files.',
+        };
+      }
       return {
         schemaVersion: 1, status: 'empty', code: 'WORKSPACE_NO_MATCHES',
         summary: `No safe literal matches found for '${search.query}'.`, data,
@@ -566,7 +585,7 @@ export function executeWorkspaceSearch(input: {
 /** Frames literal source lines as untrusted content before they reach a model. */
 export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): string {
   if (result.status === 'blocked' || result.status === 'error') return `❌ Workspace search failed: ${result.diagnostics[0].message}`;
-  if (result.data.matches.length === 0) return `ℹ️ ${result.summary}`;
+  if (result.data.matches.length === 0) return `ℹ️ ${result.summary}${result.nextAction === undefined ? '' : ` ${result.nextAction}`}`;
   const matches = result.data.matches.map((match) => wrapUntrustedFileContent(
     `${match.path}:${match.line}`,
     `[${match.artifactType}] ${match.text}`,
@@ -578,8 +597,8 @@ export function formatWorkspaceSearchForModel(result: WorkspaceSearchResult): st
 /**
  * Runs an index read against one worktree's view of the index (ADR-038).
  *
- * The read must await nothing but the view's embeddings: it runs inside a
- * window that holds the index's write lock.
+ * The read must await nothing but the view's embeddings: it runs against a
+ * short lived in-memory worktree view of the durable index.
  */
 export interface WorktreeIndexScope {
   /**
@@ -651,8 +670,8 @@ export async function executeCodebaseSearch(input: {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     if (scope !== undefined && isRetryableRead(error)) {
-      // A worktree read that could not take the index's write lock in time: a
-      // peer is writing for a bounded time, so this is "come back", not a fault.
+      // A worktree read that could not open its base snapshot in time is
+      // retryable; the caller receives a typed response instead of raw SQLite text.
       const result: CodebaseSearchResult = { schemaVersion: 1, status: 'abstained', code: 'CODEBASE_INDEX_UNAVAILABLE',
         summary: 'The worktree view of the index is briefly unavailable.', data: emptyData, evidence: [],
         diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }],

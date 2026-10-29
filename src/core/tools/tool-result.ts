@@ -34,7 +34,7 @@ export const toolDiagnosticSchema = z.object({
  * Index-backed evidence paths keep the index's form, relative to the served
  * root: for the served repository's own worktrees that is also the path in the
  * worktree, and for a submodule's worktree `indexPrefix` says what to strip.
- * Live-search evidence is relative to the worktree itself.
+ * Live-search evidence uses the index prefix too, so graph tools can consume it.
  */
 export const toolWorktreeSchema = z.object({
   /** Canonical absolute root of the worktree the answer is about. */
@@ -51,9 +51,9 @@ export const toolWorktreeSchema = z.object({
    */
   indexPrefix: z.string().optional(),
   /** Indexed files whose worktree content replaced the base index's for this answer. */
-  changedFiles: z.number().int().nonnegative(),
+  changedFiles: z.number().int().nonnegative().optional(),
   /** Indexed files the worktree does not have, hidden for this answer. */
-  deletedFiles: z.number().int().nonnegative(),
+  deletedFiles: z.number().int().nonnegative().optional(),
   /** Chunks the provider embedded for this worktree's overlay; zero on a cache hit. */
   chunksEmbedded: z.number().int().nonnegative(),
   /** Chunks whose vector was reused from the base index or an earlier overlay. */

@@ -273,8 +273,15 @@ function publishWorkspaceSearch(): PublishedTool {
       if (!selection.ok) return failure(selection.message);
       // A live read: the worktree's own files, under the same containment rules as the served root.
       const result = executeWorkspaceSearch(search, selection.worktree.root);
+      const prefix = selection.worktree.indexPrefix;
+      const indexPath = (relativePath: string): string => prefix === '' ? relativePath : `${prefix}/${relativePath}`;
+      const { changedFiles: _unknownChanges, deletedFiles: _unknownDeletions, ...provenance } =
+        selection.provenanceOf(selection.worktree, undefined, { elapsedMs: Date.now() - startedAt });
       return toStructuredToolResult(workspaceSearchResultSchema, {
-        ...result, worktree: selection.provenanceOf(selection.worktree, undefined, { elapsedMs: Date.now() - startedAt }),
+        ...result,
+        data: { ...result.data, matches: result.data.matches.map((match) => ({ ...match, path: indexPath(match.path) })) },
+        evidence: result.evidence.map((item) => ({ ...item, path: indexPath(item.path) })),
+        worktree: provenance,
       });
     },
     rootUnavailable: failure,

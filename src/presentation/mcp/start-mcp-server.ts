@@ -26,6 +26,7 @@ import { buildResourceCatalog } from './resource-catalog';
 import { loadMcpSdk, McpServerLike } from './sdk-loader';
 import { buildSdkServer } from './sdk-server';
 import { buildToolCatalog, SemanticSearchReadiness } from './tool-catalog';
+import { recoverWarmupFailure } from './warmup-recovery';
 
 /** The indexing and embedding modules, resolved once on first use. */
 interface IndexingModules {
@@ -89,6 +90,11 @@ interface McpIndexLifecycle {
   phase: McpIndexPhase;
   message: string;
   startedAt?: number;
+  lastError?: string;
+  retryAt?: number;
+  retryCount?: number;
+  retryTimer?: NodeJS.Timeout;
+  selectedIdentity?: { provider: 'vertex' | 'ollama'; model: string };
 }
 
 /** Options for {@link startMcpServer}. */
@@ -268,11 +274,14 @@ async function warmIndexInBackground(
   const { probeEmbeddings } = loadIndexingModules().availability;
   const { pinEmbeddingsProvider, resolveEmbeddings } = loadIndexingModules().resolver;
   const { IndexerService } = loadIndexingModules().indexer;
+  let selectedIdentity: { provider: 'vertex' | 'ollama'; model: string } | undefined;
 
   try {
     const selection = resolveEmbeddings(options.embeddings);
     pinEmbeddingsProvider(selection.port.identity.provider);
     const identity = selection.port.identity;
+    selectedIdentity = identity;
+    lifecycle.selectedIdentity = identity;
     report(`embeddings: ${identity.provider}/${identity.model} (from ${selection.source})`);
 
     if (selection.ignoredValue !== undefined) {
@@ -307,8 +316,14 @@ async function warmIndexInBackground(
     }).indexProject();
 
     if (result.disposition === 'already-running') {
-      lifecycle.phase = 'indexing';
-      lifecycle.message = 'Another Umbra process owns this root index lease; waiting for its durable coverage.';
+      const ready = hasDurableCoverage(rootDir, identity.provider, identity.model);
+      lifecycle.phase = ready ? 'ready' : 'indexing';
+      lifecycle.message = ready
+        ? 'Serving existing durable coverage while another Umbra process indexes.'
+        : 'Another Umbra process owns this root index lease; waiting for its durable coverage.';
+      const delay = Math.min(1_000 * 2 ** Math.min(lifecycle.retryCount ?? 0, 5), 30_000);
+      lifecycle.retryCount = (lifecycle.retryCount ?? 0) + 1;
+      scheduleWarmupRetry(rootDir, options, lifecycle, delay);
       report(lifecycle.message);
       return;
     }
@@ -316,6 +331,8 @@ async function warmIndexInBackground(
     if (hasDurableCoverage(rootDir, identity.provider, identity.model)) {
       lifecycle.phase = 'ready';
       lifecycle.message = `Durable vector coverage is ready for ${identity.provider}/${identity.model}.`;
+      lifecycle.retryCount = 0;
+      lifecycle.retryAt = undefined;
       report('index ready');
       return;
     }
@@ -324,13 +341,36 @@ async function warmIndexInBackground(
     lifecycle.message = 'Indexing ended without complete durable vector coverage. Run umbra doctor --index.';
     report(lifecycle.message);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    lifecycle.phase = 'failed';
-    lifecycle.message = `Index warm-up failed: ${message}`;
+    const ready = selectedIdentity !== undefined
+      && hasDurableCoverage(rootDir, selectedIdentity.provider, selectedIdentity.model);
+    const recovery = recoverWarmupFailure(error, ready, lifecycle.retryCount ?? 0, Date.now());
+    lifecycle.phase = recovery.phase;
+    lifecycle.lastError = recovery.lastError;
+    lifecycle.retryAt = recovery.retryAt;
+    lifecycle.message = recovery.phase === 'ready'
+      ? `Serving durable vector coverage; warm-up refresh will retry after a database lock: ${recovery.lastError}`
+      : recovery.phase === 'indexing'
+        ? `Index warm-up hit a database lock and will retry: ${recovery.lastError}`
+        : `Index warm-up failed: ${recovery.lastError}`;
+    if (recovery.retryDelayMs !== undefined) {
+      lifecycle.retryCount = (lifecycle.retryCount ?? 0) + 1;
+      scheduleWarmupRetry(rootDir, options, lifecycle, recovery.retryDelayMs);
+    }
     report(lifecycle.message);
   } finally {
     IndexerService.silent = false;
   }
+}
+
+/** Retries refresh after a transient lock without delaying requests or process shutdown. */
+function scheduleWarmupRetry(rootDir: string, options: StartMcpServerOptions, lifecycle: McpIndexLifecycle, delayMs: number): void {
+  if (lifecycle.retryTimer !== undefined) clearTimeout(lifecycle.retryTimer);
+  lifecycle.retryAt = Date.now() + delayMs;
+  lifecycle.retryTimer = setTimeout(() => {
+    lifecycle.retryTimer = undefined;
+    void warmIndexInBackground(rootDir, options, lifecycle);
+  }, delayMs);
+  lifecycle.retryTimer.unref();
 }
 
 /**
@@ -354,7 +394,13 @@ function semanticSearchReadiness(
   const retryable = WARMING_PHASES.has(lifecycle.phase);
 
   if (rootDir === undefined) return { ready: false, message: lifecycle.message, retryable };
-  if (lifecycle.phase !== 'ready') return { ready: false, message: lifecycle.message, retryable };
+  if (lifecycle.phase !== 'ready') {
+    const identity = lifecycle.selectedIdentity;
+    if (identity !== undefined && hasDurableCoverage(rootDir, identity.provider, identity.model)) {
+      return { ready: true, message: 'Serving existing durable vector coverage while the index refreshes.', retryable: false };
+    }
+    return { ready: false, message: lifecycle.message, retryable };
+  }
 
   const stamp = readIndexStamp(rootDir);
   if (stamp === undefined) return { ready: false, message: 'No durable index stamp exists yet.', retryable: false };
@@ -376,7 +422,7 @@ function semanticSearchReadiness(
     ? { ready: true, message: lifecycle.message, retryable: false }
     : {
       ready: false,
-      retryable: false,
+      retryable: /SQLITE_BUSY|SQLITE_LOCKED|database (?:table )?is locked/i.test(serveability.reason ?? ''),
       message:
         `${serveability.reason ?? 'The index cannot serve a search.'} ` +
         'Read get_index_status, or run umbra doctor --index.',
@@ -385,7 +431,7 @@ function semanticSearchReadiness(
 
 /** Tests persisted coverage without invoking an embedding provider. */
 function hasDurableCoverage(rootDir: string, provider: 'vertex' | 'ollama', model: string): boolean {
-  return inspectIndexIntegrity(rootDir, { provider, model }).healthy;
+  return inspectIndexServeability(rootDir, { provider, model }).serveable;
 }
 
 /** Renders the shared MCP resource/tool view of live and durable index state. */

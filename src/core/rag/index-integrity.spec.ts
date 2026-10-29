@@ -220,16 +220,13 @@ describe('inspectIndexServeability', () => {
     expect(inspectIndexServeability(rootDir, IDENTITY).serveable).toBe(true);
   });
 
-  // A chunk with no vector for the active identity cannot be ranked, so the
-  // result set would be wrong rather than merely dated. This one must refuse.
-  it('refuses when a chunk has no vector for the active provider', () => {
+  it('serves the durable subset when one chunk lacks a vector for the active provider', () => {
     const result = inspectIndexServeability(rootDir, IDENTITY);
 
-    expect(result.serveable).toBe(false);
-    expect(result.reason).toMatch(/no vector for the active provider/);
+    expect(result.serveable).toBe(true);
   });
 
-  it('refuses while another process holds the index lease', () => {
+  it('serves complete durable coverage while another process owns the index lease', () => {
     completeCoverage();
     const db = openDb();
     // `semantic-index` is the name `IndexRunLease` writes; any other row is a
@@ -241,23 +238,20 @@ describe('inspectIndexServeability', () => {
 
     const result = inspectIndexServeability(rootDir, IDENTITY);
 
-    expect(result.serveable).toBe(false);
-    expect(result.reason).toMatch(/lease/);
+    expect(result.serveable).toBe(true);
   });
 
-  it('refuses on a stamp that does not claim complete coverage', () => {
-    completeCoverage();
+  it('serves existing vectors under a partial stamp', () => {
     writeIndexStamp(rootDir, { ...IDENTITY, dimensions: 3, column: 'vector_ollama_json' }, {
       filesIndexed: 1, discoveredFiles: 2, coveredFiles: 1, status: 'partial',
     });
 
     const result = inspectIndexServeability(rootDir, IDENTITY);
 
-    expect(result.serveable).toBe(false);
-    expect(result.reason).toMatch(/partial/);
+    expect(result.serveable).toBe(true);
   });
 
-  it('refuses when a file is recorded as indexed but holds no chunks', () => {
+  it('serves other files when one recorded file holds no chunks', () => {
     completeCoverage();
     const db = openDb();
     db.prepare(`DELETE FROM chunk_vectors WHERE chunk_id = 'b'`).run();
@@ -266,8 +260,18 @@ describe('inspectIndexServeability', () => {
 
     const result = inspectIndexServeability(rootDir, IDENTITY);
 
+    expect(result.serveable).toBe(true);
+  });
+
+  it('refuses when the active provider has no vectors at all', () => {
+    const db = openDb();
+    db.prepare(`DELETE FROM chunk_vectors WHERE chunk_id = 'a'`).run();
+    db.close();
+
+    const result = inspectIndexServeability(rootDir, IDENTITY);
+
     expect(result.serveable).toBe(false);
-    expect(result.reason).toMatch(/no chunks/);
+    expect(result.reason).toMatch(/no vectors for the active provider/);
   });
 
   it('refuses when there is no database at all', () => {

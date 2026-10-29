@@ -70,7 +70,7 @@ export class WorkspaceDiscoveryError extends Error {
 }
 
 interface UmbraConfig {
-  indexing?: { sources?: string[] };
+  indexing?: { sources?: string[]; ignore?: string[] };
   adr?: { catalogs?: string[] };
 }
 
@@ -82,6 +82,8 @@ interface UmbraConfig {
  */
 export class WorkspaceDiscoveryService {
   private readonly rootDir: string;
+  private ignoredPatterns: readonly string[] = [];
+  private readonly registeredWorktrees = new Map<string, boolean>();
 
   public constructor(rootDir: string) {
     this.rootDir = path.resolve(rootDir);
@@ -90,6 +92,7 @@ export class WorkspaceDiscoveryService {
   /** Discovers all shared workspace inputs without executing consumer code. */
   public discover(): WorkspaceDiscovery {
     const config = this.readConfig();
+    this.ignoredPatterns = config.indexing?.ignore ?? [];
     const typeScriptProjects = this.discoverTypeScriptProjects();
     const configuredSources = config.indexing?.sources;
     const typeScriptSources = configuredSources === undefined
@@ -122,7 +125,9 @@ export class WorkspaceDiscoveryService {
 
   /** Discovers ADR directories even when the workspace has no indexable code. */
   public discoverAdrCatalogs(): readonly AdrCatalogLocation[] {
-    return this.findAdrCatalogs(this.readConfig().adr?.catalogs);
+    const config = this.readConfig();
+    this.ignoredPatterns = config.indexing?.ignore ?? [];
+    return this.findAdrCatalogs(config.adr?.catalogs);
   }
 
   /** Reads an optional version-controlled override without treating malformed input as source. */
@@ -140,6 +145,7 @@ export class WorkspaceDiscoveryService {
     }
     const candidate = raw as UmbraConfig;
     this.assertStringArray(candidate.indexing?.sources, 'indexing.sources');
+    this.assertStringArray(candidate.indexing?.ignore, 'indexing.ignore');
     this.assertStringArray(candidate.adr?.catalogs, 'adr.catalogs');
     return candidate;
   }
@@ -183,7 +189,7 @@ export class WorkspaceDiscoveryService {
         project.absolutePath,
       );
       for (const absolutePath of parsed.fileNames) {
-        if (this.isIndexableSource(absolutePath)) {
+        if (this.isIndexableSource(absolutePath) && !this.isExcludedPath(absolutePath)) {
           const file = this.workspaceFile(absolutePath, 'typescript');
           files.set(file.relativePath, file);
         }
@@ -196,7 +202,7 @@ export class WorkspaceDiscoveryService {
   private expandConfiguredSources(patterns: readonly string[]): WorkspaceFile[] {
     const regexes = patterns.map((pattern) => this.globExpression(pattern));
     const files = this.walkFiles(this.rootDir)
-      .filter((absolutePath) => this.isIndexableArtifact(absolutePath))
+      .filter((absolutePath) => this.isIndexableArtifact(absolutePath) && !this.isExcludedPath(absolutePath))
       .map((absolutePath) => this.workspaceFile(absolutePath, this.artifactKindOf(absolutePath)))
       .filter((file) => regexes.some((expression) => expression.test(file.relativePath)));
     return deduplicateFiles(files);
@@ -250,9 +256,11 @@ export class WorkspaceDiscoveryService {
     const visit = (current: string): void => {
       for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
         if (entry.isDirectory()) {
-          if (!IGNORED_DIRECTORIES.has(entry.name)) visit(path.join(current, entry.name));
+          const child = path.join(current, entry.name);
+          if (!IGNORED_DIRECTORIES.has(entry.name) && !this.isExcludedPath(child)) visit(child);
         } else if (entry.isFile()) {
-          files.push(path.join(current, entry.name));
+          const file = path.join(current, entry.name);
+          if (!this.isExcludedPath(file)) files.push(file);
         }
       }
     };
@@ -267,6 +275,7 @@ export class WorkspaceDiscoveryService {
       for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
         if (!entry.isDirectory() || IGNORED_DIRECTORIES.has(entry.name)) continue;
         const child = path.join(current, entry.name);
+        if (this.isExcludedPath(child)) continue;
         directories.push(child);
         visit(child);
       }
@@ -278,8 +287,52 @@ export class WorkspaceDiscoveryService {
   /** Checks the supported extensions and test/declaration exclusions. */
   private isIndexableSource(absolutePath: string): boolean {
     const normalized = this.relativePath(absolutePath);
-    if (!/\.(ts|tsx)$/i.test(normalized)) return false;
-    return !/\.(d|spec|test)\.ts$/i.test(normalized) && !/\.stories\.tsx?$/i.test(normalized);
+    if (!/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i.test(normalized)) return false;
+    return !/\.(d|spec|test)\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i.test(normalized)
+      && !/\.stories\.(ts|tsx|js|jsx)$/i.test(normalized);
+  }
+
+  /** Prunes configured paths and reciprocal Git worktree registrations. */
+  private isExcludedPath(absolutePath: string): boolean {
+    const relative = this.relativePath(absolutePath);
+    if (this.ignoredPatterns.some((pattern) => {
+      const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
+      if (normalized.endsWith('/**')) {
+        const prefix = normalized.slice(0, -3);
+        return relative === prefix || relative.startsWith(`${prefix}/`);
+      }
+      return this.globExpression(normalized).test(relative);
+    })) return true;
+    let directory = fs.existsSync(absolutePath) && fs.statSync(absolutePath).isDirectory()
+      ? absolutePath : path.dirname(absolutePath);
+    while (directory !== this.rootDir && directory.startsWith(`${this.rootDir}${path.sep}`)) {
+      if (this.isRegisteredWorktree(directory)) return true;
+      directory = path.dirname(directory);
+    }
+    return false;
+  }
+
+  /** Checks both sides of the Git worktree marker, including submodule gitdirs. */
+  private isRegisteredWorktree(directory: string): boolean {
+    const cached = this.registeredWorktrees.get(directory);
+    if (cached !== undefined) return cached;
+    const marker = path.join(directory, '.git');
+    let registered = false;
+    try {
+      if (fs.statSync(marker).isFile()) {
+        const match = /^gitdir:\s*(.+)\s*$/i.exec(fs.readFileSync(marker, 'utf8').trim());
+        if (match !== null) {
+          const gitdir = path.resolve(directory, match[1]);
+          const rootGit = path.join(this.rootDir, '.git');
+          if (gitdir.startsWith(`${rootGit}${path.sep}`)) {
+            const back = fs.readFileSync(path.join(gitdir, 'gitdir'), 'utf8').trim();
+            registered = path.resolve(gitdir, back) === marker;
+          }
+        }
+      }
+    } catch { /* An absent or incomplete marker is ordinary source, not a registered worktree. */ }
+    this.registeredWorktrees.set(directory, registered);
+    return registered;
   }
 
   /** Allows explicit source configuration to include only the two supported artifact contracts. */

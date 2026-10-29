@@ -19,6 +19,8 @@ import { readIndexStamp, writeIndexStamp } from './index-stamp';
 import { analyzeSourceFile, commitIndexedFile, commitSkippedFile } from './indexed-file-rows';
 import { captureIndexedGitState, mergeIndexedGitState } from './indexed-git-state';
 import { IndexRunLease } from './index-run-lease';
+import { IndexFileLease } from './index-file-lease';
+import type Database from 'better-sqlite3';
 import { encodeVector } from './vector-codec';
 import { EmbeddingCache } from './embedding-cache';
 import {
@@ -52,10 +54,11 @@ export interface IndexRunResult {
  * It coordinates the FileRegistry, AST Parser, and Vector Store.
  */
 export class IndexerService {
-  private registry: FileRegistry;
+  private registry!: FileRegistry;
   private chunker: NestChunker;
   private readonly prismaChunker = new PrismaSchemaChunker();
-  private db: any; // Type 'any' allowed here for better-sqlite3 instance wrapper
+  private db!: Database.Database;
+  private fileLease?: IndexFileLease;
   private static activeIndex: Promise<IndexRunResult> | undefined;
 
   /**
@@ -116,7 +119,7 @@ export class IndexerService {
   private readonly embeddings: EmbeddingsPort;
 
   /** Content-keyed vectors shared by indexing and worktree reads. */
-  private readonly embeddingCache: EmbeddingCache;
+  private embeddingCache!: EmbeddingCache;
 
   /** Timestamp used only for a stable elapsed-time and ETA progress display. */
   private indexingStartedAt = 0;
@@ -135,11 +138,8 @@ export class IndexerService {
     embeddings: EmbeddingsPort = resolveEmbeddings().port,
     progressObserver?: (progress: string) => void,
   ) {
-    this.registry = new FileRegistry();
     this.chunker = new NestChunker(runtimeRoot());
-    this.db = AgentDB.getInstance();
     this.embeddings = embeddings;
-    this.embeddingCache = new EmbeddingCache(this.db);
     this.progressObserver = progressObserver;
   }
 
@@ -166,6 +166,13 @@ export class IndexerService {
   private async indexProjectOnce(): Promise<IndexRunResult> {
     this.indexingStartedAt = Date.now();
     const rootDir = runtimeRoot();
+    const fileLease = IndexFileLease.acquire(rootDir);
+    if (fileLease === undefined) {
+      IndexerService.log('⏳ Another Umbra process owns the index writer lease; serving as a reader.');
+      return { disposition: 'already-running', filesIndexed: 0 };
+    }
+    this.fileLease = fileLease;
+    try {
     let discovery;
     try {
       discovery = new WorkspaceDiscoveryService(rootDir).discover();
@@ -175,6 +182,10 @@ export class IndexerService {
       throw error;
     }
 
+    fileLease.heartbeat('opening');
+    this.registry = new FileRegistry();
+    this.db = AgentDB.getInstance();
+    this.embeddingCache = new EmbeddingCache(this.db);
     const identity = this.embeddings.identity;
     const lease = IndexRunLease.acquire(this.db, {
       provider: identity.provider,
@@ -185,13 +196,25 @@ export class IndexerService {
       return { disposition: 'already-running', filesIndexed: 0 };
     }
 
-    const heartbeat = setInterval(() => lease.heartbeat(), 15_000);
+    fileLease.heartbeat('indexing');
+    const heartbeat = setInterval(() => {
+      try {
+        fileLease.heartbeat();
+        lease.heartbeat();
+      } catch (error: unknown) {
+        IndexerService.log(`Index lease heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, 15_000);
     heartbeat.unref();
     try {
       return await this.indexDiscoveredProject(rootDir, discovery);
     } finally {
       clearInterval(heartbeat);
       lease.release();
+    }
+    } finally {
+      this.fileLease = undefined;
+      fileLease.release();
     }
   }
 
@@ -231,6 +254,18 @@ export class IndexerService {
       );
     }
 
+    // Discovery is the source contract. Remove rows left by deleted files,
+    // newly ignored paths, and worktrees that were indexed by older releases.
+    // Cascades remove their chunks, vectors, and graph edges with each row.
+    const discoveredPaths = new Set(discovery.sourceFiles.map((file) => file.relativePath));
+    const obsoletePaths = (this.db.prepare('SELECT path FROM file_registry').all() as Array<{ path: string }>)
+      .map((row) => row.path).filter((filePath) => !discoveredPaths.has(filePath));
+    if (obsoletePaths.length > 0) {
+      const remove = this.db.prepare('DELETE FROM file_registry WHERE path = ?');
+      for (const filePath of obsoletePaths) remove.run(filePath);
+      IndexerService.log(`🧹 Removed ${obsoletePaths.length} paths outside the current source scope.`);
+    }
+
     // Check changes. A provider switch is deliberately NOT treated as a
     // content change -- see `backfillMissingVectors` for why re-chunking here
     // destroyed the other provider's index.
@@ -254,6 +289,7 @@ export class IndexerService {
       // stays empty on an up-to-date repository, because nothing re-processes
       // a file whose content has not changed.
       const typeScriptFiles = discovery.sourceFiles.filter((file) => file.kind === 'typescript');
+      this.fileLease?.heartbeat('backfill');
       const nestFiles = backfillNestGraph(
         this.db,
         typeScriptFiles,
@@ -311,6 +347,7 @@ export class IndexerService {
     }
 
     IndexerService.log(`📦 Found ${filesToProcess.length} files to process.`);
+    this.fileLease?.heartbeat('embedding');
 
     let indexedFiles = 0;
     const failures: string[] = [];
