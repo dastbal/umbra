@@ -516,3 +516,67 @@ so it does not claim a 150× end-to-end tool improvement. The integration test
 also recreates `WorktreeViewService` and verifies that the second service
 embeds zero changed chunks; together these show why a new session no longer
 repeats the provider cost.
+
+## Amendment — 2026-10-29 · Repair the 2.4.1 read-only split
+
+Version 2.4.1 moved worktree writes into a disposable in-memory database with
+the base index attached for reads. That removed the shared-index write lock,
+but it also removed the `embedding_cache.put` call for genuinely new worktree
+content. The old sections above describe the 2.4.0 implementation and its
+measurements, not the 2.4.1 behavior.
+
+In 2.4.2, the worktree builder reads the existing cache in `memory.db` and
+writes new vectors to `.umbra/worktree-embeddings.db`, keyed by the same provider,
+model, dimensions and exact embedding input hash. The side database is opened
+only when worktree vectors need it; the base index remains read-only for a
+worktree read. A fresh-connection regression test first reproduced four
+unnecessary provider calls on 2.4.1, then observed zero after the side cache.
+This proves durable reuse for the fixture, not a measured MCP latency gain on
+LUONE.
+
+The lexical path in 2.4.1 concatenated all worktree FTS hits before base hits.
+Each FTS table has its own corpus statistics, so sorting their raw BM25 numbers
+together is also unsound. The merged candidate set now uses one deterministic
+term-evidence score over path, metadata and content before reciprocal-rank
+fusion. Base-only reads retain their existing BM25 order. Five labelled,
+synthetic worktree cases improved Hit@1 from 3/5 to 5/5; the fixed report is
+`docs/benchmarks/results/2026-10-29-worktree-ranking.json`. This is a regression
+gate for the known failure, not a claim about live repository relevance.
+
+The pinned checkout now takes the same overlay path whenever its computed
+delta is nonempty. Its answer and `changedFiles` provenance therefore describe
+the same content. A new test changes an indexed method after indexing and
+checks that the read sees it.
+
+The indexer now prunes obsolete paths, chunks and FTS rows in one transaction.
+It removes FTS rows by rowid before the foreign-key cascade, then restores the
+delete trigger when present. A forced mid-prune failure rolls back the entire operation.
+If an older database has lost that trigger, the cleanup still removes the FTS
+rows; a regression test covers this state.
+The reproducible `scripts/bench-index-prune.mjs` compared identical copies in
+five runs, alternating which arm ran first. These are medians:
+
+| Index copy | Rows removed | 2.4.1 per-path | 2.4.2 atomic | Scope |
+|---|---:|---:|---:|---|
+| Synthetic, 12,000 chunks | 100 | 474.19 ms | 150.37 ms | SQLite cleanup only |
+| LUONE snapshot, 8,225 chunks | 850 in 10 files | 5,075.61 ms | 120.17 ms | SQLite cleanup only |
+
+Reports are in `docs/benchmarks/results/2026-10-29-index-prune-12000.json` and
+`docs/benchmarks/results/2026-10-29-index-prune-luone-copy.json`. The live LUONE
+database was read through a consistent backup and never modified. Discovery,
+embedding and MCP latency were excluded, so these are cleanup-phase results.
+
+An abandoned `indexer.lease.recovery` directory older than five minutes is now
+reclaimed. A lease owner whose heartbeat is that old is considered stale even
+when its PID exists; the SQLite lease still prevents a second writer from
+indexing concurrently. The five-minute threshold tolerates ordinary long
+operations but a live process stalled longer can lose its file lease. The
+recovery test covers an orphaned marker and a simulated reused PID, not every crash
+point or filesystem race.
+
+Finally, serveability distinguishes *can answer from stored vectors* from
+*covers all stored chunks*. It labels a served subset `partial` even if its
+stamp says `complete`, while still allowing searches over available vectors.
+The MCP answer uses the coverage result already computed at the readiness gate
+to avoid repeating the database scan. `get_index_status` remains the detailed
+path-level diagnostic.

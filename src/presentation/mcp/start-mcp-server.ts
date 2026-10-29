@@ -89,6 +89,7 @@ type McpIndexPhase =
 interface McpIndexLifecycle {
   phase: McpIndexPhase;
   message: string;
+  coverage?: 'complete' | 'partial';
   startedAt?: number;
   lastError?: string;
   retryAt?: number;
@@ -148,7 +149,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<vo
   const tools = buildToolCatalog({
     semanticSearchReadiness: () => semanticSearchReadiness(rootDir, lifecycle),
     readIndexStatus: () => executeIndexStatus(rootDir, lifecycle),
-    decorateSemanticAnswer: (text) => decorateSemanticAnswer(rootDir, text),
+    decorateSemanticAnswer: (text) => decorateSemanticAnswer(rootDir, text, lifecycle),
     projectRootReady: () => rootDir !== undefined,
     projectRootMessage: () => lifecycle.message,
     readProjectRoot: () => rootDir,
@@ -328,9 +329,12 @@ async function warmIndexInBackground(
       return;
     }
 
-    if (hasDurableCoverage(rootDir, identity.provider, identity.model)) {
+    const completedCoverage = inspectIndexServeability(rootDir, identity);
+    if (completedCoverage.serveable) {
       lifecycle.phase = 'ready';
-      lifecycle.message = `Durable vector coverage is ready for ${identity.provider}/${identity.model}.`;
+      lifecycle.message = completedCoverage.coverage === 'partial'
+        ? `Serving partial vector coverage for ${identity.provider}/${identity.model}; read get_index_status for missing paths.`
+        : `Durable vector coverage is ready for ${identity.provider}/${identity.model}.`;
       lifecycle.retryCount = 0;
       lifecycle.retryAt = undefined;
       report('index ready');
@@ -396,7 +400,9 @@ function semanticSearchReadiness(
   if (rootDir === undefined) return { ready: false, message: lifecycle.message, retryable };
   if (lifecycle.phase !== 'ready') {
     const identity = lifecycle.selectedIdentity;
-    if (identity !== undefined && hasDurableCoverage(rootDir, identity.provider, identity.model)) {
+    const existing = identity === undefined ? undefined : inspectIndexServeability(rootDir, identity);
+    if (existing?.serveable) {
+      lifecycle.coverage = existing.coverage;
       return { ready: true, message: 'Serving existing durable vector coverage while the index refreshes.', retryable: false };
     }
     return { ready: false, message: lifecycle.message, retryable };
@@ -418,8 +424,15 @@ function semanticSearchReadiness(
     provider: stamp.provider,
     model: stamp.model,
   });
+  lifecycle.coverage = serveability.coverage;
   return serveability.serveable
-    ? { ready: true, message: lifecycle.message, retryable: false }
+    ? {
+      ready: true,
+      message: serveability.coverage === 'partial'
+        ? 'Serving partial vector coverage; read get_index_status for missing paths.'
+        : lifecycle.message,
+      retryable: false,
+    }
     : {
       ready: false,
       retryable: /SQLITE_BUSY|SQLITE_LOCKED|database (?:table )?is locked/i.test(serveability.reason ?? ''),
@@ -466,7 +479,7 @@ function describeIndexStatus(rootDir: string | undefined, lifecycle: McpIndexLif
 }
 
 /** Adds provenance only after the readiness boundary has allowed a real search. */
-function decorateSemanticAnswer(rootDir: string | undefined, text: string): string {
+function decorateSemanticAnswer(rootDir: string | undefined, text: string, lifecycle: McpIndexLifecycle): string {
   if (rootDir === undefined) return text;
   const current = readIndexStamp(rootDir);
   // Reached only once a search has been allowed, which means the warm-up has
@@ -477,7 +490,7 @@ function decorateSemanticAnswer(rootDir: string | undefined, text: string): stri
     model: current?.model ?? active.model,
     indexedAt: current?.indexedAt,
     filesIndexed: current?.filesIndexed,
-    status: current?.status,
+    status: lifecycle.coverage === 'partial' ? 'partial' : current?.status,
     queriedWith:
       current !== undefined && current.provider !== active.provider
         ? `${active.provider}/${active.model}`

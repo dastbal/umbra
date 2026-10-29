@@ -195,7 +195,7 @@ describe('inspectIndexServeability', () => {
     completeCoverage();
 
     expect(inspectIndexIntegrity(rootDir, IDENTITY).healthy).toBe(true);
-    expect(inspectIndexServeability(rootDir, IDENTITY).serveable).toBe(true);
+    expect(inspectIndexServeability(rootDir, IDENTITY)).toMatchObject({ serveable: true, coverage: 'complete' });
   });
 
   // The behaviour change, stated as a test rather than left implicit. Editing a
@@ -224,6 +224,7 @@ describe('inspectIndexServeability', () => {
     const result = inspectIndexServeability(rootDir, IDENTITY);
 
     expect(result.serveable).toBe(true);
+    expect(result).toMatchObject({ coverage: 'partial' });
   });
 
   it('serves complete durable coverage while another process owns the index lease', () => {

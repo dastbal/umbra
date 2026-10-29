@@ -58,7 +58,7 @@ export class WorktreeViewService {
 
   /** @param dependencies - Roots, connections and the provider. */
   public constructor(private readonly dependencies: WorktreeViewDependencies) {
-    this.builder = new WorktreeOverlayBuilder(dependencies.embeddings, dependencies.baseDb);
+    this.builder = new WorktreeOverlayBuilder(dependencies.embeddings, dependencies.baseDb, dependencies.dbPath);
     this.scope = new OverlayScope({
       dbPath: dependencies.dbPath,
       embeddings: dependencies.embeddings,
@@ -110,7 +110,7 @@ export class WorktreeViewService {
   ): Promise<WorktreeReadResult<T>> {
     const startedAt = Date.now();
     const delta = await this.delta(worktree);
-    if (worktree.isPinnedRoot || (delta.changed.length === 0 && delta.deleted.length === 0)) {
+    if (delta.changed.length === 0 && delta.deleted.length === 0) {
       const db = new Database(this.dependencies.dbPath, { readonly: true, fileMustExist: true });
       try {
         const vectorSearchAvailable = loadVectorExtensionInto(db);
@@ -142,6 +142,7 @@ export class WorktreeViewService {
   /** Closes the overlay connection. */
   public close(): void {
     this.scope.close();
+    this.builder.close();
     if (this.dependencies.ownsBaseDb) this.dependencies.baseDb.close();
   }
 }

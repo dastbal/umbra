@@ -21,6 +21,9 @@ interface LeaseOwner {
   readonly phase: string;
 }
 
+/** A live writer refreshes every 15 seconds; five minutes tolerates long blocking work. */
+const STALE_HEARTBEAT_MS = 5 * 60_000;
+
 /** Atomic directory ownership acquired before the writer opens SQLite. */
 export class IndexFileLease {
   private constructor(private readonly directory: string, private owner: LeaseOwner) {}
@@ -52,8 +55,21 @@ export class IndexFileLease {
     try {
       fs.mkdirSync(recovery);
     } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let age: number;
+      try {
+        age = Date.now() - fs.statSync(recovery).mtimeMs;
+      } catch { return undefined; }
+      if (age < STALE_HEARTBEAT_MS) return undefined;
+      const abandoned = `${recovery}.stale-${crypto.randomUUID()}`;
+      try {
+        fs.renameSync(recovery, abandoned);
+        fs.rmSync(abandoned, { recursive: true, force: true });
+        fs.mkdirSync(recovery);
+      } catch (recoveryError: unknown) {
+        if (['EEXIST', 'ENOENT'].includes((recoveryError as NodeJS.ErrnoException).code ?? '')) return undefined;
+        throw recoveryError;
+      }
     }
     try {
       if (!inspectIndexFileLease(rootDir).stale) return undefined;
@@ -101,6 +117,7 @@ export function inspectIndexFileLease(rootDir: string): IndexFileLeaseSnapshot {
   } catch (error: unknown) {
     stale = (error as NodeJS.ErrnoException).code === 'ESRCH';
   }
+  stale = stale || Date.now() - owner.heartbeatAt > STALE_HEARTBEAT_MS;
   return {
     active: true, stale, pid: owner.pid, startedAt: owner.startedAt,
     heartbeatAt: owner.heartbeatAt, phase: owner.phase,

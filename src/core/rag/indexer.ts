@@ -20,6 +20,7 @@ import { analyzeSourceFile, commitIndexedFile, commitSkippedFile } from './index
 import { captureIndexedGitState, mergeIndexedGitState } from './indexed-git-state';
 import { IndexRunLease } from './index-run-lease';
 import { IndexFileLease } from './index-file-lease';
+import { pruneObsoleteIndexPaths } from './index-prune';
 import type Database from 'better-sqlite3';
 import { encodeVector } from './vector-codec';
 import { EmbeddingCache } from './embedding-cache';
@@ -261,8 +262,7 @@ export class IndexerService {
     const obsoletePaths = (this.db.prepare('SELECT path FROM file_registry').all() as Array<{ path: string }>)
       .map((row) => row.path).filter((filePath) => !discoveredPaths.has(filePath));
     if (obsoletePaths.length > 0) {
-      const remove = this.db.prepare('DELETE FROM file_registry WHERE path = ?');
-      for (const filePath of obsoletePaths) remove.run(filePath);
+      pruneObsoleteIndexPaths(this.db, obsoletePaths);
       IndexerService.log(`🧹 Removed ${obsoletePaths.length} paths outside the current source scope.`);
     }
 

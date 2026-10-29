@@ -9,6 +9,7 @@ import { NestChunker } from '../tools/ast/chunker';
 import { EmbeddingsPort } from './embeddings';
 import { readIndexStamp } from './index-stamp';
 import { IndexFileLease } from './index-file-lease';
+import { pruneObsoleteIndexPaths } from './index-prune';
 import { IndexerService } from './indexer';
 
 describe('IndexerService durable file outcomes', () => {
@@ -70,6 +71,44 @@ describe('IndexerService durable file outcomes', () => {
     expect(result).toMatchObject({ disposition: 'completed', status: 'complete' });
     expect(paths.map((row) => row.path)).toEqual(['src/sample.ts']);
     expect(orphanChunks.total).toBe(0);
+  });
+
+  it('keeps all obsolete paths if pruning fails halfway through', async () => {
+    fs.writeFileSync(path.join(rootDir, 'src', 'alpha.ts'), 'export class Alpha { value(): number { return 1; } }\n');
+    fs.writeFileSync(path.join(rootDir, 'src', 'zeta.ts'), 'export class Zeta { value(): number { return 2; } }\n');
+    const first = await new IndexerService(successfulEmbeddings()).indexProject();
+    expect(first.disposition).toBe('completed');
+    const indexed = AgentDB.getInstance().prepare(
+      "SELECT path FROM file_registry WHERE path IN ('src/alpha.ts', 'src/zeta.ts') ORDER BY path",
+    ).all() as Array<{ path: string }>;
+    expect(indexed.map((row) => row.path)).toEqual(['src/alpha.ts', 'src/zeta.ts']);
+    AgentDB.getInstance().exec(`
+      CREATE TRIGGER fail_obsolete_prune BEFORE DELETE ON file_registry
+      WHEN OLD.path = 'src/zeta.ts' BEGIN SELECT RAISE(ABORT, 'prune interrupted'); END;
+    `);
+
+    expect(() => pruneObsoleteIndexPaths(AgentDB.getInstance(), [
+      'src/alpha.ts', 'src/zeta.ts',
+    ])).toThrow('prune interrupted');
+    const paths = AgentDB.getInstance().prepare(
+      "SELECT path FROM file_registry WHERE path IN ('src/alpha.ts', 'src/zeta.ts') ORDER BY path",
+    ).all() as Array<{ path: string }>;
+    expect(paths.map((row) => row.path)).toEqual(['src/alpha.ts', 'src/zeta.ts']);
+  });
+
+  it('removes obsolete FTS rows even when the delete trigger is missing', async () => {
+    fs.writeFileSync(path.join(rootDir, 'src', 'ignored.ts'), 'export class IgnoredSource {}\n');
+    await new IndexerService(successfulEmbeddings()).indexProject();
+    AgentDB.getInstance().exec('DROP TRIGGER code_chunks_fts_delete');
+    fs.writeFileSync(path.join(rootDir, 'umbra.json'), JSON.stringify({
+      indexing: { ignore: ['src/ignored.ts'] },
+    }));
+
+    await new IndexerService(successfulEmbeddings()).indexProject();
+    const remaining = AgentDB.getInstance().prepare(
+      "SELECT COUNT(*) AS total FROM code_chunks_fts WHERE file_path = 'src/ignored.ts'",
+    ).get() as { total: number };
+    expect(remaining.total).toBe(0);
   });
 
   it('never records nonempty zero-chunk input as fresh', async () => {

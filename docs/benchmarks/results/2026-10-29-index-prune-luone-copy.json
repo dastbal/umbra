@@ -1,0 +1,45 @@
+{
+  "source": "snapshot of a local index",
+  "initial": {
+    "files": 1309,
+    "chunks": 8225,
+    "fts": 8225
+  },
+  "obsoletePaths": 10,
+  "removedChunks": 850,
+  "repeats": 5,
+  "node": "v24.22.0",
+  "sqliteVersion": "3.53.1",
+  "before": {
+    "medianMs": 5075.611,
+    "samplesMs": [
+      5207.386,
+      5075.611,
+      4631.992,
+      4933.726,
+      5138.671
+    ],
+    "remaining": {
+      "files": 1299,
+      "chunks": 7375,
+      "fts": 7375
+    }
+  },
+  "after": {
+    "medianMs": 120.165,
+    "samplesMs": [
+      105.534,
+      122.595,
+      103.629,
+      128.612,
+      120.165
+    ],
+    "remaining": {
+      "files": 1299,
+      "chunks": 7375,
+      "fts": 7375
+    }
+  },
+  "speedup": 42.24,
+  "scope": "SQLite cleanup only; excludes discovery, embeddings and MCP. Source database is never modified."
+}

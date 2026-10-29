@@ -208,6 +208,8 @@ export function inspectIndexIntegrity(
 /** Whether the stored index can answer a search, and why not when it cannot. */
 export interface IndexServeability {
   readonly serveable: boolean;
+  /** Actual stored coverage for the selected provider, even if the stamp claims complete. */
+  readonly coverage?: 'complete' | 'partial';
   readonly reason?: string;
 }
 
@@ -312,7 +314,22 @@ export function inspectIndexServeability(
       };
     }
 
-    return { serveable: true };
+    const missingVector = selectedIdentity === undefined
+      ? db.prepare(`SELECT 1 FROM code_chunks c WHERE NOT EXISTS (
+          SELECT 1 FROM chunk_vectors v WHERE v.chunk_id = c.id
+        ) LIMIT 1`).get()
+      : db.prepare(`SELECT 1 FROM code_chunks c WHERE NOT EXISTS (
+          SELECT 1 FROM chunk_vectors v
+          WHERE v.chunk_id = c.id AND v.provider = ? AND v.model = ?
+        ) LIMIT 1`).get(selectedIdentity.provider, selectedIdentity.model);
+    const chunklessFile = db.prepare(`SELECT 1 FROM file_registry f
+      WHERE f.index_state = 'indexed' AND NOT EXISTS (
+        SELECT 1 FROM code_chunks c WHERE c.file_path = f.path
+      ) LIMIT 1`).get();
+    const partial = stamp.status === 'partial' || missingVector !== undefined || chunklessFile !== undefined
+      || (stamp.discoveredFiles !== undefined && stamp.coveredFiles !== undefined
+        && stamp.coveredFiles < stamp.discoveredFiles);
+    return { serveable: true, coverage: partial ? 'partial' : 'complete' };
   } catch (error: unknown) {
     // Reported rather than swallowed, and it fails closed: an index this cannot
     // read is one a search must not be told is usable.
