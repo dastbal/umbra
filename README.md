@@ -114,10 +114,16 @@ that edge exists.
 
 `ask_codebase` is always visible in the catalog. It searches once the selected
 provider has at least one durable vector. If indexing is partial, it searches
-the covered files and labels the answer `INDEX INCOMPLETE`; `get_index_status`
-shows the missing coverage. With no durable vectors it returns a retryable
-status while warm-up is running. The other read-only tools remain available
-once the project root is validated.
+the covered files and labels the answer `INDEX INCOMPLETE`; the readiness check
+also detects missing stored vectors when an older stamp says `complete`.
+`get_index_status` shows the missing coverage. With no durable vectors it
+returns a retryable status while warm-up is running. The other read-only tools
+remain available once the project root is validated.
+
+Worktree search stacks changed files in memory and keeps the shared index
+read-only. New worktree embeddings are saved in `.umbra/worktree-embeddings.db`
+for reuse across processes. The pinned checkout uses the same overlay when it
+has uncommitted changes.
 
 ### GraphRAG, without a hidden agent
 
@@ -327,7 +333,8 @@ If a repository's declared source boundary needs an explicit override, commit an
 `list_adrs` also discovers module catalogs such as `docs/payments/adr/`; its
 optional `module` argument filters the result.
 
-The `.umbra/` directory, `memory.db` included, is local root-bound cache state.
+The `.umbra/` directory, including `memory.db` and `worktree-embeddings.db`, is
+local root-bound cache state.
 It is safe to delete and should be gitignored — `umbra init` adds that rule
 without rewriting existing ones.
 

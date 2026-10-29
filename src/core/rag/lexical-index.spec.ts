@@ -73,6 +73,23 @@ describe('lexical code index', () => {
     expect(findLexicalCandidates(db, 'pinProvider', 12)[0]?.chunkId).toBe('new');
   });
 
+  it('does not put a weak worktree match ahead of a stronger base match', () => {
+    ensureLexicalIndex(db);
+    db.exec(`
+      ATTACH DATABASE ':memory:' AS base;
+      CREATE VIRTUAL TABLE base.code_chunks_fts USING fts5(chunk_id UNINDEXED, file_path, metadata, content);
+      CREATE TABLE main.hidden_paths (path TEXT PRIMARY KEY);
+      INSERT INTO main.code_chunks_fts VALUES ('overlay-footer', 'src/footer.ts', '', 'payment');
+      INSERT INTO base.code_chunks_fts VALUES (
+        'base-payment', 'src/payments/invoice-payment-retry.service.ts',
+        '{"className":"InvoicePaymentRetryService"}',
+        'retry payment after payment failure; record payment attempt'
+      );
+    `);
+    expect(findLexicalCandidates(db, 'payment', 2).map((candidate) => candidate.chunkId))
+      .toEqual(['base-payment', 'overlay-footer']);
+  });
+
   it('replaces lexical text on a chunk update', () => {
     ensureLexicalIndex(db);
     db.prepare(`UPDATE code_chunks SET content = ? WHERE id = ?`).run(

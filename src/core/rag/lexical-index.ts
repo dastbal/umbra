@@ -130,19 +130,29 @@ export function findLexicalCandidates(
   if (expression === undefined) return [];
 
   if (isOverlayDatabase(db)) {
-    const search = (schema: 'main' | 'base'): { chunkId: string; rank: number }[] => db.prepare(`
-      SELECT chunk_id AS chunkId, bm25(code_chunks_fts, 0.0, 5.0, 1.0, 1.0) AS rank
+    const search = (schema: 'main' | 'base'): Array<LexicalCandidate & {
+      filePath: string; metadata: string; content: string;
+    }> => db.prepare(`
+      SELECT chunk_id AS chunkId, file_path AS filePath, metadata, content,
+             bm25(code_chunks_fts, 0.0, 5.0, 1.0, 1.0) AS rank
         FROM ${schema}.code_chunks_fts
        WHERE code_chunks_fts MATCH ?
          ${schema === 'base' ? 'AND file_path NOT IN (SELECT path FROM main.hidden_paths)' : ''}
        ORDER BY rank LIMIT ?
-    `).all(expression, limit) as { chunkId: string; rank: number }[];
+    `).all(expression, limit) as Array<LexicalCandidate & {
+      filePath: string; metadata: string; content: string;
+    }>;
+    const terms = lexicalTerms(query, 2).slice(0, MAX_QUERY_TERMS);
     const seen = new Set<string>();
     return [...search('main'), ...search('base')].filter((row) => {
       if (seen.has(row.chunkId)) return false;
       seen.add(row.chunkId);
       return true;
-    }).slice(0, limit);
+    }).map((row) => ({
+      chunkId: row.chunkId,
+      rank: -commonLexicalScore(row, terms),
+    })).sort((left, right) => left.rank - right.rank || left.chunkId.localeCompare(right.chunkId))
+      .slice(0, limit);
   }
 
   const rows = db
@@ -186,6 +196,26 @@ export function findLexicalCandidates(
     .all(expression, limit) as { chunkId: string; rank: number }[];
 
   return rows;
+}
+
+/** Scores both FTS tables with the same term evidence, independent of their corpus sizes. */
+function commonLexicalScore(
+  row: { filePath: string; metadata: string; content: string },
+  terms: readonly string[],
+): number {
+  const tokens = (value: string): string[] => value.toLocaleLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const pathTokens = tokens(row.filePath);
+  const metadataTokens = tokens(row.metadata);
+  const contentTokens = tokens(row.content);
+  let score = 0;
+  for (const term of terms) {
+    const pathHits = pathTokens.filter((token) => token === term).length;
+    const metadataHits = metadataTokens.filter((token) => token === term).length;
+    const contentHits = contentTokens.filter((token) => token === term).length;
+    if (pathHits + metadataHits + contentHits > 0) score += 2;
+    score += 5 * Math.min(pathHits, 2) + 3 * Math.min(metadataHits, 2) + Math.min(contentHits, 4);
+  }
+  return score;
 }
 
 /**

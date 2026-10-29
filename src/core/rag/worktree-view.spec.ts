@@ -288,6 +288,26 @@ describe('WorktreeViewService', () => {
     expect(embeddings.documents).toBe(documentsBefore);
   });
 
+  it('reuses new worktree vectors from disk after a fresh base connection', async () => {
+    const worktree = await views.resolve(linked);
+    const first = await views.read(worktree, { embed: true }, () => 'ok');
+    expect(first.worktree.chunksEmbedded).toBeGreaterThan(0);
+    views.close();
+    const freshProvider = countingEmbeddings();
+    views = new WorktreeViewService({
+      pinnedRoot: repo,
+      baseDb: new Database(dbPath, { readonly: true }),
+      ownsBaseDb: true,
+      dbPath,
+      embeddings: freshProvider,
+    });
+
+    const second = await views.read(worktree, { embed: true }, () => 'ok');
+    expect(second.worktree.chunksEmbedded).toBe(0);
+    expect(freshProvider.documents).toBe(0);
+    expect(fs.existsSync(agentPath(repo, 'worktree-embeddings.db'))).toBe(true);
+  });
+
   it('runs a search inside one macrotask once its query embedding is known', async () => {
     const worktree = await views.resolve(linked);
     const search = (scopeRead: WorktreeIndexScope['read']) => executeCodebaseSearch({ query: 'chargeback' }, { read: scopeRead });
@@ -434,6 +454,20 @@ describe('WorktreeViewService', () => {
       peer.exec('ROLLBACK');
       peer.close();
     }
+  });
+
+  it('serves uncommitted changes in the pinned checkout and reports the applied delta', async () => {
+    const filePath = path.join(repo, 'src/users/user.service.ts');
+    fs.writeFileSync(filePath, fs.readFileSync(filePath, 'utf8').replaceAll('findUserByEmail', 'localOnlyDecision'));
+    resetWorktreeDeltaCache();
+    const worktree = await views.resolve(repo);
+    const delta = await views.delta(worktree);
+    expect(delta.changed.map((file) => file.relativePath)).toContain('src/users/user.service.ts');
+    const answer = await views.read(worktree, { embed: true }, (view) =>
+      (view.db.prepare("SELECT COUNT(*) AS total FROM code_chunks WHERE content LIKE '%localOnlyDecision%'").get() as { total: number }).total);
+
+    expect(answer.result).toBeGreaterThan(0);
+    expect(answer.worktree).toMatchObject({ isPinnedRoot: true, changedFiles: 1, chunksEmbedded: expect.any(Number) });
   });
 });
 

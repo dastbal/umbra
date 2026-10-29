@@ -1,0 +1,48 @@
+{
+  "cases": 5,
+  "previousHitAt1": 3,
+  "currentHitAt1": 5,
+  "results": [
+    {
+      "name": "weak worktree mention, strong base implementation",
+      "expected": "base-payment",
+      "previousTop": "overlay-footer",
+      "currentTop": "base-payment",
+      "currentMs": 0.974,
+      "pass": true
+    },
+    {
+      "name": "strong worktree implementation, weak base mention",
+      "expected": "overlay-payment",
+      "previousTop": "overlay-payment",
+      "currentTop": "overlay-payment",
+      "currentMs": 0.184,
+      "pass": true
+    },
+    {
+      "name": "base covers both query terms",
+      "expected": "base-retry",
+      "previousTop": "overlay-mention",
+      "currentTop": "base-retry",
+      "currentMs": 0.277,
+      "pass": true
+    },
+    {
+      "name": "worktree path names the subject",
+      "expected": "overlay-path",
+      "previousTop": "overlay-path",
+      "currentTop": "overlay-path",
+      "currentMs": 0.167,
+      "pass": true
+    },
+    {
+      "name": "hidden base path is excluded",
+      "expected": "overlay-visible",
+      "previousTop": "overlay-visible",
+      "currentTop": "overlay-visible",
+      "currentMs": 0.215,
+      "pass": true
+    }
+  ],
+  "scope": "Five synthetic, labelled FTS cases; this does not establish live repository relevance or MCP latency."
+}

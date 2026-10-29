@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -7,7 +7,7 @@ import { NestChunker } from '../tools/ast/chunker';
 import type { ChunkMetadata, ChunkType } from '../types';
 import type { EmbeddingsIdentity, EmbeddingsPort } from './embeddings/embeddings.port';
 import { embeddingInputFor } from './embedding-input';
-import { EmbeddingCache } from './embedding-cache';
+import { EmbeddingCache, ensureEmbeddingCacheSchema } from './embedding-cache';
 import { analyzeSourceFile, type AnalyzedSourceFile } from './indexed-file-rows';
 import { PrismaSchemaChunker } from './prisma-schema-chunker';
 import { decodeVector } from './vector-codec';
@@ -86,17 +86,49 @@ export class WorktreeOverlayBuilder {
 
   private readonly persistentCache: EmbeddingCache;
 
+  private readonly cachePath: string;
+
+  private sideDb?: Database.Database;
+
   /**
    * @param embeddings - Provider whose identity the overlay's vectors must share with the base index.
    * @param baseDb - The base index, read for reusable vectors.
+   * @param dbPath - Base index path; the writable vector cache lives beside it.
    */
   public constructor(
     private readonly embeddings: EmbeddingsPort,
     private readonly baseDb: Database.Database,
+    dbPath: string,
   ) {
     this.persistentCache = new EmbeddingCache(baseDb);
+    this.cachePath = path.join(path.dirname(dbPath), 'worktree-embeddings.db');
     this.memo = memoByConnection.get(baseDb) ?? new Map<string, Float32Array>();
     memoByConnection.set(baseDb, this.memo);
+  }
+
+  /** Closes the separate cache without changing the base index connection. */
+  public close(): void {
+    this.sideDb?.close();
+    this.sideDb = undefined;
+  }
+
+  /** Opens the writable cache only after a new vector needs storing. */
+  private sideCache(): EmbeddingCache {
+    if (this.sideDb === undefined) {
+      if (fs.existsSync(this.cachePath) && !fs.lstatSync(this.cachePath).isFile()) {
+        throw new Error(`Worktree embedding cache is not a regular file: ${this.cachePath}`);
+      }
+      const db = new Database(this.cachePath, { timeout: 5_000 });
+      try {
+        db.pragma('journal_mode = WAL');
+        ensureEmbeddingCacheSchema(db);
+        this.sideDb = db;
+      } catch (error: unknown) {
+        db.close();
+        throw error;
+      }
+    }
+    return new EmbeddingCache(this.sideDb);
   }
 
   /**
@@ -216,9 +248,12 @@ export class WorktreeOverlayBuilder {
     const keys = inputs.map((input) => memoKey(identity, input));
     const fromBase = this.baseVectorsByInput(file.relativePath, identity);
     const fromPersistent = this.persistentCache.get(identity, inputs);
+    const fromSide = this.sideDb !== undefined || fs.existsSync(this.cachePath)
+      ? this.sideCache().get(identity, inputs)
+      : new Map<string, number[]>();
 
     const vectors: (readonly number[] | undefined)[] = inputs.map((input, index) => {
-      const known = this.memo.get(keys[index]!) ?? fromBase.get(input) ?? fromPersistent.get(input);
+      const known = this.memo.get(keys[index]!) ?? fromBase.get(input) ?? fromPersistent.get(input) ?? fromSide.get(input);
       if (known === undefined) return undefined;
       this.remember(keys[index]!, known instanceof Float32Array ? known : Float32Array.from(known));
       return Array.from(known);
@@ -232,6 +267,7 @@ export class WorktreeOverlayBuilder {
       if (result.length !== batch.length || result.some((vector) => vector.length !== identity.dimensions)) {
         throw new Error(`Embedding provider returned incompatible vectors for ${batch.length} worktree chunks of ${file.relativePath}.`);
       }
+      this.sideCache().put(identity, batch.map((index) => inputs[index]!), result);
       batch.forEach((index, position) => {
         vectors[index] = result[position]!;
         this.remember(keys[index]!, Float32Array.from(result[position]!));

@@ -36,4 +36,25 @@ describe('IndexFileLease', () => {
       lease?.release();
     }
   });
+
+  it('recovers an abandoned recovery marker and a stale heartbeat even when the PID exists', () => {
+    const directory = path.join(root, '.umbra', 'indexer.lease');
+    const recovery = `${directory}.recovery`;
+    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(recovery);
+    const oldTime = Date.now() - 10 * 60_000;
+    fs.writeFileSync(path.join(directory, 'owner.json'), JSON.stringify({
+      ownerId: 'orphan', pid: process.pid, startedAt: oldTime, heartbeatAt: oldTime, phase: 'indexing',
+    }));
+    const old = new Date(oldTime);
+    fs.utimesSync(recovery, old, old);
+
+    const lease = IndexFileLease.acquire(root);
+    try {
+      expect(lease).toBeDefined();
+      expect(inspectIndexFileLease(root)).toMatchObject({ active: true, stale: false, pid: process.pid });
+    } finally {
+      lease?.release();
+    }
+  });
 });
