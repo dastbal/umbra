@@ -162,7 +162,7 @@ unavailable result during provider probing is intentional and retryable.
 ## Connect it, in three commands
 
 ```bash
-npm install -g @dastbal/umbra     # needs a published version; see the note below
+npm install -g @dastbal/umbra
 ollama pull nomic-embed-text      # the embedding model — local, free, one time
 umbra setup mcp                   # detects Codex and Claude, asks before changing anything
 ```
@@ -181,8 +181,8 @@ umbra setup claude    # Claude only
 ```
 
 **Needs 2.2.0 or later.** Earlier published versions have no `mcp` subcommand at
-all. This repository's unpublished release candidate is not installed by
-`npm install -g @dastbal/umbra` — pass a version that exists on npm.
+all. `npm install -g @dastbal/umbra` installs the version tagged `latest` on
+npm; pass an explicit version to pin a release.
 
 ### How it finds your project
 
