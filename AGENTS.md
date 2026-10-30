@@ -63,6 +63,10 @@ Never edit these files — they are read-only guidelines.
 
 ## Key commands
 
+For a Codex-led npm release from WSL, follow
+[`docs/npm-release-codex.md`](docs/npm-release-codex.md); verify the current
+version and registry state instead of reusing the 2.4.2 release values.
+
 ```bash
 # Run the agent
 npm run agent -- deep                         # ephemeral session
