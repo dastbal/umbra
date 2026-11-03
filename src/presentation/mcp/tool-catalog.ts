@@ -114,10 +114,15 @@ function publishListAdrs(): PublishedTool {
 }
 
 function publishDependencyGraph(): PublishedTool {
-  const failure = (message: string) => toStructuredToolResult(dependencyGraphResultSchema, {
-    schemaVersion: 1, status: 'blocked', code: 'DEPENDENCY_GRAPH_ERROR', summary: 'The dependency graph is unavailable.',
-    data: { filePath: '', direction: 'outbound', relations: [] }, evidence: [], diagnostics: diagnostic(message, 'DEPENDENCY_GRAPH_ERROR'), truncated: false, retryable: false,
+  const failure = (message: string, reason?: string) => {
+    const code = reason === 'WORKTREE_NOT_A_GIT_REPO' || reason === 'WORKTREE_OUTSIDE_REPOSITORY'
+      ? reason : 'DEPENDENCY_GRAPH_ERROR';
+    return toStructuredToolResult(dependencyGraphResultSchema, {
+    schemaVersion: 1, status: 'blocked', code,
+    summary: code === 'DEPENDENCY_GRAPH_ERROR' ? 'The dependency graph is unavailable.' : message,
+    data: { filePath: '', direction: 'outbound', relations: [] }, evidence: [], diagnostics: diagnostic(message, code), truncated: false, retryable: false,
   });
+  };
   return {
     name: 'query_dependency_graph', title: 'Query file dependencies',
     description: 'Finds inbound or outbound TypeScript file dependencies in the authorized project.',
@@ -128,7 +133,7 @@ function publishDependencyGraph(): PublishedTool {
       const query = { filePath: input.filePath, direction: input.direction };
       if (input.worktree === undefined) return toStructuredToolResult(dependencyGraphResultSchema, executeDependencyGraph(query));
       const selection = await selectWorktree(input.worktree);
-      if (!selection.ok) return failure(selection.message);
+      if (!selection.ok) return failure(selection.message, selection.code);
       try {
         // Graph rows only: edges need no vectors, so no embedding provider is involved.
         const { result, worktree } = await selection.views.read(selection.worktree, { embed: false }, (view) => executeDependencyGraph(query, { db: view.db }));
@@ -149,10 +154,15 @@ function publishDependencyGraph(): PublishedTool {
 }
 
 function publishNestGraph(): PublishedTool {
-  const failure = (message: string) => toStructuredToolResult(nestGraphResultSchema, {
-    schemaVersion: 1, status: 'blocked', code: 'NEST_GRAPH_ERROR', summary: 'The NestJS graph is unavailable.',
-    data: { name: '', normalizedName: '', direction: 'module', bindings: [], injections: [] }, evidence: [], diagnostics: diagnostic(message, 'NEST_GRAPH_ERROR'), truncated: false, retryable: false,
+  const failure = (message: string, reason?: string) => {
+    const code = reason === 'WORKTREE_NOT_A_GIT_REPO' || reason === 'WORKTREE_OUTSIDE_REPOSITORY'
+      ? reason : 'NEST_GRAPH_ERROR';
+    return toStructuredToolResult(nestGraphResultSchema, {
+    schemaVersion: 1, status: 'blocked', code,
+    summary: code === 'NEST_GRAPH_ERROR' ? 'The NestJS graph is unavailable.' : message,
+    data: { name: '', normalizedName: '', direction: 'module', bindings: [], injections: [] }, evidence: [], diagnostics: diagnostic(message, code), truncated: false, retryable: false,
   });
+  };
   return {
     name: 'query_nest_graph', title: 'Query NestJS wiring',
     description: 'Finds providers, injection consumers, or module bindings in the authorized project.',
@@ -163,7 +173,7 @@ function publishNestGraph(): PublishedTool {
       const query = { name: input.name, direction: input.direction };
       if (input.worktree === undefined) return toStructuredToolResult(nestGraphResultSchema, executeNestGraph(query));
       const selection = await selectWorktree(input.worktree);
-      if (!selection.ok) return failure(selection.message);
+      if (!selection.ok) return failure(selection.message, selection.code);
       try {
         const { result, worktree } = await selection.views.read(selection.worktree, { embed: false }, (view) => executeNestGraph(query, { db: view.db }));
         return toStructuredToolResult(nestGraphResultSchema, { ...result, worktree });

@@ -65,7 +65,8 @@ export const dependencyGraphDataSchema = z.object({
   suggestedPaths: z.array(z.string()).optional(),
 });
 export const dependencyGraphResultSchema = createToolResultSchema(
-  z.enum(['DEPENDENCIES_FOUND', 'NO_DEPENDENCIES', 'FILE_NOT_INDEXED', 'DEPENDENCY_GRAPH_ERROR']),
+  z.enum(['DEPENDENCIES_FOUND', 'NO_DEPENDENCIES', 'FILE_NOT_INDEXED', 'DEPENDENCY_GRAPH_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
   dependencyGraphDataSchema,
 );
 export type DependencyGraphData = z.infer<typeof dependencyGraphDataSchema>;
@@ -83,7 +84,8 @@ export const nestGraphDataSchema = z.object({
   bindings: z.array(nestBindingSchema), injections: z.array(nestInjectionSchema),
 });
 export const nestGraphResultSchema = createToolResultSchema(
-  z.enum(['NEST_BINDINGS_FOUND', 'NO_NEST_BINDINGS', 'NEST_GRAPH_ERROR']),
+  z.enum(['NEST_BINDINGS_FOUND', 'NO_NEST_BINDINGS', 'NEST_GRAPH_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
   nestGraphDataSchema,
 );
 export type NestGraphData = z.infer<typeof nestGraphDataSchema>;
