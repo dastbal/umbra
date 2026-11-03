@@ -247,7 +247,22 @@ export function executeIndexStatus(rootDir: string | undefined, lifecycle: Index
     const integrity = inspectIndexIntegrity(rootDir, stamp === undefined ? undefined : { provider: stamp.provider, model: stamp.model });
     if (stamp !== undefined) data.stamp = { provider: stamp.provider, model: stamp.model, dimensions: stamp.dimensions, indexedAt: stamp.indexedAt, filesIndexed: stamp.filesIndexed, status: stamp.status };
     data.integrity = { healthy: integrity.healthy, databaseExists: integrity.databaseExists, schemaValid: integrity.schemaValid, discoveryValid: integrity.discoveryValid, discoveredFiles: integrity.discoveredFiles, files: integrity.files, indexedFiles: integrity.indexedFiles, skippedFiles: integrity.skippedFiles, skipped: [...integrity.skipped], chunks: integrity.chunks, missingVectors: integrity.missingVectors, pendingPaths: [...integrity.pendingPaths], stalePaths: [...integrity.stalePaths], ...(integrity.diagnostic === undefined ? {} : { diagnostic: integrity.diagnostic }) };
-    return { schemaVersion: 1, status: integrity.healthy ? 'success' : 'partial', code: integrity.healthy ? 'INDEX_STATUS_READY' : 'INDEX_STATUS_DEGRADED', summary: integrity.healthy ? 'The code index has complete usable coverage.' : 'The code index is inspectable but has coverage or integrity limitations.', data, evidence: [], diagnostics: integrity.diagnostic === undefined ? [] : [{ severity: 'warning', code: 'INDEX_INTEGRITY', message: integrity.diagnostic }], truncated: false, retryable: false };
+    const limitations = [
+      ...(integrity.pendingPaths.length === 0 ? [] : [`${integrity.pendingPaths.length} pending path(s)`]),
+      ...(integrity.stalePaths.length === 0 ? [] : [`${integrity.stalePaths.length} stale path(s)`]),
+      ...(integrity.missingVectors === 0 ? [] : [`${integrity.missingVectors} missing vector(s)`]),
+      ...(integrity.databaseExists ? [] : ['database missing']),
+      ...(integrity.schemaValid ? [] : ['schema invalid']),
+      ...(integrity.discoveryValid ? [] : ['source discovery invalid']),
+    ];
+    const summary = integrity.healthy ? 'The code index has complete usable coverage.'
+      : `The code index is degraded: ${limitations.join(', ') || integrity.diagnostic || 'integrity check failed'}.`;
+    if (!integrity.healthy) data.lifecycle = { ...lifecycle, message: `${lifecycle.message} ${summary}` };
+    return { schemaVersion: 1, status: integrity.healthy ? 'success' : 'partial',
+      code: integrity.healthy ? 'INDEX_STATUS_READY' : 'INDEX_STATUS_DEGRADED', summary, data, evidence: [],
+      diagnostics: integrity.healthy ? [] : [{ severity: 'warning', code: 'INDEX_INTEGRITY', message: integrity.diagnostic ?? summary }],
+      truncated: false, retryable: false,
+      ...(!integrity.healthy ? { nextAction: 'Run umbra index for the served root, then check get_index_status again.' } : {}) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { schemaVersion: 1, status: 'error', code: 'INDEX_STATUS_ERROR', summary: 'Index status inspection failed.', data, evidence: [], diagnostics: [{ severity: 'error', code: 'INDEX_STATUS_ERROR', message }], truncated: false, retryable: false };
