@@ -285,7 +285,7 @@ describe('MCP worktree selection (ADR-038)', () => {
       .sort();
 
     expect(selecting).toEqual([
-      'ask_codebase', 'get_index_status', 'inspect_project', 'query_dependency_graph', 'query_nest_graph', 'search_workspace',
+      'ask_codebase', 'get_index_status', 'inspect_project', 'query_dependency_graph', 'query_nest_graph', 'search_workspace', 'trace_change_impact',
     ]);
     for (const tool of catalog().filter((candidate) => candidate.inputSchema.worktree !== undefined)) {
       expect(z.object({ worktree: tool.inputSchema.worktree! }).safeParse({}).success).toBe(true);

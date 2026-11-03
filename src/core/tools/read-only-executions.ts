@@ -73,6 +73,22 @@ export const dependencyGraphResultSchema = createToolResultSchema(
 export type DependencyGraphData = z.infer<typeof dependencyGraphDataSchema>;
 export type DependencyGraphResult = ToolResult<z.infer<typeof dependencyGraphResultSchema>['code'], DependencyGraphData>;
 
+const impactEntrySchema = z.object({
+  path: z.string(), kind: z.enum(['import', 'injection', 'binding']), depth: z.number(),
+  relation: z.string().optional(), token: z.string().optional(), consumer: z.string().optional(), module: z.string().optional(),
+});
+export const changeImpactDataSchema = z.object({
+  filePath: z.string(), depth: z.number(), symbols: z.array(z.string()), affected: z.array(impactEntrySchema),
+  suggestedPaths: z.array(z.string()).optional(),
+});
+export const changeImpactResultSchema = createToolResultSchema(
+  z.enum(['IMPACT_FOUND', 'NO_IMPACT', 'FILE_NOT_INDEXED', 'IMPACT_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
+  changeImpactDataSchema,
+);
+export type ChangeImpactData = z.infer<typeof changeImpactDataSchema>;
+export type ChangeImpactResult = ToolResult<z.infer<typeof changeImpactResultSchema>['code'], ChangeImpactData>;
+
 const nestBindingSchema = z.object({
   filePath: z.string(), module: z.string(), kind: z.string(), token: z.string(),
   useKind: z.string().optional(), dynamic: z.boolean(),
@@ -420,6 +436,96 @@ export function executeDependencyGraph(input: {
     return { schemaVersion: 1, status: 'error', code: 'DEPENDENCY_GRAPH_ERROR',
       summary: 'The dependency graph query failed.', data, evidence: [],
       diagnostics: [{ severity: 'error', code: 'DEPENDENCY_GRAPH_ERROR', message }],
+      truncated: false, retryable: false };
+  }
+}
+
+/**
+ * Traces bounded file importers and Nest consumers of classes declared in one indexed file.
+ * This is structural impact evidence, not proof that a runtime path executes.
+ */
+export function executeChangeImpact(
+  input: { filePath: string; depth?: number },
+  options: { readonly db?: Database.Database } = {},
+): ChangeImpactResult {
+  const depth = Math.min(4, Math.max(1, Math.trunc(input.depth ?? 2)));
+  const filePath = input.filePath.replaceAll('\\', '/');
+  const data: ChangeImpactData = { filePath, depth, symbols: [], affected: [] };
+  try {
+    const db = options.db ?? AgentDB.getInstance();
+    const registered = db.prepare('SELECT 1 FROM file_registry WHERE path = ? LIMIT 1').get(filePath);
+    if (registered === undefined) {
+      const basename = path.posix.basename(filePath);
+      const paths = basename === '' ? [] : db.prepare(
+        'SELECT path FROM file_registry WHERE instr(path, ?) > 0 ORDER BY length(path), path LIMIT 8',
+      ).all(basename) as Array<{ path: string }>;
+      data.suggestedPaths = paths.map((row) => row.path);
+      return { schemaVersion: 1, status: 'empty', code: 'FILE_NOT_INDEXED',
+        summary: `${filePath} is not in the served checkout's code index.`, data,
+        evidence: [], diagnostics: [], truncated: false, retryable: false,
+        nextAction: data.suggestedPaths.length > 0 ? `Try: ${data.suggestedPaths.join(', ')}.` : 'Check the served root and file path.' };
+    }
+    const seen = new Set([filePath]);
+    const queue: Array<{ path: string; depth: number }> = [{ path: filePath, depth: 0 }];
+    let truncated = false;
+    for (let i = 0; i < queue.length && !truncated; i++) {
+      const current = queue[i];
+      if (current.depth >= depth) continue;
+      const importers = db.prepare(
+        'SELECT source AS path, relation FROM dependency_graph WHERE target = ? ORDER BY source LIMIT 101',
+      ).all(current.path) as Array<{ path: string; relation: string }>;
+      if (importers.length > 100) truncated = true;
+      for (const importer of importers) {
+        if (seen.has(importer.path)) continue;
+        if (data.affected.length >= 100) { truncated = true; break; }
+        seen.add(importer.path);
+        data.affected.push({ path: importer.path, kind: 'import', depth: current.depth + 1, relation: importer.relation });
+        queue.push({ path: importer.path, depth: current.depth + 1 });
+      }
+    }
+    const chunks = db.prepare('SELECT metadata FROM code_chunks WHERE file_path = ? LIMIT 100').all(filePath) as Array<{ metadata: string | null }>;
+    const symbols = new Set<string>();
+    for (const chunk of chunks) {
+      if (chunk.metadata === null) continue;
+      try {
+        const metadata: unknown = JSON.parse(chunk.metadata);
+        if (typeof metadata === 'object' && metadata !== null && 'className' in metadata
+          && typeof metadata.className === 'string') symbols.add(metadata.className);
+      } catch { /* Malformed legacy metadata cannot turn a graph read into an error. */ }
+    }
+    data.symbols = [...symbols].sort();
+    for (const symbol of data.symbols) {
+      const injections = db.prepare(
+        'SELECT file_path AS path, consumer FROM nest_injections WHERE token = ? ORDER BY file_path LIMIT 101',
+      ).all(symbol) as Array<{ path: string; consumer: string }>;
+      const bindings = db.prepare(
+        'SELECT file_path AS path, module FROM nest_bindings WHERE token = ? ORDER BY file_path LIMIT 101',
+      ).all(symbol) as Array<{ path: string; module: string }>;
+      if (injections.length > 100 || bindings.length > 100) truncated = true;
+      for (const injection of injections) {
+        if (data.affected.length >= 100) { truncated = true; break; }
+        data.affected.push({ path: injection.path, kind: 'injection', depth: 1, token: symbol, consumer: injection.consumer });
+      }
+      for (const binding of bindings) {
+        if (data.affected.length >= 100) { truncated = true; break; }
+        data.affected.push({ path: binding.path, kind: 'binding', depth: 1, token: symbol, module: binding.module });
+      }
+    }
+    if (data.affected.length === 0) {
+      return { schemaVersion: 1, status: 'empty', code: 'NO_IMPACT',
+        summary: `No indexed importers or Nest consumers found for ${filePath}.`, data,
+        evidence: [], diagnostics: [], truncated: false, retryable: false };
+    }
+    return { schemaVersion: 1, status: truncated ? 'partial' : 'success', code: 'IMPACT_FOUND',
+      summary: `${data.affected.length} structural impact relation(s) found for ${filePath}.`, data,
+      evidence: data.affected.map((item) => ({ path: item.path, reason: item.kind === 'import'
+        ? `imports through depth ${item.depth}` : `${item.kind} of ${item.token}` })),
+      diagnostics: [], truncated, retryable: false,
+      ...(truncated ? { nextAction: 'Narrow the file or depth; the impact result reached its bound.' } : {}) };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { schemaVersion: 1, status: 'error', code: 'IMPACT_ERROR', summary: 'Change impact could not be traced.',
+      data, evidence: [], diagnostics: [{ severity: 'error', code: 'IMPACT_ERROR', message }],
       truncated: false, retryable: false };
   }
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
-  adrCatalogResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
-  executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
+  adrCatalogResultSchema, changeImpactResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
+  executeChangeImpact, executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
   executeProjectInventory, executeWorkspaceSearch,
   executeNestGraph, integrityResultSchema, nestGraphResultSchema,
   graphRagInvestigationResultSchema,
@@ -147,6 +147,45 @@ function publishDependencyGraph(): PublishedTool {
           diagnostics: [{ severity: 'warning', code: 'WORKTREE_OVERLAY_BUSY', message }], truncated: false, retryable: true,
           nextAction: 'Retry the same call in a moment.',
         });
+      }
+    },
+    rootUnavailable: failure,
+  };
+}
+
+/** Publishes one bounded import-and-injection impact read over the selected checkout. */
+function publishChangeImpact(): PublishedTool {
+  const failure = (message: string, reason?: string) => {
+    const code = reason === 'WORKTREE_NOT_A_GIT_REPO' || reason === 'WORKTREE_OUTSIDE_REPOSITORY'
+      ? reason : 'IMPACT_ERROR';
+    return toStructuredToolResult(changeImpactResultSchema, {
+      schemaVersion: 1, status: 'blocked', code,
+      summary: code === 'IMPACT_ERROR' ? 'Change impact is unavailable.' : message,
+      data: { filePath: '', depth: 2, symbols: [], affected: [] }, evidence: [],
+      diagnostics: diagnostic(message, code), truncated: false, retryable: false,
+    });
+  };
+  return {
+    name: 'trace_change_impact', title: 'Trace structural change impact',
+    description: 'In one bounded read, follows inbound file imports and Nest injection/binding consumers for classes declared in an indexed file. Structural evidence, not runtime execution proof.',
+    inputSchema: {
+      filePath: z.string().min(1).describe('Indexed repository-relative TypeScript file path.'),
+      depth: z.number().int().min(1).max(4).optional().describe('Maximum inbound import depth; defaults to two.'),
+      worktree: worktreeArgument,
+    },
+    outputSchema: changeImpactResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ filePath: z.string().min(1), depth: z.number().int().min(1).max(4).optional(), worktree: worktreeArgument }).parse(args);
+      const query = { filePath: input.filePath, ...(input.depth === undefined ? {} : { depth: input.depth }) };
+      if (input.worktree === undefined) return toStructuredToolResult(changeImpactResultSchema, executeChangeImpact(query));
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return failure(selection.message, selection.code);
+      try {
+        const { result, worktree } = await selection.views.read(selection.worktree, { embed: false },
+          (view) => executeChangeImpact(query, { db: view.db }));
+        return toStructuredToolResult(changeImpactResultSchema, { ...result, worktree });
+      } catch (error: unknown) {
+        return failure(error instanceof Error ? error.message : String(error));
       }
     },
     rootUnavailable: failure,
@@ -397,7 +436,7 @@ export function buildToolCatalog(options: {
         });
       }
     },
-  }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
+  }, publishListAdrs(), publishDependencyGraph(), publishChangeImpact(), publishNestGraph(), publishIntegrityCheck()];
   if (options.projectRootReady === undefined) return catalog;
   const rooted = catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args: Record<string, unknown>) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
   return options.conversationService === undefined
