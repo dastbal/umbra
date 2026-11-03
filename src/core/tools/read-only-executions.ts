@@ -57,9 +57,10 @@ export type AdrCatalogResult = ToolResult<z.infer<typeof adrCatalogResultSchema>
 const dependencyRelationSchema = z.object({ path: z.string(), relation: z.string() });
 export const dependencyGraphDataSchema = z.object({
   filePath: z.string(), direction: z.enum(['inbound', 'outbound']), relations: z.array(dependencyRelationSchema),
+  suggestedPaths: z.array(z.string()).optional(),
 });
 export const dependencyGraphResultSchema = createToolResultSchema(
-  z.enum(['DEPENDENCIES_FOUND', 'NO_DEPENDENCIES', 'DEPENDENCY_GRAPH_ERROR']),
+  z.enum(['DEPENDENCIES_FOUND', 'NO_DEPENDENCIES', 'FILE_NOT_INDEXED', 'DEPENDENCY_GRAPH_ERROR']),
   dependencyGraphDataSchema,
 );
 export type DependencyGraphData = z.infer<typeof dependencyGraphDataSchema>;
@@ -335,6 +336,20 @@ export function executeDependencyGraph(input: {
     const relations = db.prepare(sql).all(normalizedPath, input.filePath) as Array<{ path: string; relation: string }>;
     data.relations = relations;
     if (relations.length === 0) {
+      const indexed = db.prepare('SELECT 1 FROM file_registry WHERE path = ? LIMIT 1').get(normalizedPath);
+      if (indexed === undefined) {
+        const basename = path.posix.basename(normalizedPath);
+        const candidates = basename === '' ? [] : db.prepare(
+          'SELECT path FROM file_registry WHERE instr(path, ?) > 0 ORDER BY length(path), path LIMIT 8',
+        ).all(basename) as Array<{ path: string }>;
+        data.suggestedPaths = candidates.map((candidate) => candidate.path);
+        return { schemaVersion: 1, status: 'empty', code: 'FILE_NOT_INDEXED',
+          summary: `${input.filePath} is not in the served checkout's code index.`, data,
+          evidence: [], diagnostics: [], truncated: false, retryable: false,
+          nextAction: data.suggestedPaths.length > 0
+            ? `Try an indexed path: ${data.suggestedPaths.join(', ')}.`
+            : 'Check the served repository and file path before inferring that no dependencies exist.' };
+      }
       return { schemaVersion: 1, status: 'empty', code: 'NO_DEPENDENCIES',
         summary: `No ${input.direction} dependencies found for ${input.filePath}.`, data,
         evidence: [], diagnostics: [], truncated: false, retryable: false };
