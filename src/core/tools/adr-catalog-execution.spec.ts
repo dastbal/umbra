@@ -38,6 +38,14 @@ describe('bounded ADR catalog answers', () => {
     expect(result.truncated).toBe(false);
   });
 
+  it('does not call an out-of-range page an empty catalog', () => {
+    const result = executeListAdrs({ offset: 100 }, root);
+    expect(result).toMatchObject({
+      code: 'ADR_NO_MATCHES', status: 'empty', data: { total: 35 },
+    });
+    expect(result.summary).toContain('offset 100');
+  });
+
   it('filters tags from a human-maintained INDEX.md', () => {
     fs.writeFileSync(path.join(root, 'docs', 'adr', 'INDEX.md'), [
       '| ADR | Title | Status | Date | Tags |',

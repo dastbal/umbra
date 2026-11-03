@@ -366,6 +366,12 @@ export function executeListAdrs(
         summary: 'No ADRs match the requested filters.', data, evidence: [], diagnostics: [],
         truncated: false, retryable: false, nextAction: 'Broaden the query, tags, or module filter.' };
     }
+    if (page.length === 0) {
+      return { schemaVersion: 1, status: 'empty', code: 'ADR_NO_MATCHES',
+        summary: `No ADR page begins at offset ${offset}; ${entries.length} ADRs match.`, data,
+        evidence: [], diagnostics: [], truncated: false, retryable: false,
+        nextAction: 'Retry list_adrs with offset 0 or an earlier offset.' };
+    }
     return { schemaVersion: 1, status: 'success', code: 'ADR_CATALOG_READY',
       summary: `${entries.length} Architecture Decision Record${entries.length === 1 ? '' : 's'} match; showing ${page.length} from offset ${offset}.`,
       data, evidence: page.map((entry) => ({ path: entry.path, reason: entry.context })),
