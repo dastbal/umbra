@@ -151,7 +151,8 @@ export const codebaseSearchDataSchema = z.object({
   retrieval: retrievalStrategySchema.optional(),
 });
 export const codebaseSearchResultSchema = createToolResultSchema(
-  z.enum(['CODEBASE_MATCHES_FOUND', 'CODEBASE_NO_EVIDENCE', 'CODEBASE_INDEX_UNAVAILABLE', 'CODEBASE_SEARCH_ERROR']),
+  z.enum(['CODEBASE_MATCHES_FOUND', 'CODEBASE_NO_EVIDENCE', 'CODEBASE_INDEX_UNAVAILABLE', 'CODEBASE_SEARCH_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
   codebaseSearchDataSchema,
 );
 export type CodebaseSearchData = z.infer<typeof codebaseSearchDataSchema>;

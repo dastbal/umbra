@@ -235,7 +235,19 @@ function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): Publi
       const search = { query: input.query, ...(input.context === undefined ? {} : { context: input.context }) };
       if (input.worktree === undefined) return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(search)).result);
       const selection = await selectWorktree(input.worktree);
-      if (!selection.ok) return unavailable(selection.message);
+      if (!selection.ok) {
+        const code = selection.code === 'WORKTREE_NOT_A_GIT_REPO' || selection.code === 'WORKTREE_OUTSIDE_REPOSITORY'
+          ? selection.code : 'CODEBASE_INDEX_UNAVAILABLE';
+        return toStructuredToolResult(codebaseSearchResultSchema, {
+          schemaVersion: 1, status: 'blocked', code,
+          summary: code === 'CODEBASE_INDEX_UNAVAILABLE' ? 'Semantic search is unavailable.' : selection.message,
+          data: { ...emptyData, query: input.query }, evidence: [], diagnostics: diagnostic(selection.message, code),
+          truncated: false, retryable: false,
+          nextAction: code === 'CODEBASE_INDEX_UNAVAILABLE'
+            ? 'Read get_index_status and retry after durable coverage is ready.'
+            : 'Use a session whose Umbra server serves the requested repository.',
+        });
+      }
       const scope: WorktreeIndexScope = { read: (read) => selection.views.read(selection.worktree, { embed: true }, read) };
       return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(search, scope)).result);
     },

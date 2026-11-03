@@ -224,6 +224,27 @@ describe('MCP worktree selection (ADR-038)', () => {
     }
   });
 
+  it('does not blame semantic coverage when ask_codebase names another repository', async () => {
+    const selected = jest.spyOn(worktreeArguments, 'selectWorktree').mockResolvedValue({
+      ok: false, code: 'WORKTREE_OUTSIDE_REPOSITORY',
+      message: 'Umbra serves /repo/a; open a session serving /repo/b.',
+    });
+    try {
+      const tool = buildToolCatalog({
+        semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
+        readIndexStatus: () => indexStatus(),
+      }).find((candidate) => candidate.name === 'ask_codebase');
+      const answer = await tool?.invoke({ query: 'where is this?', worktree: '/repo/b' });
+      expect(answer?.structuredContent).toMatchObject({
+        code: 'WORKTREE_OUTSIDE_REPOSITORY',
+        summary: expect.stringContaining('Umbra serves /repo/a'),
+      });
+      expect(answer?.structuredContent).not.toHaveProperty('nextAction', expect.stringContaining('get_index_status'));
+    } finally {
+      selected.mockRestore();
+    }
+  });
+
   it('uses index-prefixed live paths and omits counts a live scan did not compute', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-live-worktree-'));
     fs.mkdirSync(path.join(root, 'components'));
