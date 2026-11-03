@@ -279,10 +279,19 @@ export function executeListAdrs(
   });
   try {
     const catalog = buildAdrIndex(rootDir, input.refresh === true);
-    const availableModules = [...new Set(catalog.entries.map((entry) => entry.module))].sort();
+    const availableModules = [...new Set(catalog.entries.flatMap((entry) => [entry.module, ...(entry.tags ?? [])]))].sort();
+    const requested = input.module?.toLocaleLowerCase();
+    const exact = availableModules.find((module) => module.toLocaleLowerCase() === requested);
+    const stem = (value: string): string => value.replace(/s$/, '');
+    const aliases = requested === undefined || exact !== undefined ? [] : availableModules.filter((module) =>
+      stem(module.split('-')[0].toLocaleLowerCase()) === stem(requested),
+    );
+    const selectedModule = exact ?? (aliases.length === 1 ? aliases[0] : undefined);
+    const matchesModule = (entry: AdrIndexEntry, module: string): boolean =>
+      entry.module === module || (entry.tags ?? []).includes(module);
     const scoped = input.module === undefined
       ? catalog.entries
-      : catalog.entries.filter((entry) => entry.module === input.module);
+      : catalog.entries.filter((entry) => selectedModule !== undefined && matchesModule(entry, selectedModule));
     const query = input.query?.trim().toLocaleLowerCase();
     const tags = input.tags?.map((tag) => tag.toLocaleLowerCase()) ?? [];
     const entries = scoped.filter((entry) =>
@@ -290,8 +299,8 @@ export function executeListAdrs(
         [entry.id, entry.title, entry.path, entry.context].some((value) => value.toLocaleLowerCase().includes(query)))
       && (tags.length === 0 || tags.some((tag) => entry.tags?.some((candidate) => candidate.toLocaleLowerCase() === tag))),
     );
-    const moduleCounts = [...new Set(entries.map((entry) => entry.module))].sort().map((module) => ({
-      module, count: entries.filter((entry) => entry.module === module).length,
+    const moduleCounts = [...new Set(entries.flatMap((entry) => [entry.module, ...(entry.tags ?? [])]))].sort().map((module) => ({
+      module, count: entries.filter((entry) => matchesModule(entry, module)).length,
     }));
     const offset = Math.max(0, Math.trunc(input.offset ?? 0));
     const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 10)));

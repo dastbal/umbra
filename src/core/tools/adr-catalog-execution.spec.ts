@@ -48,5 +48,8 @@ describe('bounded ADR catalog answers', () => {
     const result = executeListAdrs({ tags: ['crm-events'] }, root);
     expect(result.data.entries.map((entry) => entry.id)).toEqual(['ADR-025']);
     expect(result.data.entries[0].tags).toEqual(['financing', 'crm-events']);
+    const moduleResult = executeListAdrs({ module: 'crm-events' }, root);
+    expect(moduleResult.code).toBe('ADR_CATALOG_READY');
+    expect(moduleResult.data.entries.map((entry) => entry.id)).toEqual(['ADR-025']);
   });
 });
