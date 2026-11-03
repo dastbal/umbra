@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { z } from 'zod';
 
@@ -149,10 +150,11 @@ export const codebaseSearchDataSchema = z.object({
   // deterministic planner can observe an index. Successful and abstained
   // searches always carry this additive strategy projection.
   retrieval: retrievalStrategySchema.optional(),
+  coverage: z.object({ root: z.string(), sourceKinds: z.array(z.string()), markdownIndexed: z.boolean() }).optional(),
 });
 export const codebaseSearchResultSchema = createToolResultSchema(
   z.enum(['CODEBASE_MATCHES_FOUND', 'CODEBASE_NO_EVIDENCE', 'CODEBASE_INDEX_UNAVAILABLE', 'CODEBASE_SEARCH_ERROR',
-    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY', 'CODEBASE_SCOPE_UNSUPPORTED']),
   codebaseSearchDataSchema,
 );
 export type CodebaseSearchData = z.infer<typeof codebaseSearchDataSchema>;
@@ -678,6 +680,18 @@ export interface WorktreeIndexScope {
   read<T>(read: (view: OverlayView) => Promise<T>): Promise<{ result: T; worktree: ToolWorktree }>;
 }
 
+/** Detects explicit paths that the semantic TypeScript/Prisma index cannot answer about. */
+function unsupportedCodebaseScope(query: string, root: string): 'outside' | 'markdown' | undefined {
+  for (const match of query.matchAll(/(?:~\/|\/home\/|\/mnt\/)[^\s,;)\]"']+/g)) {
+    const raw = match[0].replace(/[.?!]+$/, '');
+    const absolute = raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
+    const resolved = path.resolve(absolute);
+    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return 'outside';
+  }
+  if (/\b[\w./-]+\.md\b/i.test(query)) return 'markdown';
+  return undefined;
+}
+
 /** Searches the code index and retains evidence before model formatting. */
 export async function executeCodebaseSearch(input: {
   query: string; context?: string;
@@ -687,6 +701,23 @@ export async function executeCodebaseSearch(input: {
     recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
   };
   try {
+    const root = runtimeRoot();
+    const unsupported = unsupportedCodebaseScope(input.query, root);
+    if (unsupported !== undefined) {
+      const summary = unsupported === 'outside'
+        ? `Umbra serves ${root}; the named path is outside this repository's code index.`
+        : `Umbra serves ${root}; Markdown is not in its semantic code index.`;
+      const nextAction = unsupported === 'outside'
+        ? 'Open another session whose Umbra server serves the named repository.'
+        : 'Use search_workspace with a path for Markdown in this repository.';
+      const result: CodebaseSearchResult = {
+        schemaVersion: 1, status: 'abstained', code: 'CODEBASE_SCOPE_UNSUPPORTED', summary,
+        data: { ...emptyData, coverage: { root, sourceKinds: ['typescript', 'prisma-schema'], markdownIndexed: false } },
+        evidence: [], diagnostics: [{ severity: 'warning', code: 'CODEBASE_SCOPE_UNSUPPORTED', message: summary }],
+        truncated: false, retryable: false, nextAction,
+      };
+      return { result, modelContent: `${summary} ${nextAction}` };
+    }
     const stamp = readIndexStamp(runtimeRoot());
     if (stamp?.status === 'empty') {
       const message = stamp.diagnostic ?? 'No indexable source files were discovered.';
