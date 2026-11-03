@@ -91,10 +91,24 @@ function publishListAdrs(): PublishedTool {
     // claim but spends the cache ADR-003/004 exist to keep, on the startup path
     // ADR-024 already records as painful. Declaring the truth costs one prompt.
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'Lists repository ADR metadata and optional module matches. Returns no ADR bodies.',
-    inputSchema: { refresh: z.boolean().optional().describe('Rebuild the cached catalog.'), module: z.string().min(1).optional().describe('Optional discovered ADR module.') },
+    description: 'Lists a bounded page of ADR metadata with module counts, text and tag filters. Returns no ADR bodies.',
+    inputSchema: {
+      refresh: z.boolean().optional().describe('Rebuild the cached catalog.'),
+      module: z.string().min(1).optional().describe('Optional discovered ADR module.'),
+      query: z.string().trim().min(1).max(200).optional().describe('Filter ADR IDs, titles, paths and contexts.'),
+      tags: z.array(z.string().trim().min(1)).max(10).optional().describe('Match any of these ADR tags.'),
+      offset: z.number().int().min(0).optional().describe('Page offset; defaults to zero.'),
+      limit: z.number().int().min(1).max(50).optional().describe('Page size; defaults to ten.'),
+    },
     outputSchema: adrCatalogResultSchema,
-    invoke: async (args) => toStructuredToolResult(adrCatalogResultSchema, executeListAdrs({ refresh: args.refresh === true, ...(typeof args.module === 'string' ? { module: args.module } : {}) })),
+    invoke: async (args) => toStructuredToolResult(adrCatalogResultSchema, executeListAdrs({
+      refresh: args.refresh === true,
+      ...(typeof args.module === 'string' ? { module: args.module } : {}),
+      ...(typeof args.query === 'string' ? { query: args.query } : {}),
+      ...(Array.isArray(args.tags) ? { tags: args.tags } : {}),
+      ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+    })),
     rootUnavailable: failure,
   };
 }

@@ -3,7 +3,7 @@ import * as path from 'path';
 import { agentPath } from '../config/agent-directory';
 import { WorkspaceDiscoveryService } from '../config/workspace-discovery';
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const ADR_FILE_PATTERN = /^((?:ADR[-_])?\d{3,})[-_].+\.md$/i;
 const MAX_CONTEXT_LENGTH = 220;
 
@@ -21,6 +21,8 @@ export interface AdrIndexEntry {
   statusLabel: string;
   /** First paragraph of the Contexto section, bounded for prompt safety. */
   context: string;
+  /** Tags explicitly listed by a human-maintained ADR catalog. */
+  tags?: string[];
   /** File size used to invalidate the local cache. */
   size: number;
   /** File modification time used to invalidate the local cache. */
@@ -50,7 +52,7 @@ interface AdrCandidate {
   absolutePath: string;
   size: number;
   mtimeMs: number;
-  curated?: Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>;
+  curated?: Partial<Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context' | 'tags'>>;
 }
 
 /**
@@ -80,7 +82,8 @@ export function buildAdrIndex(rootDir: string, refresh = false): AdrIndex {
 
   const entries = candidates.map((candidate) => ({
     ...candidate,
-    ...(candidate.curated ?? readAdrMetadata(candidate.absolutePath, candidate.id)),
+    ...readAdrMetadata(candidate.absolutePath, candidate.id),
+    ...candidate.curated,
   })).map(({ absolutePath: _absolutePath, curated: _curated, ...entry }) => entry);
   const generatedAt = new Date().toISOString();
   const nextCache: AdrIndexCache = {
@@ -128,7 +131,7 @@ export function formatAdrIndexForModule(index: AdrIndex, module?: string): strin
 function discoverAdrs(rootDir: string): AdrCandidate[] {
   const candidates: AdrCandidate[] = [];
   for (const catalog of new WorkspaceDiscoveryService(rootDir).discoverAdrCatalogs()) {
-    const curated = catalog.readmePath === undefined ? new Map<string, Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>>() : readCuratedCatalog(path.join(rootDir, catalog.readmePath));
+    const curated = catalog.readmePath === undefined ? new Map<string, Partial<Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context' | 'tags'>>>() : readCuratedCatalog(path.join(rootDir, catalog.readmePath));
     for (const entry of fs.readdirSync(catalog.absolutePath, { withFileTypes: true })) {
       if (!entry.isFile()) continue;
       const match = ADR_FILE_PATTERN.exec(entry.name);
@@ -153,20 +156,32 @@ function discoverAdrs(rootDir: string): AdrCandidate[] {
 }
 
 /** Reads the human-maintained index row for each linked ADR, when a catalog supplies one. */
-function readCuratedCatalog(readmePath: string): Map<string, Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>> {
-  const metadata = new Map<string, Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context'>>();
+function readCuratedCatalog(readmePath: string): Map<string, Partial<Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context' | 'tags'>>> {
+  const metadata = new Map<string, Partial<Pick<AdrIndexEntry, 'title' | 'statusLabel' | 'context' | 'tags'>>>();
+  let headers: string[] = [];
   for (const line of fs.readFileSync(readmePath, 'utf8').split(/\r?\n/)) {
-    if (!line.startsWith('|') || !/\]\(([^)]+)\)/.test(line)) continue;
+    if (!line.startsWith('|')) continue;
     const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+    if (cells.some((cell) => /^(?:ID|ADR)$/i.test(cell)) && cells.some((cell) => /^Tags$/i.test(cell))) {
+      headers = cells.map((cell) => cell.toLocaleLowerCase());
+      continue;
+    }
+    if (!/\]\(([^)]+)\)/.test(line)) continue;
     const link = /\]\(([^)]+)\)/.exec(cells[0] ?? '')?.[1];
     if (link === undefined) continue;
     const fileName = path.basename(link);
     const title = (cells[1] ?? '').replace(/\[([^\]]+)\]\([^)]*\)/, '$1').trim();
     const statusLabel = (cells[2] ?? '').trim();
-    const context = truncate((cells[4] ?? cells[3] ?? '').trim());
-    if (title.length > 0 && statusLabel.length > 0 && context.length > 0) {
-      metadata.set(fileName, { title, statusLabel, context });
-    }
+    const summaryIndex = headers.indexOf('summary');
+    const tagIndex = headers.indexOf('tags');
+    const context = summaryIndex === -1 ? undefined : truncate((cells[summaryIndex] ?? '').trim());
+    const tags = tagIndex === -1 ? [] : [...(cells[tagIndex] ?? '').matchAll(/`([^`]+)`/g)].map((match) => match[1]);
+    metadata.set(fileName, {
+      ...(title.length === 0 ? {} : { title }),
+      ...(statusLabel.length === 0 ? {} : { statusLabel }),
+      ...(context === undefined || context.length === 0 ? {} : { context }),
+      ...(tags.length === 0 ? {} : { tags }),
+    });
   }
   return metadata;
 }
@@ -238,7 +253,11 @@ function matchesCandidates(entries: AdrIndexEntry[], candidates: AdrCandidate[])
       && entry.module === candidate.module
       && entry.path === candidate.path
       && entry.size === candidate.size
-      && entry.mtimeMs === candidate.mtimeMs;
+      && entry.mtimeMs === candidate.mtimeMs
+      && (candidate.curated?.tags === undefined || JSON.stringify(entry.tags) === JSON.stringify(candidate.curated.tags))
+      && (candidate.curated?.title === undefined || entry.title === candidate.curated.title)
+      && (candidate.curated?.statusLabel === undefined || entry.statusLabel === candidate.curated.statusLabel)
+      && (candidate.curated?.context === undefined || entry.context === candidate.curated.context);
   });
 }
 
@@ -271,6 +290,7 @@ function isEntry(value: unknown): value is AdrIndexEntry {
     && typeof record.title === 'string'
     && typeof record.statusLabel === 'string'
     && typeof record.context === 'string'
+    && (record.tags === undefined || (Array.isArray(record.tags) && record.tags.every((tag) => typeof tag === 'string')))
     && typeof record.size === 'number'
     && typeof record.mtimeMs === 'number';
 }

@@ -39,16 +39,21 @@ const securityPolicy = new AgentSecurityPolicy();
 const adrEntrySchema = z.object({
   id: z.string(), module: z.string(), path: z.string(), title: z.string(),
   statusLabel: z.string(), context: z.string(), size: z.number(), mtimeMs: z.number(),
+  tags: z.array(z.string()).optional(),
 });
 export const adrCatalogDataSchema = z.object({
   catalogStatus: z.enum(['cached', 'rebuilt']),
   generatedAt: z.string(),
   module: z.string().optional(),
   availableModules: z.array(z.string()),
+  moduleCounts: z.array(z.object({ module: z.string(), count: z.number() })).optional(),
+  total: z.number().optional(),
+  offset: z.number().optional(),
+  nextOffset: z.number().optional(),
   entries: z.array(adrEntrySchema),
 });
 export const adrCatalogResultSchema = createToolResultSchema(
-  z.enum(['ADR_CATALOG_READY', 'ADR_CATALOG_EMPTY', 'ADR_MODULE_NOT_FOUND', 'ADR_CATALOG_ERROR']),
+  z.enum(['ADR_CATALOG_READY', 'ADR_CATALOG_EMPTY', 'ADR_MODULE_NOT_FOUND', 'ADR_NO_MATCHES', 'ADR_CATALOG_ERROR']),
   adrCatalogDataSchema,
 );
 export type AdrCatalogData = z.infer<typeof adrCatalogDataSchema>;
@@ -265,7 +270,7 @@ export function formatIndexStatusForModel(result: IndexStatusResult): string {
 
 /** Reads the ADR catalog and preserves its metadata before rendering. */
 export function executeListAdrs(
-  input: { refresh?: boolean; module?: string },
+  input: { refresh?: boolean; module?: string; query?: string; tags?: readonly string[]; offset?: number; limit?: number },
   rootDir: string = runtimeRoot(),
 ): AdrCatalogResult {
   const emptyData = (entries: AdrIndexEntry[] = []): AdrCatalogData => ({
@@ -275,30 +280,52 @@ export function executeListAdrs(
   try {
     const catalog = buildAdrIndex(rootDir, input.refresh === true);
     const availableModules = [...new Set(catalog.entries.map((entry) => entry.module))].sort();
-    const entries = input.module === undefined
+    const scoped = input.module === undefined
       ? catalog.entries
       : catalog.entries.filter((entry) => entry.module === input.module);
+    const query = input.query?.trim().toLocaleLowerCase();
+    const tags = input.tags?.map((tag) => tag.toLocaleLowerCase()) ?? [];
+    const entries = scoped.filter((entry) =>
+      (query === undefined || query === '' ||
+        [entry.id, entry.title, entry.path, entry.context].some((value) => value.toLocaleLowerCase().includes(query)))
+      && (tags.length === 0 || tags.some((tag) => entry.tags?.some((candidate) => candidate.toLocaleLowerCase() === tag))),
+    );
+    const moduleCounts = [...new Set(entries.map((entry) => entry.module))].sort().map((module) => ({
+      module, count: entries.filter((entry) => entry.module === module).length,
+    }));
+    const offset = Math.max(0, Math.trunc(input.offset ?? 0));
+    const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 10)));
+    const page = entries.slice(offset, offset + limit);
+    const nextOffset = offset + page.length < entries.length ? offset + page.length : undefined;
     const data: AdrCatalogData = {
       catalogStatus: catalog.status,
       generatedAt: catalog.generatedAt,
       ...(input.module === undefined ? {} : { module: input.module }),
       availableModules,
-      entries,
+      moduleCounts, total: entries.length, offset,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
+      entries: page,
     };
-    if (input.module !== undefined && entries.length === 0) {
+    if (input.module !== undefined && scoped.length === 0) {
       return { schemaVersion: 1, status: 'empty', code: 'ADR_MODULE_NOT_FOUND',
         summary: `ADR module "${input.module}" was not found.`, data, evidence: [], diagnostics: [],
         truncated: false, retryable: false, nextAction: `Use one of: ${availableModules.join(', ') || '(none)'}.` };
     }
-    if (entries.length === 0) {
+    if (catalog.entries.length === 0) {
       return { schemaVersion: 1, status: 'empty', code: 'ADR_CATALOG_EMPTY',
         summary: 'No Architecture Decision Records were discovered.', data, evidence: [], diagnostics: [],
         truncated: false, retryable: false };
     }
+    if (entries.length === 0) {
+      return { schemaVersion: 1, status: 'empty', code: 'ADR_NO_MATCHES',
+        summary: 'No ADRs match the requested filters.', data, evidence: [], diagnostics: [],
+        truncated: false, retryable: false, nextAction: 'Broaden the query, tags, or module filter.' };
+    }
     return { schemaVersion: 1, status: 'success', code: 'ADR_CATALOG_READY',
-      summary: `${entries.length} Architecture Decision Record${entries.length === 1 ? '' : 's'} available.`,
-      data, evidence: entries.map((entry) => ({ path: entry.path, reason: entry.context })),
-      diagnostics: [], truncated: false, retryable: false };
+      summary: `${entries.length} Architecture Decision Record${entries.length === 1 ? '' : 's'} match; showing ${page.length} from offset ${offset}.`,
+      data, evidence: page.map((entry) => ({ path: entry.path, reason: entry.context })),
+      diagnostics: [], truncated: nextOffset !== undefined, retryable: false,
+      ...(nextOffset === undefined ? {} : { nextAction: `Call list_adrs with offset ${nextOffset} for the next page.` }) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { schemaVersion: 1, status: 'error', code: 'ADR_CATALOG_ERROR',
@@ -314,11 +341,12 @@ export function formatAdrCatalogForModel(result: AdrCatalogResult): string {
   if (result.code === 'ADR_MODULE_NOT_FOUND') {
     return `❌ ${result.summary} Available modules: ${result.data.availableModules.join(', ') || '(none)'}.`;
   }
+  if (result.code === 'ADR_NO_MATCHES') return result.summary;
   if (result.data.entries.length === 0) return 'ADR catalog: no decision records were discovered.';
   const lines = result.data.entries.map((entry) =>
     `- [${entry.module}] ${entry.id} — ${entry.title} [${entry.statusLabel}]; context: ${entry.context}`,
   );
-  return `ADR catalog (${result.data.catalogStatus}; ${result.data.entries.length} decisions):\n${lines.join('\n')}`;
+  return `ADR catalog (${result.data.catalogStatus}; ${result.data.total ?? result.data.entries.length} decisions; offset ${result.data.offset ?? 0}):\n${lines.join('\n')}${result.nextAction === undefined ? '' : `\n${result.nextAction}`}`;
 }
 
 /** Queries the persisted file dependency graph without formatting it. */
