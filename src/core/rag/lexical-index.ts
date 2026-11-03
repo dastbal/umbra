@@ -54,16 +54,20 @@ export function ensureLexicalIndex(db: Database.Database): void {
     END;
   `);
 
-  const backfill = db.prepare(`
-    INSERT INTO code_chunks_fts (chunk_id, file_path, metadata, content)
-    SELECT c.id, c.file_path, COALESCE(c.metadata, ''), c.content
-      FROM code_chunks c
-     WHERE NOT EXISTS (
-       SELECT 1 FROM code_chunks_fts f WHERE f.chunk_id = c.id
-     )
-  `);
-
-  db.transaction(() => backfill.run())();
+  db.transaction(() => {
+    // chunk_id is UNINDEXED in FTS5. Materialise its IDs once, then use the
+    // temporary primary key for the anti-join instead of scanning FTS per row.
+    db.exec('CREATE TEMP TABLE existing_lexical_chunks (chunk_id TEXT PRIMARY KEY)');
+    db.prepare('INSERT OR IGNORE INTO temp.existing_lexical_chunks SELECT chunk_id FROM code_chunks_fts').run();
+    db.prepare(`
+      INSERT INTO code_chunks_fts (chunk_id, file_path, metadata, content)
+      SELECT c.id, c.file_path, COALESCE(c.metadata, ''), c.content
+        FROM code_chunks c
+        LEFT JOIN temp.existing_lexical_chunks existing ON existing.chunk_id = c.id
+       WHERE existing.chunk_id IS NULL
+    `).run();
+    db.exec('DROP TABLE temp.existing_lexical_chunks');
+  })();
 }
 
 /**

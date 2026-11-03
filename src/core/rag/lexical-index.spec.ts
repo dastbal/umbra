@@ -58,6 +58,25 @@ describe('lexical code index', () => {
     ]);
   });
 
+  it('backfills without a correlated full FTS scan for each chunk', () => {
+    const prepared: string[] = [];
+    const originalPrepare = db.prepare.bind(db);
+    const spy = jest.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      prepared.push(sql);
+      return originalPrepare(sql);
+    }) as typeof db.prepare);
+    try {
+      ensureLexicalIndex(db);
+    } finally {
+      spy.mockRestore();
+    }
+    const backfill = prepared.find((sql) => sql.includes('INSERT INTO code_chunks_fts') && sql.includes('SELECT c.id'));
+    expect(backfill).toBeDefined();
+    db.exec('CREATE TEMP TABLE existing_lexical_chunks (chunk_id TEXT PRIMARY KEY)');
+    const plan = originalPrepare(`EXPLAIN QUERY PLAN ${backfill}`).all() as Array<{ detail: string }>;
+    expect(plan.map((step) => step.detail).join('\n')).not.toMatch(/CORRELATED SCALAR SUBQUERY/);
+  });
+
   it('indexes a newly inserted chunk through its trigger', () => {
     ensureLexicalIndex(db);
     db.prepare(
