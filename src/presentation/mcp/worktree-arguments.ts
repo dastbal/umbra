@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ResolvedWorktree } from '../../core/config/git-worktrees';
+import { WorktreeResolutionError, type ResolvedWorktree, type WorktreeResolutionCode } from '../../core/config/git-worktrees';
 import type * as WorktreeViewModule from '../../core/rag/worktree-view';
 
 /**
@@ -38,6 +38,7 @@ export interface WorktreeSelection {
 export interface WorktreeRefusal {
   readonly ok: false;
   readonly message: string;
+  readonly code?: WorktreeResolutionCode;
 }
 
 let viewModule: typeof WorktreeViewModule | undefined;
@@ -68,6 +69,7 @@ export async function selectWorktree(requested: string): Promise<WorktreeSelecti
   try {
     return { ok: true, worktree: await views.resolve(requested), views, provenanceOf: module.provenanceOf };
   } catch (error: unknown) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    return { ok: false, message: error instanceof Error ? error.message : String(error),
+      ...(error instanceof WorktreeResolutionError ? { code: error.code } : {}) };
   }
 }

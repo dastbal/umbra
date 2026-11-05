@@ -84,6 +84,10 @@ export class WorktreeViewService {
    * @returns The delta.
    */
   public delta(worktree: ResolvedWorktree): Promise<WorktreeDelta> {
+    if (worktree.baseOnly) {
+      return Promise.resolve({ worktreeRoot: worktree.root, indexPrefix: '', changed: [], deleted: [],
+        hashes: new Map<string, string>(), signature: 'pinned-base-index', candidates: 0 });
+    }
     return computeWorktreeDelta({
       repositoryRoot: worktree.repositoryRoot,
       indexPrefix: worktree.indexPrefix,

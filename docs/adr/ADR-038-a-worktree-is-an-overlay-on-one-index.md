@@ -92,7 +92,8 @@ worktree it belongs to. It accepts only:
   repository that listed it, so a worktree directory replaced by a symlink to
   another checkout is refused.
 
-Anything else is `WORKTREE_NOT_REGISTERED`. The pinned root is still pinned at
+~~Anything else is `WORKTREE_NOT_REGISTERED`.~~ See the 2026-11-03 amendment
+for the more precise refusal states. The pinned root is still pinned at
 launch, and no argument can make Umbra serve another repository (ADR-024's
 2026-10-22 amendment).
 
@@ -580,3 +581,36 @@ stamp says `complete`, while still allowing searches over available vectors.
 The MCP answer uses the coverage result already computed at the readiness gate
 to avoid repeating the database scan. `get_index_status` remains the detailed
 path-level diagnostic.
+
+## Amendment — 2026-11-03 · Explain non-Git and foreign worktree selection
+
+Some consumers serve a directory without Git. The original resolver treated
+even an explicit selection of that exact pinned root as an unusable worktree.
+`src/core/config/git-worktrees.ts#resolveWorktree` now accepts that one case as
+`baseOnly`: `src/core/rag/worktree-view.ts#WorktreeViewService.delta` produces
+an empty delta, so the caller can read the pinned base index. It does not
+pretend to detect live file changes without Git.
+
+A different path still cannot widen the server's pinned root. Paths outside
+it return `WORKTREE_OUTSIDE_REPOSITORY`; a path inside a non-Git pinned root
+that is not the root itself returns `WORKTREE_NOT_A_GIT_REPO`. Registered Git
+worktrees retain the original ownership check. The MCP selection boundary in
+`src/presentation/mcp/worktree-arguments.ts#selectWorktree` passes the typed
+reason to graph and search publishers in
+`src/presentation/mcp/tool-catalog.ts`, which provide an actionable message
+instead of suggesting that a graph has no results.
+
+`src/core/config/git-worktrees.spec.ts` covers the non-Git pinned root,
+its child, and a foreign repository. These tests passed in the 2.4.3 branch's
+full run (125 suites, 1,195 tests passed; one suite and one test skipped).
+The behavior was verified in fixtures; no claim about a live consumer's
+worktree selection is made here.
+
+### Related files for this amendment
+
+- `src/core/config/git-worktrees.ts` — `resolveWorktree`.
+- `src/core/rag/worktree-view.ts` — `WorktreeViewService.delta`.
+- `src/presentation/mcp/worktree-arguments.ts` — `selectWorktree`.
+- `src/presentation/mcp/tool-catalog.ts` — `publishDependencyGraph`,
+  `publishChangeImpact`, `publishNestGraph`, `publishAskCodebase`.
+- `src/core/config/git-worktrees.spec.ts` — selection fixtures.

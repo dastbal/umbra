@@ -238,7 +238,8 @@ export class WorkspaceDiscoveryService {
       .map((directory) => {
         const relativePath = this.relativePath(directory);
         const parent = this.relativePath(path.dirname(directory));
-        const readme = path.join(directory, 'README.md');
+        const index = path.join(directory, 'INDEX.md');
+        const readme = fs.existsSync(index) ? index : path.join(directory, 'README.md');
         return {
           absolutePath: directory,
           relativePath,

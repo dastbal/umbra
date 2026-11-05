@@ -543,3 +543,33 @@ Verification on 2026-09-18: focused GraphRAG, index-integrity, MCP catalog and
 SDK server suites passed, alongside strict TypeScript compilation. The full
 suite was started but its environment model-discovery step did not return a
 conclusive completion receipt, so no full-suite result is claimed here.
+
+## Amendment — 2026-11-03 · Catalog topics can be selected as modules
+
+The earlier `module` filter was useful for a monorepo with separate ADR
+directories, but a single curated catalog such as this repository's has only
+the physical module `root`. Asking for a topic as `module=` therefore failed
+even when the topic was present in the index table's `Tags` column.
+
+`src/core/config/workspace-discovery.ts#findAdrCatalogs` now recognizes
+`INDEX.md` as a curated catalog, preferring it when both it and `README.md`
+exist.
+`src/core/tools/adr-index.ts#readCuratedCatalog` reads its topic tags. The
+`src/core/tools/read-only-executions.ts#executeListAdrs` module selector
+accepts an exact physical module or a catalog tag; a unique first-segment
+alias with singular/plural normalization also resolves. Ambiguous or absent
+selectors return the available
+modules and tags, rather than choosing one silently. The same call can narrow
+by text query and tags before pagination (ADR-004's 2026-11-03 amendment).
+
+`src/core/tools/adr-catalog-execution.spec.ts` passed in the 2.4.3 branch's
+full Jest run, covering `INDEX.md` tags and a topic passed as `module`. The
+full run passed 125 suites and 1,195 tests, with one suite and one test skipped;
+`npm run type-check` and `npm run lint` passed before this documentation edit.
+
+### Related files for this amendment
+
+- `src/core/config/workspace-discovery.ts` — `findAdrCatalogs`.
+- `src/core/tools/adr-index.ts` — `readCuratedCatalog`, `buildAdrIndex`.
+- `src/core/tools/read-only-executions.ts` — `executeListAdrs`.
+- `src/core/tools/adr-catalog-execution.spec.ts` — curated topic fixtures.

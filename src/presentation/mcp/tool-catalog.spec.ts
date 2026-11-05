@@ -204,6 +204,47 @@ describe('MCP query_nest_graph', () => {
 });
 
 describe('MCP worktree selection (ADR-038)', () => {
+  it('returns a specific code and recovery when a graph call names another repository', async () => {
+    const selected = jest.spyOn(worktreeArguments, 'selectWorktree').mockResolvedValue({
+      ok: false, code: 'WORKTREE_OUTSIDE_REPOSITORY',
+      message: 'Umbra serves /repo/a; open a session serving /repo/b.',
+    });
+    try {
+      const tool = buildToolCatalog({
+        semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
+        readIndexStatus: () => indexStatus(),
+      }).find((candidate) => candidate.name === 'query_dependency_graph');
+      const answer = await tool?.invoke({ filePath: 'src/a.ts', direction: 'inbound', worktree: '/repo/b' });
+      expect(answer?.structuredContent).toMatchObject({
+        code: 'WORKTREE_OUTSIDE_REPOSITORY',
+        summary: expect.stringContaining('Umbra serves /repo/a'),
+      });
+    } finally {
+      selected.mockRestore();
+    }
+  });
+
+  it('does not blame semantic coverage when ask_codebase names another repository', async () => {
+    const selected = jest.spyOn(worktreeArguments, 'selectWorktree').mockResolvedValue({
+      ok: false, code: 'WORKTREE_OUTSIDE_REPOSITORY',
+      message: 'Umbra serves /repo/a; open a session serving /repo/b.',
+    });
+    try {
+      const tool = buildToolCatalog({
+        semanticSearchReadiness: () => ({ ready: true, message: 'ready', retryable: false }),
+        readIndexStatus: () => indexStatus(),
+      }).find((candidate) => candidate.name === 'ask_codebase');
+      const answer = await tool?.invoke({ query: 'where is this?', worktree: '/repo/b' });
+      expect(answer?.structuredContent).toMatchObject({
+        code: 'WORKTREE_OUTSIDE_REPOSITORY',
+        summary: expect.stringContaining('Umbra serves /repo/a'),
+      });
+      expect(answer?.structuredContent).not.toHaveProperty('nextAction', expect.stringContaining('get_index_status'));
+    } finally {
+      selected.mockRestore();
+    }
+  });
+
   it('uses index-prefixed live paths and omits counts a live scan did not compute', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-live-worktree-'));
     fs.mkdirSync(path.join(root, 'components'));
@@ -244,7 +285,7 @@ describe('MCP worktree selection (ADR-038)', () => {
       .sort();
 
     expect(selecting).toEqual([
-      'ask_codebase', 'get_index_status', 'inspect_project', 'query_dependency_graph', 'query_nest_graph', 'search_workspace',
+      'ask_codebase', 'get_index_status', 'inspect_project', 'query_dependency_graph', 'query_nest_graph', 'search_workspace', 'trace_change_impact',
     ]);
     for (const tool of catalog().filter((candidate) => candidate.inputSchema.worktree !== undefined)) {
       expect(z.object({ worktree: tool.inputSchema.worktree! }).safeParse({}).success).toBe(true);

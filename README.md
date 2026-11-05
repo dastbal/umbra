@@ -96,8 +96,9 @@ Decided in [ADR-024](docs/adr/ADR-024-umbra-as-a-read-only-mcp-server.md).
 | Tool | `ask_codebase` | Grounded hybrid code search with the approved bounded GraphRAG policy, provenance, retrieval receipt, and a next read-only recommendation |
 | Tool | `investigate_graphrag` | Compare the bounded hybrid, dependency, and NestJS retrieval plans without calling a chat model, saving a trace, or changing configuration |
 | Tool | `query_dependency_graph` | *What breaks if I change this file* — inbound or outbound edges from the AST, each labelled with its kind: `import`, `re-export`, `require`, `dynamic-import` |
+| Tool | `trace_change_impact` | One bounded answer combining transitive importers with Nest injection and binding consumers of classes declared in the file; structural evidence, not runtime execution proof |
 | Tool | `query_nest_graph` | *Which module provides this token, and who injects it* — NestJS wiring, including modules whose providers live in a `forRoot()` rather than in the `@Module` decorator |
-| Tool | `list_adrs` | *Why* is the code shaped this way — path, title and status of every decision record, without their bodies |
+| Tool | `list_adrs` | *Why* is the code shaped this way — a bounded page with module counts, titles, status and optional text/tag filters, without ADR bodies |
 | Tool | `run_integrity_check` | `tsc --noEmit` over the served repository |
 | Tool | `get_index_status` | Live warm-up state plus durable discovery, chunk, vector, stamp and lease coverage |
 | Tool | `continue_conversation` | Starts or resumes a read-only advisor conversation; retain its opaque `conversationId` between turns |
@@ -283,7 +284,7 @@ It waits for a client and prints its startup to **stderr**:
 
 ```
 [umbra mcp] umbra mcp — serving /path/to/repo
-[umbra mcp] publishing 10 tools: ask_codebase, search_workspace, inspect_project, investigate_graphrag, get_index_status, list_adrs, query_dependency_graph, query_nest_graph, run_integrity_check, continue_conversation
+[umbra mcp] publishing 11 tools: ask_codebase, search_workspace, inspect_project, investigate_graphrag, get_index_status, list_adrs, query_dependency_graph, trace_change_impact, query_nest_graph, run_integrity_check, continue_conversation
 [umbra mcp] MCP transport connected; index warm-up continues in the background.
 ```
 
@@ -330,8 +331,9 @@ If a repository's declared source boundary needs an explicit override, commit an
 { "indexing": { "sources": ["apps/*/src/**/*.ts", "apps/web/features/**/*.tsx"], "ignore": ["scratch/**"] } }
 ```
 
-`list_adrs` also discovers module catalogs such as `docs/payments/adr/`; its
-optional `module` argument filters the result.
+`list_adrs` discovers module catalogs such as `docs/payments/adr/` and tags in
+`INDEX.md`. The default response contains ten ADRs and a `nextOffset` when more
+match. Use `module`, `query`, `tags`, `offset` and `limit` to narrow or page it.
 
 The `.umbra/` directory, including `memory.db` and `worktree-embeddings.db`, is
 local root-bound cache state.

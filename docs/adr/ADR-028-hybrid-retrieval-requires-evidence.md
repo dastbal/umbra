@@ -380,3 +380,32 @@ exists between 2026-09-10 and today, and why nothing local caught this.
 Reports: `docs/benchmarks/results/2026-09-23-ollama-calibration-7291393-dirty-published-rule.json`
 and `…-fixed-rule.json`. Both are marked dirty because both ran on the repaired
 runner.
+
+## Amendment — 2026-11-03 · Abstain on an explicit unsupported scope
+
+The existing term-evidence gate can still produce unrelated code files when a
+question explicitly names a path in another repository or a Markdown file:
+those targets are outside the served TypeScript/Prisma semantic index. The
+index cannot support a positive answer about them.
+
+`src/core/tools/read-only-executions.ts#unsupportedCodebaseScope` checks the
+original question before retrieval for an explicit absolute home path outside
+the pinned root or a `.md` filename. `executeCodebaseSearch` returns typed
+`CODEBASE_SCOPE_UNSUPPORTED` with no evidence and a next action: start Umbra
+for the named repository, or use `search_workspace` for local Markdown. The
+response also states its source kinds and that Markdown is not semantically
+indexed. This is a narrow guard on explicit targets, not a claim that Umbra
+can infer every out-of-scope question from natural language.
+
+The branch's full 2.4.3 Jest run passed 125 suites and 1,195 tests, with one
+suite and one test skipped; `npm run type-check` and `npm run lint` passed
+before this documentation edit. The scope regression is in
+`src/core/tools/ask-codebase-scope.spec.ts` and the published result
+contract is in `src/presentation/mcp/tool-catalog.ts#publishAskCodebase`.
+
+### Related files for this amendment
+
+- `src/core/tools/read-only-executions.ts` — `unsupportedCodebaseScope`,
+  `executeCodebaseSearch`.
+- `src/core/tools/ask-codebase-scope.spec.ts` — scope fixtures.
+- `src/presentation/mcp/tool-catalog.ts` — `publishAskCodebase`.

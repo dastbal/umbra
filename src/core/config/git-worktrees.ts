@@ -61,6 +61,8 @@ export interface ResolvedWorktree {
   readonly branch?: string;
   /** Checked-out commit. */
   readonly head?: string;
+  /** A non-git pinned root selected as its already indexed base, without an overlay. */
+  readonly baseOnly?: boolean;
 }
 
 /** Stable reasons a requested worktree is refused. */
@@ -69,6 +71,8 @@ export type WorktreeResolutionCode =
   | 'WORKTREE_NOT_FOUND'
   | 'WORKTREE_NOT_REGISTERED'
   | 'WORKTREE_GIT_UNAVAILABLE'
+  | 'WORKTREE_NOT_A_GIT_REPO'
+  | 'WORKTREE_OUTSIDE_REPOSITORY'
   | 'WORKTREE_PINNED_SUBDIRECTORY';
 
 /** Thrown when a requested path is not one of the pinned repository's worktrees. */
@@ -223,6 +227,21 @@ export async function resolveWorktree(
   // subdirectory excluded. Refused rather than mapped: no measured case pins a
   // subdirectory, and mapping would need every git path rebased.
   const topLevel = await gitTopLevel(realPinned, git);
+  if (topLevel === undefined) {
+    try {
+      await listGitWorktrees(realPinned, git);
+    } catch (error: unknown) {
+      if (!(error instanceof WorktreeResolutionError) || !/not a git repository/i.test(error.message)) throw error;
+      if (realRequested === realPinned) {
+        return { root: realPinned, repositoryRoot: realPinned, indexPrefix: '', isPinnedRoot: true, baseOnly: true };
+      }
+      const outside = !isSameOrInside(realRequested, realPinned);
+      throw new WorktreeResolutionError(outside ? 'WORKTREE_OUTSIDE_REPOSITORY' : 'WORKTREE_NOT_A_GIT_REPO',
+        outside
+          ? `Umbra serves ${realPinned}; ${realRequested} belongs outside that root. Open a session serving the requested repository.`
+          : `Umbra serves ${realPinned}, which is not a git repository. Only the pinned base index can be read; omit worktree or pass ${realPinned}.`);
+    }
+  }
   if (topLevel !== undefined && topLevel !== realPinned) {
     throw new WorktreeResolutionError(
       'WORKTREE_PINNED_SUBDIRECTORY',
@@ -272,6 +291,12 @@ export async function resolveWorktree(
   }
 
   if (best === undefined) {
+    if (!isSameOrInside(realRequested, realPinned)) {
+      throw new WorktreeResolutionError(
+        'WORKTREE_OUTSIDE_REPOSITORY',
+        `Umbra serves ${realPinned}; ${realRequested} is outside its registered worktrees. Open a session serving the requested repository.`,
+      );
+    }
     throw new WorktreeResolutionError(
       'WORKTREE_NOT_REGISTERED',
       `${realRequested} is not inside any git worktree of ${realPinned}. ` +

@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { z } from 'zod';
 
@@ -39,16 +40,21 @@ const securityPolicy = new AgentSecurityPolicy();
 const adrEntrySchema = z.object({
   id: z.string(), module: z.string(), path: z.string(), title: z.string(),
   statusLabel: z.string(), context: z.string(), size: z.number(), mtimeMs: z.number(),
+  tags: z.array(z.string()).optional(),
 });
 export const adrCatalogDataSchema = z.object({
   catalogStatus: z.enum(['cached', 'rebuilt']),
   generatedAt: z.string(),
   module: z.string().optional(),
   availableModules: z.array(z.string()),
+  moduleCounts: z.array(z.object({ module: z.string(), count: z.number() })).optional(),
+  total: z.number().optional(),
+  offset: z.number().optional(),
+  nextOffset: z.number().optional(),
   entries: z.array(adrEntrySchema),
 });
 export const adrCatalogResultSchema = createToolResultSchema(
-  z.enum(['ADR_CATALOG_READY', 'ADR_CATALOG_EMPTY', 'ADR_MODULE_NOT_FOUND', 'ADR_CATALOG_ERROR']),
+  z.enum(['ADR_CATALOG_READY', 'ADR_CATALOG_EMPTY', 'ADR_MODULE_NOT_FOUND', 'ADR_NO_MATCHES', 'ADR_CATALOG_ERROR']),
   adrCatalogDataSchema,
 );
 export type AdrCatalogData = z.infer<typeof adrCatalogDataSchema>;
@@ -57,13 +63,31 @@ export type AdrCatalogResult = ToolResult<z.infer<typeof adrCatalogResultSchema>
 const dependencyRelationSchema = z.object({ path: z.string(), relation: z.string() });
 export const dependencyGraphDataSchema = z.object({
   filePath: z.string(), direction: z.enum(['inbound', 'outbound']), relations: z.array(dependencyRelationSchema),
+  suggestedPaths: z.array(z.string()).optional(),
 });
 export const dependencyGraphResultSchema = createToolResultSchema(
-  z.enum(['DEPENDENCIES_FOUND', 'NO_DEPENDENCIES', 'DEPENDENCY_GRAPH_ERROR']),
+  z.enum(['DEPENDENCIES_FOUND', 'NO_DEPENDENCIES', 'FILE_NOT_INDEXED', 'DEPENDENCY_GRAPH_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
   dependencyGraphDataSchema,
 );
 export type DependencyGraphData = z.infer<typeof dependencyGraphDataSchema>;
 export type DependencyGraphResult = ToolResult<z.infer<typeof dependencyGraphResultSchema>['code'], DependencyGraphData>;
+
+const impactEntrySchema = z.object({
+  path: z.string(), kind: z.enum(['import', 'injection', 'binding']), depth: z.number(),
+  relation: z.string().optional(), token: z.string().optional(), consumer: z.string().optional(), module: z.string().optional(),
+});
+export const changeImpactDataSchema = z.object({
+  filePath: z.string(), depth: z.number(), symbols: z.array(z.string()), affected: z.array(impactEntrySchema),
+  suggestedPaths: z.array(z.string()).optional(),
+});
+export const changeImpactResultSchema = createToolResultSchema(
+  z.enum(['IMPACT_FOUND', 'NO_IMPACT', 'FILE_NOT_INDEXED', 'IMPACT_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
+  changeImpactDataSchema,
+);
+export type ChangeImpactData = z.infer<typeof changeImpactDataSchema>;
+export type ChangeImpactResult = ToolResult<z.infer<typeof changeImpactResultSchema>['code'], ChangeImpactData>;
 
 const nestBindingSchema = z.object({
   filePath: z.string(), module: z.string(), kind: z.string(), token: z.string(),
@@ -77,7 +101,8 @@ export const nestGraphDataSchema = z.object({
   bindings: z.array(nestBindingSchema), injections: z.array(nestInjectionSchema),
 });
 export const nestGraphResultSchema = createToolResultSchema(
-  z.enum(['NEST_BINDINGS_FOUND', 'NO_NEST_BINDINGS', 'NEST_GRAPH_ERROR']),
+  z.enum(['NEST_BINDINGS_FOUND', 'NO_NEST_BINDINGS', 'NEST_GRAPH_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY']),
   nestGraphDataSchema,
 );
 export type NestGraphData = z.infer<typeof nestGraphDataSchema>;
@@ -141,9 +166,11 @@ export const codebaseSearchDataSchema = z.object({
   // deterministic planner can observe an index. Successful and abstained
   // searches always carry this additive strategy projection.
   retrieval: retrievalStrategySchema.optional(),
+  coverage: z.object({ root: z.string(), sourceKinds: z.array(z.string()), markdownIndexed: z.boolean() }).optional(),
 });
 export const codebaseSearchResultSchema = createToolResultSchema(
-  z.enum(['CODEBASE_MATCHES_FOUND', 'CODEBASE_NO_EVIDENCE', 'CODEBASE_INDEX_UNAVAILABLE', 'CODEBASE_SEARCH_ERROR']),
+  z.enum(['CODEBASE_MATCHES_FOUND', 'CODEBASE_NO_EVIDENCE', 'CODEBASE_INDEX_UNAVAILABLE', 'CODEBASE_SEARCH_ERROR',
+    'WORKTREE_NOT_A_GIT_REPO', 'WORKTREE_OUTSIDE_REPOSITORY', 'CODEBASE_SCOPE_UNSUPPORTED']),
   codebaseSearchDataSchema,
 );
 export type CodebaseSearchData = z.infer<typeof codebaseSearchDataSchema>;
@@ -238,7 +265,22 @@ export function executeIndexStatus(rootDir: string | undefined, lifecycle: Index
     const integrity = inspectIndexIntegrity(rootDir, stamp === undefined ? undefined : { provider: stamp.provider, model: stamp.model });
     if (stamp !== undefined) data.stamp = { provider: stamp.provider, model: stamp.model, dimensions: stamp.dimensions, indexedAt: stamp.indexedAt, filesIndexed: stamp.filesIndexed, status: stamp.status };
     data.integrity = { healthy: integrity.healthy, databaseExists: integrity.databaseExists, schemaValid: integrity.schemaValid, discoveryValid: integrity.discoveryValid, discoveredFiles: integrity.discoveredFiles, files: integrity.files, indexedFiles: integrity.indexedFiles, skippedFiles: integrity.skippedFiles, skipped: [...integrity.skipped], chunks: integrity.chunks, missingVectors: integrity.missingVectors, pendingPaths: [...integrity.pendingPaths], stalePaths: [...integrity.stalePaths], ...(integrity.diagnostic === undefined ? {} : { diagnostic: integrity.diagnostic }) };
-    return { schemaVersion: 1, status: integrity.healthy ? 'success' : 'partial', code: integrity.healthy ? 'INDEX_STATUS_READY' : 'INDEX_STATUS_DEGRADED', summary: integrity.healthy ? 'The code index has complete usable coverage.' : 'The code index is inspectable but has coverage or integrity limitations.', data, evidence: [], diagnostics: integrity.diagnostic === undefined ? [] : [{ severity: 'warning', code: 'INDEX_INTEGRITY', message: integrity.diagnostic }], truncated: false, retryable: false };
+    const limitations = [
+      ...(integrity.pendingPaths.length === 0 ? [] : [`${integrity.pendingPaths.length} pending path(s)`]),
+      ...(integrity.stalePaths.length === 0 ? [] : [`${integrity.stalePaths.length} stale path(s)`]),
+      ...(integrity.missingVectors === 0 ? [] : [`${integrity.missingVectors} missing vector(s)`]),
+      ...(integrity.databaseExists ? [] : ['database missing']),
+      ...(integrity.schemaValid ? [] : ['schema invalid']),
+      ...(integrity.discoveryValid ? [] : ['source discovery invalid']),
+    ];
+    const summary = integrity.healthy ? 'The code index has complete usable coverage.'
+      : `The code index is degraded: ${limitations.join(', ') || integrity.diagnostic || 'integrity check failed'}.`;
+    if (!integrity.healthy) data.lifecycle = { ...lifecycle, message: `${lifecycle.message} ${summary}` };
+    return { schemaVersion: 1, status: integrity.healthy ? 'success' : 'partial',
+      code: integrity.healthy ? 'INDEX_STATUS_READY' : 'INDEX_STATUS_DEGRADED', summary, data, evidence: [],
+      diagnostics: integrity.healthy ? [] : [{ severity: 'warning', code: 'INDEX_INTEGRITY', message: integrity.diagnostic ?? summary }],
+      truncated: false, retryable: false,
+      ...(!integrity.healthy ? { nextAction: 'Run umbra index for the served root, then check get_index_status again.' } : {}) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { schemaVersion: 1, status: 'error', code: 'INDEX_STATUS_ERROR', summary: 'Index status inspection failed.', data, evidence: [], diagnostics: [{ severity: 'error', code: 'INDEX_STATUS_ERROR', message }], truncated: false, retryable: false };
@@ -264,7 +306,7 @@ export function formatIndexStatusForModel(result: IndexStatusResult): string {
 
 /** Reads the ADR catalog and preserves its metadata before rendering. */
 export function executeListAdrs(
-  input: { refresh?: boolean; module?: string },
+  input: { refresh?: boolean; module?: string; query?: string; tags?: readonly string[]; offset?: number; limit?: number },
   rootDir: string = runtimeRoot(),
 ): AdrCatalogResult {
   const emptyData = (entries: AdrIndexEntry[] = []): AdrCatalogData => ({
@@ -273,31 +315,68 @@ export function executeListAdrs(
   });
   try {
     const catalog = buildAdrIndex(rootDir, input.refresh === true);
-    const availableModules = [...new Set(catalog.entries.map((entry) => entry.module))].sort();
-    const entries = input.module === undefined
+    const availableModules = [...new Set(catalog.entries.flatMap((entry) => [entry.module, ...(entry.tags ?? [])]))].sort();
+    const requested = input.module?.toLocaleLowerCase();
+    const exact = availableModules.find((module) => module.toLocaleLowerCase() === requested);
+    const stem = (value: string): string => value.replace(/s$/, '');
+    const aliases = requested === undefined || exact !== undefined ? [] : availableModules.filter((module) =>
+      stem(module.split('-')[0].toLocaleLowerCase()) === stem(requested),
+    );
+    const selectedModule = exact ?? (aliases.length === 1 ? aliases[0] : undefined);
+    const matchesModule = (entry: AdrIndexEntry, module: string): boolean =>
+      entry.module === module || (entry.tags ?? []).includes(module);
+    const scoped = input.module === undefined
       ? catalog.entries
-      : catalog.entries.filter((entry) => entry.module === input.module);
+      : catalog.entries.filter((entry) => selectedModule !== undefined && matchesModule(entry, selectedModule));
+    const query = input.query?.trim().toLocaleLowerCase();
+    const tags = input.tags?.map((tag) => tag.toLocaleLowerCase()) ?? [];
+    const entries = scoped.filter((entry) =>
+      (query === undefined || query === '' ||
+        [entry.id, entry.title, entry.path, entry.context].some((value) => value.toLocaleLowerCase().includes(query)))
+      && (tags.length === 0 || tags.some((tag) => entry.tags?.some((candidate) => candidate.toLocaleLowerCase() === tag))),
+    );
+    const moduleCounts = [...new Set(entries.flatMap((entry) => [entry.module, ...(entry.tags ?? [])]))].sort().map((module) => ({
+      module, count: entries.filter((entry) => matchesModule(entry, module)).length,
+    }));
+    const offset = Math.max(0, Math.trunc(input.offset ?? 0));
+    const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 10)));
+    const page = entries.slice(offset, offset + limit);
+    const nextOffset = offset + page.length < entries.length ? offset + page.length : undefined;
     const data: AdrCatalogData = {
       catalogStatus: catalog.status,
       generatedAt: catalog.generatedAt,
       ...(input.module === undefined ? {} : { module: input.module }),
       availableModules,
-      entries,
+      moduleCounts, total: entries.length, offset,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
+      entries: page,
     };
-    if (input.module !== undefined && entries.length === 0) {
+    if (input.module !== undefined && scoped.length === 0) {
       return { schemaVersion: 1, status: 'empty', code: 'ADR_MODULE_NOT_FOUND',
         summary: `ADR module "${input.module}" was not found.`, data, evidence: [], diagnostics: [],
         truncated: false, retryable: false, nextAction: `Use one of: ${availableModules.join(', ') || '(none)'}.` };
     }
-    if (entries.length === 0) {
+    if (catalog.entries.length === 0) {
       return { schemaVersion: 1, status: 'empty', code: 'ADR_CATALOG_EMPTY',
         summary: 'No Architecture Decision Records were discovered.', data, evidence: [], diagnostics: [],
         truncated: false, retryable: false };
     }
+    if (entries.length === 0) {
+      return { schemaVersion: 1, status: 'empty', code: 'ADR_NO_MATCHES',
+        summary: 'No ADRs match the requested filters.', data, evidence: [], diagnostics: [],
+        truncated: false, retryable: false, nextAction: 'Broaden the query, tags, or module filter.' };
+    }
+    if (page.length === 0) {
+      return { schemaVersion: 1, status: 'empty', code: 'ADR_NO_MATCHES',
+        summary: `No ADR page begins at offset ${offset}; ${entries.length} ADRs match.`, data,
+        evidence: [], diagnostics: [], truncated: false, retryable: false,
+        nextAction: 'Retry list_adrs with offset 0 or an earlier offset.' };
+    }
     return { schemaVersion: 1, status: 'success', code: 'ADR_CATALOG_READY',
-      summary: `${entries.length} Architecture Decision Record${entries.length === 1 ? '' : 's'} available.`,
-      data, evidence: entries.map((entry) => ({ path: entry.path, reason: entry.context })),
-      diagnostics: [], truncated: false, retryable: false };
+      summary: `${entries.length} Architecture Decision Record${entries.length === 1 ? '' : 's'} match; showing ${page.length} from offset ${offset}.`,
+      data, evidence: page.map((entry) => ({ path: entry.path, reason: entry.context })),
+      diagnostics: [], truncated: nextOffset !== undefined, retryable: false,
+      ...(nextOffset === undefined ? {} : { nextAction: `Call list_adrs with offset ${nextOffset} for the next page.` }) };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { schemaVersion: 1, status: 'error', code: 'ADR_CATALOG_ERROR',
@@ -313,11 +392,12 @@ export function formatAdrCatalogForModel(result: AdrCatalogResult): string {
   if (result.code === 'ADR_MODULE_NOT_FOUND') {
     return `❌ ${result.summary} Available modules: ${result.data.availableModules.join(', ') || '(none)'}.`;
   }
+  if (result.code === 'ADR_NO_MATCHES') return result.summary;
   if (result.data.entries.length === 0) return 'ADR catalog: no decision records were discovered.';
   const lines = result.data.entries.map((entry) =>
     `- [${entry.module}] ${entry.id} — ${entry.title} [${entry.statusLabel}]; context: ${entry.context}`,
   );
-  return `ADR catalog (${result.data.catalogStatus}; ${result.data.entries.length} decisions):\n${lines.join('\n')}`;
+  return `ADR catalog (${result.data.catalogStatus}; ${result.data.total ?? result.data.entries.length} decisions; offset ${result.data.offset ?? 0}):\n${lines.join('\n')}${result.nextAction === undefined ? '' : `\n${result.nextAction}`}`;
 }
 
 /** Queries the persisted file dependency graph without formatting it. */
@@ -335,6 +415,20 @@ export function executeDependencyGraph(input: {
     const relations = db.prepare(sql).all(normalizedPath, input.filePath) as Array<{ path: string; relation: string }>;
     data.relations = relations;
     if (relations.length === 0) {
+      const indexed = db.prepare('SELECT 1 FROM file_registry WHERE path = ? LIMIT 1').get(normalizedPath);
+      if (indexed === undefined) {
+        const basename = path.posix.basename(normalizedPath);
+        const candidates = basename === '' ? [] : db.prepare(
+          'SELECT path FROM file_registry WHERE instr(path, ?) > 0 ORDER BY length(path), path LIMIT 8',
+        ).all(basename) as Array<{ path: string }>;
+        data.suggestedPaths = candidates.map((candidate) => candidate.path);
+        return { schemaVersion: 1, status: 'empty', code: 'FILE_NOT_INDEXED',
+          summary: `${input.filePath} is not in the served checkout's code index.`, data,
+          evidence: [], diagnostics: [], truncated: false, retryable: false,
+          nextAction: data.suggestedPaths.length > 0
+            ? `Try an indexed path: ${data.suggestedPaths.join(', ')}.`
+            : 'Check the served repository and file path before inferring that no dependencies exist.' };
+      }
       return { schemaVersion: 1, status: 'empty', code: 'NO_DEPENDENCIES',
         summary: `No ${input.direction} dependencies found for ${input.filePath}.`, data,
         evidence: [], diagnostics: [], truncated: false, retryable: false };
@@ -348,6 +442,96 @@ export function executeDependencyGraph(input: {
     return { schemaVersion: 1, status: 'error', code: 'DEPENDENCY_GRAPH_ERROR',
       summary: 'The dependency graph query failed.', data, evidence: [],
       diagnostics: [{ severity: 'error', code: 'DEPENDENCY_GRAPH_ERROR', message }],
+      truncated: false, retryable: false };
+  }
+}
+
+/**
+ * Traces bounded file importers and Nest consumers of classes declared in one indexed file.
+ * This is structural impact evidence, not proof that a runtime path executes.
+ */
+export function executeChangeImpact(
+  input: { filePath: string; depth?: number },
+  options: { readonly db?: Database.Database } = {},
+): ChangeImpactResult {
+  const depth = Math.min(4, Math.max(1, Math.trunc(input.depth ?? 2)));
+  const filePath = input.filePath.replaceAll('\\', '/');
+  const data: ChangeImpactData = { filePath, depth, symbols: [], affected: [] };
+  try {
+    const db = options.db ?? AgentDB.getInstance();
+    const registered = db.prepare('SELECT 1 FROM file_registry WHERE path = ? LIMIT 1').get(filePath);
+    if (registered === undefined) {
+      const basename = path.posix.basename(filePath);
+      const paths = basename === '' ? [] : db.prepare(
+        'SELECT path FROM file_registry WHERE instr(path, ?) > 0 ORDER BY length(path), path LIMIT 8',
+      ).all(basename) as Array<{ path: string }>;
+      data.suggestedPaths = paths.map((row) => row.path);
+      return { schemaVersion: 1, status: 'empty', code: 'FILE_NOT_INDEXED',
+        summary: `${filePath} is not in the served checkout's code index.`, data,
+        evidence: [], diagnostics: [], truncated: false, retryable: false,
+        nextAction: data.suggestedPaths.length > 0 ? `Try: ${data.suggestedPaths.join(', ')}.` : 'Check the served root and file path.' };
+    }
+    const seen = new Set([filePath]);
+    const queue: Array<{ path: string; depth: number }> = [{ path: filePath, depth: 0 }];
+    let truncated = false;
+    for (let i = 0; i < queue.length && !truncated; i++) {
+      const current = queue[i];
+      if (current.depth >= depth) continue;
+      const importers = db.prepare(
+        'SELECT source AS path, relation FROM dependency_graph WHERE target = ? ORDER BY source LIMIT 101',
+      ).all(current.path) as Array<{ path: string; relation: string }>;
+      if (importers.length > 100) truncated = true;
+      for (const importer of importers) {
+        if (seen.has(importer.path)) continue;
+        if (data.affected.length >= 100) { truncated = true; break; }
+        seen.add(importer.path);
+        data.affected.push({ path: importer.path, kind: 'import', depth: current.depth + 1, relation: importer.relation });
+        queue.push({ path: importer.path, depth: current.depth + 1 });
+      }
+    }
+    const chunks = db.prepare('SELECT metadata FROM code_chunks WHERE file_path = ? LIMIT 100').all(filePath) as Array<{ metadata: string | null }>;
+    const symbols = new Set<string>();
+    for (const chunk of chunks) {
+      if (chunk.metadata === null) continue;
+      try {
+        const metadata: unknown = JSON.parse(chunk.metadata);
+        if (typeof metadata === 'object' && metadata !== null && 'className' in metadata
+          && typeof metadata.className === 'string') symbols.add(metadata.className);
+      } catch { /* Malformed legacy metadata cannot turn a graph read into an error. */ }
+    }
+    data.symbols = [...symbols].sort();
+    for (const symbol of data.symbols) {
+      const injections = db.prepare(
+        'SELECT file_path AS path, consumer FROM nest_injections WHERE token = ? ORDER BY file_path LIMIT 101',
+      ).all(symbol) as Array<{ path: string; consumer: string }>;
+      const bindings = db.prepare(
+        'SELECT file_path AS path, module FROM nest_bindings WHERE token = ? ORDER BY file_path LIMIT 101',
+      ).all(symbol) as Array<{ path: string; module: string }>;
+      if (injections.length > 100 || bindings.length > 100) truncated = true;
+      for (const injection of injections) {
+        if (data.affected.length >= 100) { truncated = true; break; }
+        data.affected.push({ path: injection.path, kind: 'injection', depth: 1, token: symbol, consumer: injection.consumer });
+      }
+      for (const binding of bindings) {
+        if (data.affected.length >= 100) { truncated = true; break; }
+        data.affected.push({ path: binding.path, kind: 'binding', depth: 1, token: symbol, module: binding.module });
+      }
+    }
+    if (data.affected.length === 0) {
+      return { schemaVersion: 1, status: 'empty', code: 'NO_IMPACT',
+        summary: `No indexed importers or Nest consumers found for ${filePath}.`, data,
+        evidence: [], diagnostics: [], truncated: false, retryable: false };
+    }
+    return { schemaVersion: 1, status: truncated ? 'partial' : 'success', code: 'IMPACT_FOUND',
+      summary: `${data.affected.length} structural impact relation(s) found for ${filePath}.`, data,
+      evidence: data.affected.map((item) => ({ path: item.path, reason: item.kind === 'import'
+        ? `imports through depth ${item.depth}` : `${item.kind} of ${item.token}` })),
+      diagnostics: [], truncated, retryable: false,
+      ...(truncated ? { nextAction: 'Narrow the file or depth; the impact result reached its bound.' } : {}) };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { schemaVersion: 1, status: 'error', code: 'IMPACT_ERROR', summary: 'Change impact could not be traced.',
+      data, evidence: [], diagnostics: [{ severity: 'error', code: 'IMPACT_ERROR', message }],
       truncated: false, retryable: false };
   }
 }
@@ -608,6 +792,18 @@ export interface WorktreeIndexScope {
   read<T>(read: (view: OverlayView) => Promise<T>): Promise<{ result: T; worktree: ToolWorktree }>;
 }
 
+/** Detects explicit paths that the semantic TypeScript/Prisma index cannot answer about. */
+function unsupportedCodebaseScope(query: string, root: string): 'outside' | 'markdown' | undefined {
+  for (const match of query.matchAll(/(?:~\/|\/home\/|\/mnt\/)[^\s,;)\]"']+/g)) {
+    const raw = match[0].replace(/[.?!]+$/, '');
+    const absolute = raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
+    const resolved = path.resolve(absolute);
+    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return 'outside';
+  }
+  if (/\b[\w./-]+\.md\b/i.test(query)) return 'markdown';
+  return undefined;
+}
+
 /** Searches the code index and retains evidence before model formatting. */
 export async function executeCodebaseSearch(input: {
   query: string; context?: string;
@@ -617,6 +813,23 @@ export async function executeCodebaseSearch(input: {
     recoveredWithContext: false, unknownTerms: [], ignoredModifiers: [], droppedTerms: [], files: [], retrieval: emptyRetrievalStrategy(),
   };
   try {
+    const root = runtimeRoot();
+    const unsupported = unsupportedCodebaseScope(input.query, root);
+    if (unsupported !== undefined) {
+      const summary = unsupported === 'outside'
+        ? `Umbra serves ${root}; the named path is outside this repository's code index.`
+        : `Umbra serves ${root}; Markdown is not in its semantic code index.`;
+      const nextAction = unsupported === 'outside'
+        ? 'Open another session whose Umbra server serves the named repository.'
+        : 'Use search_workspace with a path for Markdown in this repository.';
+      const result: CodebaseSearchResult = {
+        schemaVersion: 1, status: 'abstained', code: 'CODEBASE_SCOPE_UNSUPPORTED', summary,
+        data: { ...emptyData, coverage: { root, sourceKinds: ['typescript', 'prisma-schema'], markdownIndexed: false } },
+        evidence: [], diagnostics: [{ severity: 'warning', code: 'CODEBASE_SCOPE_UNSUPPORTED', message: summary }],
+        truncated: false, retryable: false, nextAction,
+      };
+      return { result, modelContent: `${summary} ${nextAction}` };
+    }
     const stamp = readIndexStamp(runtimeRoot());
     if (stamp?.status === 'empty') {
       const message = stamp.diagnostic ?? 'No indexable source files were discovered.';

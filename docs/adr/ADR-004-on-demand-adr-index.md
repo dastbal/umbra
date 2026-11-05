@@ -73,3 +73,26 @@ cuatro ADR; la segunda reutilizo la cache sin devolver cuerpos de ADR.
 - Las tareas que necesitan una decision pasada encuentran primero el ADR
   relevante y leen solo ese documento.
 - La cache es estado local no versionado; si falta o se corrompe se reconstruye.
+
+## Amendment — 2026-11-03 · Page the catalog before presenting it
+
+The cached catalog still holds all discovered records, but presenting every
+entry in one `list_adrs` result exhausted an agent's context on a large
+repository. `src/core/tools/read-only-executions.ts#executeListAdrs` now filters
+first and returns a page of 10 entries by default (maximum 50), with `total`,
+`offset`, optional `nextOffset`, and module and topic counts. An offset beyond the
+matching entries returns `ADR_NO_MATCHES` with the matching total and a retry
+instruction; it does not imply the catalog is empty.
+
+The source remains `src/core/tools/adr-index.ts#buildAdrIndex`. The
+`src/core/tools/adr-catalog-execution.spec.ts` fixtures cover page continuation,
+filtering before pagination, and an out-of-range page. They passed in the
+2.4.3 branch's full Jest run (125 suites, 1,195 tests passed; one suite and one
+test skipped). This changes the response budget, not which ADRs are indexed.
+
+### Related files for this amendment
+
+- `src/core/tools/read-only-executions.ts` — `executeListAdrs`,
+  `formatAdrCatalogForModel`.
+- `src/core/tools/adr-index.ts` — `buildAdrIndex`.
+- `src/core/tools/adr-catalog-execution.spec.ts` — catalog page fixtures.

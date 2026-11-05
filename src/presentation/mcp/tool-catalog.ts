@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
-  adrCatalogResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
-  executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
+  adrCatalogResultSchema, changeImpactResultSchema, codebaseSearchResultSchema, dependencyGraphResultSchema,
+  executeChangeImpact, executeCodebaseSearch, executeDependencyGraph, executeGraphRagInvestigation, executeIntegrityCheck, executeListAdrs,
   executeProjectInventory, executeWorkspaceSearch,
   executeNestGraph, integrityResultSchema, nestGraphResultSchema,
   graphRagInvestigationResultSchema,
@@ -91,19 +91,38 @@ function publishListAdrs(): PublishedTool {
     // claim but spends the cache ADR-003/004 exist to keep, on the startup path
     // ADR-024 already records as painful. Declaring the truth costs one prompt.
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    description: 'Lists repository ADR metadata and optional module matches. Returns no ADR bodies.',
-    inputSchema: { refresh: z.boolean().optional().describe('Rebuild the cached catalog.'), module: z.string().min(1).optional().describe('Optional discovered ADR module.') },
+    description: 'Lists a bounded page of ADR metadata with module counts, text and tag filters. Returns no ADR bodies.',
+    inputSchema: {
+      refresh: z.boolean().optional().describe('Rebuild the cached catalog.'),
+      module: z.string().min(1).optional().describe('Optional discovered ADR module.'),
+      query: z.string().trim().min(1).max(200).optional().describe('Filter ADR IDs, titles, paths and contexts.'),
+      tags: z.array(z.string().trim().min(1)).max(10).optional().describe('Match any of these ADR tags.'),
+      offset: z.number().int().min(0).optional().describe('Page offset; defaults to zero.'),
+      limit: z.number().int().min(1).max(50).optional().describe('Page size; defaults to ten.'),
+    },
     outputSchema: adrCatalogResultSchema,
-    invoke: async (args) => toStructuredToolResult(adrCatalogResultSchema, executeListAdrs({ refresh: args.refresh === true, ...(typeof args.module === 'string' ? { module: args.module } : {}) })),
+    invoke: async (args) => toStructuredToolResult(adrCatalogResultSchema, executeListAdrs({
+      refresh: args.refresh === true,
+      ...(typeof args.module === 'string' ? { module: args.module } : {}),
+      ...(typeof args.query === 'string' ? { query: args.query } : {}),
+      ...(Array.isArray(args.tags) ? { tags: args.tags } : {}),
+      ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+    })),
     rootUnavailable: failure,
   };
 }
 
 function publishDependencyGraph(): PublishedTool {
-  const failure = (message: string) => toStructuredToolResult(dependencyGraphResultSchema, {
-    schemaVersion: 1, status: 'blocked', code: 'DEPENDENCY_GRAPH_ERROR', summary: 'The dependency graph is unavailable.',
-    data: { filePath: '', direction: 'outbound', relations: [] }, evidence: [], diagnostics: diagnostic(message, 'DEPENDENCY_GRAPH_ERROR'), truncated: false, retryable: false,
+  const failure = (message: string, reason?: string) => {
+    const code = reason === 'WORKTREE_NOT_A_GIT_REPO' || reason === 'WORKTREE_OUTSIDE_REPOSITORY'
+      ? reason : 'DEPENDENCY_GRAPH_ERROR';
+    return toStructuredToolResult(dependencyGraphResultSchema, {
+    schemaVersion: 1, status: 'blocked', code,
+    summary: code === 'DEPENDENCY_GRAPH_ERROR' ? 'The dependency graph is unavailable.' : message,
+    data: { filePath: '', direction: 'outbound', relations: [] }, evidence: [], diagnostics: diagnostic(message, code), truncated: false, retryable: false,
   });
+  };
   return {
     name: 'query_dependency_graph', title: 'Query file dependencies',
     description: 'Finds inbound or outbound TypeScript file dependencies in the authorized project.',
@@ -114,7 +133,7 @@ function publishDependencyGraph(): PublishedTool {
       const query = { filePath: input.filePath, direction: input.direction };
       if (input.worktree === undefined) return toStructuredToolResult(dependencyGraphResultSchema, executeDependencyGraph(query));
       const selection = await selectWorktree(input.worktree);
-      if (!selection.ok) return failure(selection.message);
+      if (!selection.ok) return failure(selection.message, selection.code);
       try {
         // Graph rows only: edges need no vectors, so no embedding provider is involved.
         const { result, worktree } = await selection.views.read(selection.worktree, { embed: false }, (view) => executeDependencyGraph(query, { db: view.db }));
@@ -134,11 +153,55 @@ function publishDependencyGraph(): PublishedTool {
   };
 }
 
+/** Publishes one bounded import-and-injection impact read over the selected checkout. */
+function publishChangeImpact(): PublishedTool {
+  const failure = (message: string, reason?: string) => {
+    const code = reason === 'WORKTREE_NOT_A_GIT_REPO' || reason === 'WORKTREE_OUTSIDE_REPOSITORY'
+      ? reason : 'IMPACT_ERROR';
+    return toStructuredToolResult(changeImpactResultSchema, {
+      schemaVersion: 1, status: 'blocked', code,
+      summary: code === 'IMPACT_ERROR' ? 'Change impact is unavailable.' : message,
+      data: { filePath: '', depth: 2, symbols: [], affected: [] }, evidence: [],
+      diagnostics: diagnostic(message, code), truncated: false, retryable: false,
+    });
+  };
+  return {
+    name: 'trace_change_impact', title: 'Trace structural change impact',
+    description: 'In one bounded read, follows inbound file imports and Nest injection/binding consumers for classes declared in an indexed file. Structural evidence, not runtime execution proof.',
+    inputSchema: {
+      filePath: z.string().min(1).describe('Indexed repository-relative TypeScript file path.'),
+      depth: z.number().int().min(1).max(4).optional().describe('Maximum inbound import depth; defaults to two.'),
+      worktree: worktreeArgument,
+    },
+    outputSchema: changeImpactResultSchema,
+    invoke: async (args) => {
+      const input = z.object({ filePath: z.string().min(1), depth: z.number().int().min(1).max(4).optional(), worktree: worktreeArgument }).parse(args);
+      const query = { filePath: input.filePath, ...(input.depth === undefined ? {} : { depth: input.depth }) };
+      if (input.worktree === undefined) return toStructuredToolResult(changeImpactResultSchema, executeChangeImpact(query));
+      const selection = await selectWorktree(input.worktree);
+      if (!selection.ok) return failure(selection.message, selection.code);
+      try {
+        const { result, worktree } = await selection.views.read(selection.worktree, { embed: false },
+          (view) => executeChangeImpact(query, { db: view.db }));
+        return toStructuredToolResult(changeImpactResultSchema, { ...result, worktree });
+      } catch (error: unknown) {
+        return failure(error instanceof Error ? error.message : String(error));
+      }
+    },
+    rootUnavailable: failure,
+  };
+}
+
 function publishNestGraph(): PublishedTool {
-  const failure = (message: string) => toStructuredToolResult(nestGraphResultSchema, {
-    schemaVersion: 1, status: 'blocked', code: 'NEST_GRAPH_ERROR', summary: 'The NestJS graph is unavailable.',
-    data: { name: '', normalizedName: '', direction: 'module', bindings: [], injections: [] }, evidence: [], diagnostics: diagnostic(message, 'NEST_GRAPH_ERROR'), truncated: false, retryable: false,
+  const failure = (message: string, reason?: string) => {
+    const code = reason === 'WORKTREE_NOT_A_GIT_REPO' || reason === 'WORKTREE_OUTSIDE_REPOSITORY'
+      ? reason : 'NEST_GRAPH_ERROR';
+    return toStructuredToolResult(nestGraphResultSchema, {
+    schemaVersion: 1, status: 'blocked', code,
+    summary: code === 'NEST_GRAPH_ERROR' ? 'The NestJS graph is unavailable.' : message,
+    data: { name: '', normalizedName: '', direction: 'module', bindings: [], injections: [] }, evidence: [], diagnostics: diagnostic(message, code), truncated: false, retryable: false,
   });
+  };
   return {
     name: 'query_nest_graph', title: 'Query NestJS wiring',
     description: 'Finds providers, injection consumers, or module bindings in the authorized project.',
@@ -149,7 +212,7 @@ function publishNestGraph(): PublishedTool {
       const query = { name: input.name, direction: input.direction };
       if (input.worktree === undefined) return toStructuredToolResult(nestGraphResultSchema, executeNestGraph(query));
       const selection = await selectWorktree(input.worktree);
-      if (!selection.ok) return failure(selection.message);
+      if (!selection.ok) return failure(selection.message, selection.code);
       try {
         const { result, worktree } = await selection.views.read(selection.worktree, { embed: false }, (view) => executeNestGraph(query, { db: view.db }));
         return toStructuredToolResult(nestGraphResultSchema, { ...result, worktree });
@@ -211,7 +274,19 @@ function publishAskCodebase(readReadiness: () => SemanticSearchReadiness): Publi
       const search = { query: input.query, ...(input.context === undefined ? {} : { context: input.context }) };
       if (input.worktree === undefined) return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(search)).result);
       const selection = await selectWorktree(input.worktree);
-      if (!selection.ok) return unavailable(selection.message);
+      if (!selection.ok) {
+        const code = selection.code === 'WORKTREE_NOT_A_GIT_REPO' || selection.code === 'WORKTREE_OUTSIDE_REPOSITORY'
+          ? selection.code : 'CODEBASE_INDEX_UNAVAILABLE';
+        return toStructuredToolResult(codebaseSearchResultSchema, {
+          schemaVersion: 1, status: 'blocked', code,
+          summary: code === 'CODEBASE_INDEX_UNAVAILABLE' ? 'Semantic search is unavailable.' : selection.message,
+          data: { ...emptyData, query: input.query }, evidence: [], diagnostics: diagnostic(selection.message, code),
+          truncated: false, retryable: false,
+          nextAction: code === 'CODEBASE_INDEX_UNAVAILABLE'
+            ? 'Read get_index_status and retry after durable coverage is ready.'
+            : 'Use a session whose Umbra server serves the requested repository.',
+        });
+      }
       const scope: WorktreeIndexScope = { read: (read) => selection.views.read(selection.worktree, { embed: true }, read) };
       return toStructuredToolResult(codebaseSearchResultSchema, (await executeCodebaseSearch(search, scope)).result);
     },
@@ -361,7 +436,7 @@ export function buildToolCatalog(options: {
         });
       }
     },
-  }, publishListAdrs(), publishDependencyGraph(), publishNestGraph(), publishIntegrityCheck()];
+  }, publishListAdrs(), publishDependencyGraph(), publishChangeImpact(), publishNestGraph(), publishIntegrityCheck()];
   if (options.projectRootReady === undefined) return catalog;
   const rooted = catalog.map((tool) => tool.name === 'get_index_status' ? tool : { ...tool, invoke: async (args: Record<string, unknown>) => options.projectRootReady?.() ? tool.invoke(args) : tool.rootUnavailable?.(options.projectRootMessage?.() ?? 'No validated project root is available') ?? tool.invoke(args) });
   return options.conversationService === undefined

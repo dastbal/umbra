@@ -77,7 +77,7 @@ describe('resolveWorktree', () => {
   it('refuses a directory outside every registered worktree', async () => {
     const outside = fs.mkdtempSync(path.join(base, 'outside-'));
     await expect(resolveWorktree(repo, outside)).rejects.toBeInstanceOf(WorktreeResolutionError);
-    await expect(resolveWorktree(repo, outside)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+    await expect(resolveWorktree(repo, outside)).rejects.toMatchObject({ code: 'WORKTREE_OUTSIDE_REPOSITORY' });
   });
 
   it('refuses a symlink inside the checkout that points outside it', async () => {
@@ -85,21 +85,37 @@ describe('resolveWorktree', () => {
     const link = path.join(repo, 'escape');
     fs.symlinkSync(outside, link);
     try {
-      await expect(resolveWorktree(repo, link)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+      await expect(resolveWorktree(repo, link)).rejects.toMatchObject({ code: 'WORKTREE_OUTSIDE_REPOSITORY' });
     } finally {
       fs.unlinkSync(link);
     }
   });
 
   it('refuses a `..` path that leaves the worktree', async () => {
-    await expect(resolveWorktree(repo, path.join(repo, '..'))).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+    await expect(resolveWorktree(repo, path.join(repo, '..'))).rejects.toMatchObject({ code: 'WORKTREE_OUTSIDE_REPOSITORY' });
   });
 
   it('refuses a worktree of another repository', async () => {
     const other = path.join(base, 'other');
     fs.mkdirSync(other);
     git(other, 'init', '-q');
-    await expect(resolveWorktree(repo, other)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+    await expect(resolveWorktree(repo, other)).rejects.toMatchObject({ code: 'WORKTREE_OUTSIDE_REPOSITORY' });
+  });
+
+  it('reads the base index when a non-git pinned root selects itself', async () => {
+    const vault = path.join(base, 'vault');
+    fs.mkdirSync(vault);
+    for (const name of ['backend', 'frontend']) {
+      const nested = path.join(vault, name);
+      fs.mkdirSync(nested);
+      git(nested, 'init', '-q');
+    }
+    await expect(resolveWorktree(vault, vault)).resolves.toMatchObject({
+      root: vault, isPinnedRoot: true, baseOnly: true,
+    });
+    await expect(resolveWorktree(vault, path.join(vault, 'backend'))).rejects.toMatchObject({
+      code: 'WORKTREE_NOT_A_GIT_REPO',
+    });
   });
 
   it('reports git failure as a typed refusal', async () => {
@@ -143,7 +159,7 @@ describe('resolveWorktree at the repository boundary', () => {
     fs.symlinkSync(other, path.join(pinned, 'sub'));
     git(pinned, 'add', '.');
     git(pinned, 'commit', '-q', '-m', 'pinned');
-    await expect(resolveWorktree(pinned, other)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+    await expect(resolveWorktree(pinned, other)).rejects.toMatchObject({ code: 'WORKTREE_OUTSIDE_REPOSITORY' });
   });
 
   it('refuses a submodule whose .git file points at another repository', async () => {
@@ -152,7 +168,7 @@ describe('resolveWorktree at the repository boundary', () => {
     fs.writeFileSync(path.join(pinned, 'sub', '.git'), `gitdir: ${path.join(other, '.git')}\n`);
     git(pinned, 'add', '.gitmodules', 'package.json');
     git(pinned, 'commit', '-q', '-m', 'pinned');
-    await expect(resolveWorktree(pinned, other)).rejects.toMatchObject({ code: 'WORKTREE_NOT_REGISTERED' });
+    await expect(resolveWorktree(pinned, other)).rejects.toMatchObject({ code: 'WORKTREE_OUTSIDE_REPOSITORY' });
   });
 
   it('refuses any selection when the served root is a subdirectory of its repository', async () => {
